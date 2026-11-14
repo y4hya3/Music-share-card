@@ -1,0 +1,601 @@
+package com.example.ui
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import com.example.repository.MediaNotificationRepository
+import com.example.service.MusicNotificationListenerService
+import com.example.ui.components.BlurredAlbumBackground
+import com.example.ui.components.EditCardBottomSheet
+import com.example.ui.components.MusicStoryCard
+import com.example.ui.components.NotificationStatusBanner
+import com.example.ui.components.ShareActionsBar
+import com.example.util.CardShareManager
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/**
+ * Adaptive Main Share Screen optimized for both compact phones (Redmi 9C) and
+ * 10.4" tablets in portrait & landscape (Samsung Galaxy Tab A7 LTE):
+ * - Landscape wide screens (>= 600dp width & landscape): Two-pane layout (floating card left,
+ *   controls + external blur slider + 3x2 share grid right) with zero clipping.
+ * - Portrait phones & tablets: Vertical layout with dynamic BoxWithConstraints card scaling.
+ */
+@Composable
+fun BitChordShareScreen(
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    val currentTrack by MediaNotificationRepository.currentTrack.collectAsState()
+    val palette by MediaNotificationRepository.extractedPalette.collectAsState()
+    val styleConfig by MediaNotificationRepository.styleConfig.collectAsState()
+    val isAccessGranted by MediaNotificationRepository.isNotificationAccessEnabled.collectAsState()
+
+    var showEditSheet by remember { mutableStateOf(false) }
+    var isProcessingAction by remember { mutableStateOf(false) }
+    var actionStatusText by remember { mutableStateOf("") }
+
+    fun triggerSaveToGallery() {
+        if (!isProcessingAction) {
+            isProcessingAction = true
+            actionStatusText = "Saving to Pictures/BitChord..."
+            coroutineScope.launch {
+                try {
+                    CardShareManager.saveCardToGallery(
+                        context = context,
+                        track = currentTrack,
+                        palette = palette,
+                        styleConfig = styleConfig
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Error saving: ${e.message}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    isProcessingAction = false
+                }
+            }
+        }
+    }
+
+    val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            triggerSaveToGallery()
+        } else {
+            Toast.makeText(context, "Storage permission needed to save image", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun handleSaveImageClick() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            val hasPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasPerm) {
+                legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                return
+            }
+        }
+        triggerSaveToGallery()
+    }
+
+    fun handleRefreshClick() {
+        val accessNow = MusicNotificationListenerService.isNotificationAccessGranted(context)
+        if (!accessNow) {
+            Toast.makeText(context, "Enable Notification Access to read music cover art", Toast.LENGTH_SHORT).show()
+            MusicNotificationListenerService.openNotificationAccessSettings(context)
+            return
+        }
+        val synced = MediaNotificationRepository.refreshFromActiveMedia(context)
+        if (synced) {
+            val syncedTrack = MediaNotificationRepository.currentTrack.value
+            Toast.makeText(context, "Synced: ${syncedTrack.title}", Toast.LENGTH_SHORT).show()
+        } else {
+            MusicNotificationListenerService.rebindIfPossible(context)
+            Toast.makeText(context, "Play a song in any music app, then tap Refresh", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun runShareAction(status: String, block: suspend () -> Unit) {
+        if (!isProcessingAction) {
+            isProcessingAction = true
+            actionStatusText = status
+            coroutineScope.launch {
+                try {
+                    block()
+                } finally {
+                    isProcessingAction = false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        MediaNotificationRepository.refreshFromActiveMedia(context)
+    }
+
+    LaunchedEffect(isAccessGranted) {
+        if (isAccessGranted) {
+            MediaNotificationRepository.refreshFromActiveMedia(context)
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color(0xFF0E0E12))
+    ) {
+        // LAYER 0: Full-screen blurred song/album cover background + rgba(0, 0, 0, 0.25) overlay
+        BlurredAlbumBackground(
+            track = currentTrack,
+            palette = palette,
+            styleConfig = styleConfig,
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("fullscreen_blurred_background")
+        )
+
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = Color.Transparent,
+            contentWindowInsets = WindowInsets.safeDrawing
+        ) { innerPadding ->
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+            ) {
+                val isWideLandscape = maxWidth >= 600.dp && maxWidth > maxHeight
+                val isPortraitTablet = maxWidth >= 600.dp && !isWideLandscape
+
+                if (isWideLandscape) {
+                    // TABLET LANDSCAPE TWO-PANE LAYOUT (e.g., Samsung Galaxy Tab A7 LTE Landscape)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(24.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Left Pane: Centered Floating Share Card scaled to fit viewport height cleanly
+                        BoxWithConstraints(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val adaptiveArtMax = (maxHeight - 170.dp).coerceIn(150.dp, 360.dp)
+                            val adaptiveCardMax = minOf(maxWidth * 0.85f, 380.dp)
+
+                            MusicStoryCard(
+                                track = currentTrack,
+                                palette = palette,
+                                styleConfig = styleConfig,
+                                maxCardWidth = adaptiveCardMax,
+                                maxArtSize = adaptiveArtMax,
+                                modifier = Modifier.testTag("center_story_card")
+                            )
+
+                            if (isProcessingAction) {
+                                ProcessingOverlay(actionStatusText)
+                            }
+                        }
+
+                        // Right Pane: Header, Banner, External Blur Slider, and 3x2 Share Grid
+                        Column(
+                            modifier = Modifier
+                                .widthIn(min = 310.dp, max = 420.dp)
+                                .fillMaxHeight()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.SpaceBetween,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            ShareScreenTopBar(
+                                onClose = { findActivity(context)?.finish() },
+                                onEdit = { showEditSheet = true },
+                                onRefresh = { handleRefreshClick() },
+                                compactTitle = true
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            NotificationStatusBanner(
+                                isAccessGranted = isAccessGranted,
+                                onEnableClick = {
+                                    MusicNotificationListenerService.openNotificationAccessSettings(context)
+                                },
+                                onRefreshClick = { handleRefreshClick() }
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            ExternalBlurControlPill(
+                                blurRadiusPx = styleConfig.backgroundBlurRadius,
+                                onBlurChange = { newRadius ->
+                                    MediaNotificationRepository.updateStyleConfig { current ->
+                                        current.copy(
+                                            useBlurredAlbumBackground = true,
+                                            backgroundBlurRadius = newRadius.coerceIn(0f, 40f)
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            ShareActionsBar(
+                                isGridLayout = true,
+                                onCopyLink = {
+                                    CardShareManager.copyTrackLink(context, currentTrack, styleConfig.brandMode)
+                                },
+                                onSaveToGallery = { handleSaveImageClick() },
+                                onShareWhatsApp = {
+                                    runShareAction("Preparing for WhatsApp...") {
+                                        CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
+                                    }
+                                },
+                                onShareMessages = {
+                                    runShareAction("Preparing for Messages...") {
+                                        CardShareManager.shareToMessages(context, currentTrack, palette, styleConfig)
+                                    }
+                                },
+                                onShareStories = {
+                                    runShareAction("Preparing 9:16 Story...") {
+                                        CardShareManager.shareToStories(context, currentTrack, palette, styleConfig)
+                                    }
+                                },
+                                onNativeShare = {
+                                    runShareAction("Opening Share Sheet...") {
+                                        CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                                    }
+                                },
+                                modifier = Modifier.testTag("bottom_share_actions_bar")
+                            )
+                        }
+                    }
+                } else {
+                    // PORTRAIT LAYOUT (Redmi 9C & Samsung Galaxy Tab A7 Portrait)
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        ShareScreenTopBar(
+                            onClose = { findActivity(context)?.finish() },
+                            onEdit = { showEditSheet = true },
+                            onRefresh = { handleRefreshClick() },
+                            modifier = Modifier
+                                .widthIn(max = if (isPortraitTablet) 640.dp else 600.dp)
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+
+                        NotificationStatusBanner(
+                            isAccessGranted = isAccessGranted,
+                            onEnableClick = {
+                                MusicNotificationListenerService.openNotificationAccessSettings(context)
+                            },
+                            onRefreshClick = { handleRefreshClick() },
+                            modifier = Modifier
+                                .widthIn(max = if (isPortraitTablet) 560.dp else 600.dp)
+                                .padding(horizontal = 20.dp, vertical = 4.dp)
+                        )
+
+                        // CENTER: Sharp Floating Share Card sized dynamically to prevent clipping
+                        BoxWithConstraints(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val maxW = if (isPortraitTablet) minOf(maxWidth * 0.72f, 390.dp) else minOf(maxWidth * 0.88f, 330.dp)
+                            val maxArt = (maxHeight - 150.dp).coerceIn(145.dp, if (isPortraitTablet) 360.dp else 300.dp)
+
+                            MusicStoryCard(
+                                track = currentTrack,
+                                palette = palette,
+                                styleConfig = styleConfig,
+                                maxCardWidth = maxW,
+                                maxArtSize = maxArt,
+                                modifier = Modifier.testTag("center_story_card")
+                            )
+
+                            if (isProcessingAction) {
+                                ProcessingOverlay(actionStatusText)
+                            }
+                        }
+
+                        // EXTERNAL BLUR SLIDER CONTROL (0px..40px, kept strictly outside card)
+                        ExternalBlurControlPill(
+                            blurRadiusPx = styleConfig.backgroundBlurRadius,
+                            onBlurChange = { newRadius ->
+                                MediaNotificationRepository.updateStyleConfig { current ->
+                                    current.copy(
+                                        useBlurredAlbumBackground = true,
+                                        backgroundBlurRadius = newRadius.coerceIn(0f, 40f)
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .widthIn(max = 520.dp)
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 4.dp)
+                        )
+
+                        // BOTTOM SHARE ACTIONS BAR
+                        ShareActionsBar(
+                            onCopyLink = {
+                                CardShareManager.copyTrackLink(context, currentTrack, styleConfig.brandMode)
+                            },
+                            onSaveToGallery = { handleSaveImageClick() },
+                            onShareWhatsApp = {
+                                runShareAction("Preparing for WhatsApp...") {
+                                    CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
+                                }
+                            },
+                            onShareMessages = {
+                                runShareAction("Preparing for Messages...") {
+                                    CardShareManager.shareToMessages(context, currentTrack, palette, styleConfig)
+                                }
+                            },
+                            onShareStories = {
+                                runShareAction("Preparing 9:16 Story...") {
+                                    CardShareManager.shareToStories(context, currentTrack, palette, styleConfig)
+                                }
+                            },
+                            onNativeShare = {
+                                runShareAction("Opening Share Sheet...") {
+                                    CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                                }
+                            },
+                            modifier = Modifier.testTag("bottom_share_actions_bar")
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showEditSheet) {
+        EditCardBottomSheet(
+            palette = palette,
+            styleConfig = styleConfig,
+            currentTrack = currentTrack,
+            onDismiss = { showEditSheet = false },
+            onStyleChange = { newConfig ->
+                MediaNotificationRepository.updateStyleConfig { newConfig }
+            },
+            onTrackSelect = { selectedTrack ->
+                MediaNotificationRepository.selectSampleTrack(selectedTrack)
+            }
+        )
+    }
+}
+
+@Composable
+private fun ShareScreenTopBar(
+    onClose: () -> Unit,
+    onEdit: () -> Unit,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+    compactTitle: Boolean = false
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        IconButton(
+            onClick = onClose,
+            modifier = Modifier
+                .size(48.dp)
+                .background(Color.Black.copy(alpha = 0.28f), CircleShape)
+                .testTag("top_bar_close_button")
+        ) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Close",
+                tint = Color.White
+            )
+        }
+
+        Text(
+            text = "Share this music",
+            color = Color.White,
+            fontSize = if (compactTitle) 15.sp else 17.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.testTag("top_bar_title")
+        )
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            FilledTonalButton(
+                onClick = onEdit,
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = Color.White.copy(alpha = 0.92f),
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(50),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .defaultMinSize(minHeight = 44.dp)
+                    .testTag("card_edit_pill_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Edit,
+                    contentDescription = "Edit card",
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = "Edit",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            IconButton(
+                onClick = onRefresh,
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(Color.Black.copy(alpha = 0.28f), CircleShape)
+                    .testTag("top_bar_refresh_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "Refresh",
+                    tint = Color.White
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProcessingOverlay(statusText: String) {
+    Surface(
+        color = Color.Black.copy(alpha = 0.72f),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.padding(24.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 28.dp, vertical = 22.dp)
+        ) {
+            CircularProgressIndicator(color = Color(0xFFFF2B44))
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = statusText,
+                color = Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExternalBlurControlPill(
+    blurRadiusPx: Float,
+    onBlurChange: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val pillShape = RoundedCornerShape(18.dp)
+    Column(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.44f), pillShape)
+            .border(1.dp, Color.White.copy(alpha = 0.14f), pillShape)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .testTag("external_blur_control_container")
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Background Blur",
+                color = Color.White.copy(alpha = 0.92f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "${blurRadiusPx.roundToInt()}px",
+                color = Color.White.copy(alpha = 0.78f),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.testTag("background_blur_value_text")
+            )
+        }
+
+        Slider(
+            value = blurRadiusPx.coerceIn(0f, 40f),
+            onValueChange = onBlurChange,
+            valueRange = 0f..40f,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color(0xFFFF2B44),
+                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .testTag("background_blur_slider")
+        )
+    }
+}
+
+private tailrec fun findActivity(context: Context): Activity? {
+    return when (context) {
+        is Activity -> context
+        is ContextWrapper -> findActivity(context.baseContext)
+        else -> null
+    }
+}

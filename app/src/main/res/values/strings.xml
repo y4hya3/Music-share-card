@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">BitChord</string>
+    <string name="service_name">BitChord Media Listener</string>
+    <string name="notification_listener_description">Detects currently playing music from Spotify, Apple Music, YouTube Music, and other media players to build shareable story cards.</string>
+    <string name="share_this_music">Share this music</string>
+    <string name="edit">Edit</string>
+    <string name="copy_link">Copy link</string>
+    <string name="share_story">Share story</string>
+    <string name="save_image">Save image</string>
+    <string name="permission_required_title">Notification Access Required</string>
+    <string name="permission_required_desc">BitChord needs Notification Listener Access to detect active playback, title, artist, and album artwork from Spotify, YouTube Music, etc.</string>
+    <string name="enable_access">Enable Access</string>
+</resources>
