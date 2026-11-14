@@ -40,6 +40,13 @@ class ExampleUnitTest {
         )
         assertEquals("Spotify", spotifyConfig.brandMode.wordmark)
         assertEquals(Color(0xFF1DB954), spotifyConfig.resolveLogoBadgeColor(CardPalette.Default))
+
+        val appleMusicConfig = CardStyleConfig(
+            brandMode = CardBrandMode.APPLE_MUSIC,
+            logoColorMode = LogoColorMode.RED
+        )
+        assertEquals("Apple Music", appleMusicConfig.brandMode.wordmark)
+        assertEquals(Color(0xFFFF2B44), appleMusicConfig.resolveLogoBadgeColor(CardPalette.Default))
     }
 
     @Test

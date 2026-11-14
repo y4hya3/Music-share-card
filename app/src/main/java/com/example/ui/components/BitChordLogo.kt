@@ -12,7 +12,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
@@ -38,6 +40,7 @@ import com.example.model.LogoColorMode
  * Supports switching in Edit between:
  * - Bitchord: uploaded Bitchord squircle soundwave badge + "Bitchord" text
  * - Spotify: classic circular 3-arc soundwave badge + "Spotify" text
+ * - Apple Music: rounded squircle badge + beamed dual music note + "Apple Music" text
  */
 @Composable
 fun BitChordBadge(
@@ -99,7 +102,6 @@ fun BitChordBadge(
                         val strokeMid = Stroke(width = diameter * 0.088f, cap = StrokeCap.Round)
                         val strokeBot = Stroke(width = diameter * 0.075f, cap = StrokeCap.Round)
 
-                        // Top widest arc
                         val topPath = Path().apply {
                             moveTo(center.x - radius * 0.56f, center.y - radius * 0.22f)
                             quadraticTo(
@@ -109,7 +111,6 @@ fun BitChordBadge(
                         }
                         drawPath(topPath, color = waveColor, style = strokeTop)
 
-                        // Middle arc
                         val midPath = Path().apply {
                             moveTo(center.x - radius * 0.48f, center.y + radius * 0.04f)
                             quadraticTo(
@@ -119,7 +120,6 @@ fun BitChordBadge(
                         }
                         drawPath(midPath, color = waveColor, style = strokeMid)
 
-                        // Bottom shortest arc
                         val botPath = Path().apply {
                             moveTo(center.x - radius * 0.39f, center.y + radius * 0.28f)
                             quadraticTo(
@@ -129,6 +129,67 @@ fun BitChordBadge(
                         }
                         drawPath(botPath, color = waveColor, style = strokeBot)
                     }
+                }
+            }
+            CardBrandMode.APPLE_MUSIC -> {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val d = this.size.minDimension
+                    val corner = d * 0.24f
+                    drawRoundRect(
+                        color = badgeColor,
+                        topLeft = Offset.Zero,
+                        size = Size(d, d),
+                        cornerRadius = CornerRadius(corner, corner)
+                    )
+
+                    // Beamed double eighth note inside badge
+                    val stemStroke = d * 0.09f
+                    val leftStemX = d * 0.39f
+                    val rightStemX = d * 0.69f
+                    val topYLeft = d * 0.29f
+                    val topYRight = d * 0.23f
+                    val botYLeft = d * 0.67f
+                    val botYRight = d * 0.61f
+
+                    // Slanted top beam
+                    val beamPath = Path().apply {
+                        moveTo(leftStemX - stemStroke * 0.45f, topYLeft)
+                        lineTo(rightStemX + stemStroke * 0.45f, topYRight)
+                        lineTo(rightStemX + stemStroke * 0.45f, topYRight + d * 0.12f)
+                        lineTo(leftStemX - stemStroke * 0.45f, topYLeft + d * 0.12f)
+                        close()
+                    }
+                    drawPath(beamPath, color = contrastColor)
+
+                    // Left & right stems
+                    drawLine(
+                        color = contrastColor,
+                        start = Offset(leftStemX, topYLeft + d * 0.04f),
+                        end = Offset(leftStemX, botYLeft),
+                        strokeWidth = stemStroke,
+                        cap = StrokeCap.Round
+                    )
+                    drawLine(
+                        color = contrastColor,
+                        start = Offset(rightStemX, topYRight + d * 0.04f),
+                        end = Offset(rightStemX, botYRight),
+                        strokeWidth = stemStroke,
+                        cap = StrokeCap.Round
+                    )
+
+                    // Left & right note heads
+                    val headRx = d * 0.115f
+                    val headRy = d * 0.085f
+                    drawOval(
+                        color = contrastColor,
+                        topLeft = Offset(leftStemX - headRx * 1.55f, botYLeft - headRy * 0.9f),
+                        size = Size(headRx * 2f, headRy * 2f)
+                    )
+                    drawOval(
+                        color = contrastColor,
+                        topLeft = Offset(rightStemX - headRx * 1.55f, botYRight - headRy * 0.9f),
+                        size = Size(headRx * 2f, headRy * 2f)
+                    )
                 }
             }
         }

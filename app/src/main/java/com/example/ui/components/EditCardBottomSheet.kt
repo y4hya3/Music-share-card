@@ -130,15 +130,16 @@ fun EditCardBottomSheet(
                 color = Color.White.copy(alpha = 0.9f)
             )
             Text(
-                text = "Choose whether the share card displays Bitchord or Spotify branding.",
+                text = "Choose whether the share card displays Bitchord, Spotify, or Apple Music branding.",
                 fontSize = 12.sp,
                 color = Color.White.copy(alpha = 0.6f),
                 modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
             )
 
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 BrandModeChip(
                     brandMode = CardBrandMode.BITCHORD,
@@ -158,9 +159,7 @@ fun EditCardBottomSheet(
                             )
                         )
                     },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("brand_mode_bitchord")
+                    modifier = Modifier.testTag("brand_mode_bitchord")
                 )
 
                 BrandModeChip(
@@ -181,9 +180,28 @@ fun EditCardBottomSheet(
                             )
                         )
                     },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("brand_mode_spotify")
+                    modifier = Modifier.testTag("brand_mode_spotify")
+                )
+
+                BrandModeChip(
+                    brandMode = CardBrandMode.APPLE_MUSIC,
+                    previewBadgeColor = Color(0xFFFA243C),
+                    previewLogoColorMode = LogoColorMode.RED,
+                    isSelected = styleConfig.brandMode == CardBrandMode.APPLE_MUSIC,
+                    onClick = {
+                        val nextColor = if (styleConfig.logoColorMode == LogoColorMode.GREEN) {
+                            LogoColorMode.RED
+                        } else {
+                            styleConfig.logoColorMode
+                        }
+                        onStyleChange(
+                            styleConfig.copy(
+                                brandMode = CardBrandMode.APPLE_MUSIC,
+                                logoColorMode = nextColor
+                            )
+                        )
+                    },
+                    modifier = Modifier.testTag("brand_mode_apple_music")
                 )
             }
 

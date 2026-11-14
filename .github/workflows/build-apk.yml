@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -183,16 +185,34 @@ jobs:
           RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
 
-          NOTES_FILE="$(mktemp "${RUNNER_TEMP}/release-notes-XXXXXX.md")"
-          cat > "$NOTES_FILE" <<EOF
-          Automatically generated debug APK built by GitHub Actions.
+          RECENT_COMMITS="$(git log -n 5 --pretty=format:"- %s" 2>/dev/null || echo "- Initial automated release")"
 
-          - **Workflow Run Number:** ${GITHUB_RUN_NUMBER}
-          - **Workflow Run Attempt:** ${GITHUB_RUN_ATTEMPT}
-          - **Source Commit SHA:** ${GITHUB_SHA}
-          - **Purpose:** Testing only (this is not a Google Play Store production release).
-          - **Signing:** Signed only with a temporary debug keystore generated during the build.
-          EOF
+          NOTES_FILE="$(mktemp "${RUNNER_TEMP}/release-notes-XXXXXX.md")"
+          {
+            printf '## APK Name\n'
+            printf '- **Filename:** `app-debug.apk`\n'
+            printf -- '- **Direct Download (Latest):** https://github.com/%s/releases/latest/download/app-debug.apk\n\n' "${GITHUB_REPOSITORY}"
+            cat <<'NOTES_EOF'
+          ## News
+          - Added **Apple Music** name and beamed eighth-note icon option inside the **Edit** sheet alongside **Bitchord** and **Spotify**.
+          - Updated the launcher icon to a custom **Bitchord x Spotify x Apple Music** inspired fusion emblem with full adaptive and legacy density support.
+          - Added comprehensive project **README** documentation with features, device compatibility, and direct APK download links.
+
+          ## Fixes
+          - Fixed automatic live cover art and track syncing from `MediaSessionManager` active sessions, `MediaController` callbacks, `content://`/`https://` URIs, and notification large-icon fallbacks.
+          - Fixed button touch responsiveness, duplicate window-inset padding, Android 11+ share `<queries>`, `FileProvider` URI permissions, and legacy Android 7–9 gallery save permissions.
+          - Eliminated silent `HARDWARE` bitmap crashes by normalizing cover art to software `ARGB_8888`.
+
+          ## Improvements
+          - Optimized CPU, GPU, and RAM usage for **Redmi 9C** (Helio G35, 2-3GB RAM) and **Samsung Galaxy Tab A7 LTE** (Snapdragon 662, Adreno 610, 10.4" portrait & landscape two-pane layout).
+          - Pre-scaled blur textures, removed multi-megabyte StackBlur lookup allocations, added sampled bitmap decoding, and recycled export bitmaps immediately.
+          NOTES_EOF
+            printf -- '- Preserved all previous GitHub Releases under unique build tags (`%s`).\n\n' "${RELEASE_TAG}"
+            printf '## Recent Commits\n%s\n\n' "${RECENT_COMMITS}"
+            printf -- '---\n'
+            printf -- '- **Build Info:** Automatically generated debug APK by GitHub Actions (Run #%s, Attempt #%s, Commit `%s`).\n' "${GITHUB_RUN_NUMBER}" "${GITHUB_RUN_ATTEMPT}" "${GITHUB_SHA}"
+            printf -- '- **Testing & Signing:** Intended for testing only (not a Play Store production release); signed only with a temporary debug keystore.\n'
+          } > "$NOTES_FILE"
 
           gh release create "$RELEASE_TAG" "$PREPARED_APK" \
             --title "$RELEASE_TITLE" \

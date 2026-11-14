@@ -4,7 +4,8 @@ import androidx.compose.ui.graphics.Color
 
 enum class CardBrandMode(val label: String, val wordmark: String) {
     BITCHORD("Bitchord", "Bitchord"),
-    SPOTIFY("Spotify", "Spotify")
+    SPOTIFY("Spotify", "Spotify"),
+    APPLE_MUSIC("Apple Music", "Apple Music")
 }
 
 enum class LogoColorMode(val label: String) {

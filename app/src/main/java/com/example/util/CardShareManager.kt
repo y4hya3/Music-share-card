@@ -501,6 +501,67 @@ object CardShareManager {
 
                 canvas.restore()
             }
+            CardBrandMode.APPLE_MUSIC -> {
+                val corner = badgeSize * 0.24f
+                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = badgeColor
+                }
+                canvas.drawRoundRect(badgeRect, corner, corner, bgPaint)
+
+                val contrast = if (colorLuminance(badgeColor) > 0.72f) 0xFF141418.toInt() else AndroidColor.WHITE
+                val left = badgeRect.left
+                val top = badgeRect.top
+                val stemStroke = badgeSize * 0.09f
+                val leftStemX = left + badgeSize * 0.39f
+                val rightStemX = left + badgeSize * 0.69f
+                val topYLeft = top + badgeSize * 0.29f
+                val topYRight = top + badgeSize * 0.23f
+                val botYLeft = top + badgeSize * 0.67f
+                val botYRight = top + badgeSize * 0.61f
+
+                val notePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = contrast
+                    style = Paint.Style.FILL
+                }
+                val beamPath = Path().apply {
+                    moveTo(leftStemX - stemStroke * 0.45f, topYLeft)
+                    lineTo(rightStemX + stemStroke * 0.45f, topYRight)
+                    lineTo(rightStemX + stemStroke * 0.45f, topYRight + badgeSize * 0.12f)
+                    lineTo(leftStemX - stemStroke * 0.45f, topYLeft + badgeSize * 0.12f)
+                    close()
+                }
+                canvas.drawPath(beamPath, notePaint)
+
+                val stemPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = contrast
+                    style = Paint.Style.STROKE
+                    strokeWidth = stemStroke
+                    strokeCap = Paint.Cap.ROUND
+                }
+                canvas.drawLine(leftStemX, topYLeft + badgeSize * 0.04f, leftStemX, botYLeft, stemPaint)
+                canvas.drawLine(rightStemX, topYRight + badgeSize * 0.04f, rightStemX, botYRight, stemPaint)
+
+                val headRx = badgeSize * 0.115f
+                val headRy = badgeSize * 0.085f
+                canvas.drawOval(
+                    RectF(
+                        leftStemX - headRx * 1.55f,
+                        botYLeft - headRy * 0.9f,
+                        leftStemX + headRx * 0.45f,
+                        botYLeft + headRy * 1.1f
+                    ),
+                    notePaint
+                )
+                canvas.drawOval(
+                    RectF(
+                        rightStemX - headRx * 1.55f,
+                        botYRight - headRy * 0.9f,
+                        rightStemX + headRx * 0.45f,
+                        botYRight + headRy * 1.1f
+                    ),
+                    notePaint
+                )
+            }
         }
 
         if (showWordmark) {
