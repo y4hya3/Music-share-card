@@ -72,16 +72,17 @@ object CardShareManager {
 
         // 1. Draw Background: Full-screen blurred album cover (`object-fit: cover`) OR palette gradient
         if (styleConfig.useBlurredAlbumBackground && safeAlbumArt != null) {
+            val exportBlurMaxDim = if (styleConfig.backgroundBlurRadius <= 10f) 480 else 360
             val blurredBg = BitmapBlurUtils.blurBitmap(
                 source = safeAlbumArt,
                 radiusPx = styleConfig.backgroundBlurRadius,
-                maxDimension = 260
+                maxDimension = exportBlurMaxDim
             )
             drawCenterCroppedBitmap(
                 canvas = canvas,
                 bitmap = blurredBg,
                 destRect = RectF(0f, 0f, width.toFloat(), height.toFloat()),
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
             )
             if (blurredBg !== safeAlbumArt && !blurredBg.isRecycled) {
                 blurredBg.recycle()
@@ -225,7 +226,7 @@ object CardShareManager {
                 canvas = canvas,
                 bitmap = albumArt,
                 destRect = artRect,
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
             )
         } else {
             val placeholderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -302,7 +303,7 @@ object CardShareManager {
                 canvas = canvas,
                 bitmap = albumArt,
                 destRect = artRect,
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
             )
         } else {
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.vibrantColor.toArgb() }
@@ -380,7 +381,7 @@ object CardShareManager {
                 canvas = canvas,
                 bitmap = albumArt,
                 destRect = artRect,
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
             )
         } else {
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.vibrantColor.toArgb() }

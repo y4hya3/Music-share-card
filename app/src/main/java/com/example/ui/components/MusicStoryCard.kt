@@ -32,6 +32,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
@@ -58,8 +59,8 @@ import kotlin.math.roundToInt
  * Full-screen blurred album cover background (`ContentScale.Crop` / object-fit: cover).
  * Performance-tuned for both Redmi 9C (PowerVR GE8320 / Helio G35 / API 29-30) and
  * Samsung Galaxy Tab A7 LTE (Adreno 610 / Snapdragon 662 / API 29-31):
- * - Pre-scales the background texture to <=240px so GPU RenderEffect (API 31+) and
- *   CPU StackBlur (API 24-30) both run at smooth 60fps with minimal memory overhead.
+ * - Uses high-res crisp texture at 0px sharp blur and progressive mipmap scaling at active blur
+ *   so backgrounds never look blocky or chopped on large screens.
  */
 @Composable
 fun BlurredAlbumBackground(
@@ -72,32 +73,32 @@ fun BlurredAlbumBackground(
     val quantizedRadius = blurRadius.roundToInt()
     val albumArt = track.albumArt
 
-    // Lightweight pre-scaled bitmap for fast GPU/CPU background blurring
-    val lightweightBgBitmap = remember(albumArt) {
+    val sharpOrGpuBgBitmap = remember(albumArt) {
         if (albumArt != null) {
-            BitmapBlurUtils.toSafeSoftwareBitmap(albumArt, maxDimension = 240)
+            val targetMax = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) 540 else 720
+            BitmapBlurUtils.toSafeSoftwareBitmap(albumArt, maxDimension = targetMax)
         } else {
             null
         }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        if (styleConfig.useBlurredAlbumBackground && lightweightBgBitmap != null) {
+        if (styleConfig.useBlurredAlbumBackground && sharpOrGpuBgBitmap != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val bgImageBitmap = remember(lightweightBgBitmap) {
-                    lightweightBgBitmap.asImageBitmap()
+                val bgImageBitmap = remember(sharpOrGpuBgBitmap) {
+                    sharpOrGpuBgBitmap.asImageBitmap()
                 }
                 Image(
                     bitmap = bgImageBitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.High,
                     modifier = Modifier
                         .fillMaxSize()
                         .then(
                             if (blurRadius > 0.5f) {
-                                // Scale radius proportionally to pre-scaled texture for smooth 60fps GPU blur
                                 Modifier.blur(
-                                    radius = (blurRadius * 0.7f).dp,
+                                    radius = (blurRadius * 0.85f).dp,
                                     edgeTreatment = BlurredEdgeTreatment.Rectangle
                                 )
                             } else {
@@ -107,31 +108,33 @@ fun BlurredAlbumBackground(
                 )
             } else {
                 // CPU StackBlur fallback (API 24-30, e.g. Redmi 9C / Android 10-11)
-                // Quantized + tiny coalesce delay prevents queuing 40 blurs during slider drag
+                // Keeps crisp 720px when sharp (0px), 380px for light blur, 260px for deep blur
                 val blurredBitmap by produceState<Bitmap?>(
-                    initialValue = lightweightBgBitmap,
-                    key1 = lightweightBgBitmap,
+                    initialValue = sharpOrGpuBgBitmap,
+                    key1 = sharpOrGpuBgBitmap,
                     key2 = quantizedRadius
                 ) {
                     if (quantizedRadius <= 0) {
-                        value = lightweightBgBitmap
+                        value = sharpOrGpuBgBitmap
                     } else {
                         delay(16)
+                        val blurMaxDim = if (quantizedRadius <= 10) 380 else 260
                         value = withContext(Dispatchers.Default) {
                             BitmapBlurUtils.blurBitmap(
-                                source = lightweightBgBitmap,
+                                source = sharpOrGpuBgBitmap,
                                 radiusPx = quantizedRadius.toFloat(),
-                                maxDimension = 180
+                                maxDimension = blurMaxDim
                             )
                         }
                     }
                 }
-                val activeBitmap = blurredBitmap ?: lightweightBgBitmap
+                val activeBitmap = blurredBitmap ?: sharpOrGpuBgBitmap
                 val bgImageBitmap = remember(activeBitmap) { activeBitmap.asImageBitmap() }
                 Image(
                     bitmap = bgImageBitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.High,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -183,7 +186,7 @@ fun MusicStoryCard(
         RoundedCornerShape(styleConfig.cornerRadiusDp.dp)
     }
     val crispArtImageBitmap = remember(track.albumArt) {
-        track.albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 720)?.asImageBitmap() }
+        track.albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 1024)?.asImageBitmap() }
     }
 
     when (styleConfig.cardLayoutType) {
@@ -286,6 +289,7 @@ private fun FloatingGlassShareCard(
                         bitmap = crispArtImageBitmap,
                         contentDescription = "Album art for ${track.title}",
                         contentScale = ContentScale.Crop,
+                        filterQuality = FilterQuality.High,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -385,6 +389,7 @@ private fun FloatingGlowArtwork(
                     bitmap = crispArtImageBitmap,
                     contentDescription = "Album art for ${track.title}",
                     contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.High,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -475,6 +480,7 @@ private fun MinimalCleanStoryCard(
                     bitmap = crispArtImageBitmap,
                     contentDescription = "Album art for ${track.title}",
                     contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.High,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {

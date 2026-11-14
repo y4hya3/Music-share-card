@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import java.io.ByteArrayOutputStream
@@ -14,15 +17,20 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Low-overhead CPU & Memory Bitmap Utility (optimized for 2GB-3GB RAM devices like Redmi 9C
- * and Samsung Galaxy Tab A7 LTE).
+ * High-quality, low-overhead CPU & Memory Bitmap Utility (optimized for 2GB-3GB RAM devices
+ * like Redmi 9C and Samsung Galaxy Tab A7 LTE).
  * - Converts HARDWARE bitmaps safely to software ARGB_8888.
- * - Uses inJustDecodeBounds + inSampleSize so large cover art never spikes RAM.
- * - Uses zero-giant-lookup-table StackBlur on pre-downscaled buffers for fast 60fps UI updates.
+ * - Uses progressive 2x halving downscaling to avoid single-step Skia pixel-skipping ("choppy" art).
+ * - Safely trims symmetric black letterbox/pillarbox bars from video music thumbnails (e.g. YouTube).
+ * - Uses zero-giant-lookup-table StackBlur on adaptive-resolution buffers for smooth 60fps UI updates.
  */
 object BitmapBlurUtils {
 
-    fun toSafeSoftwareBitmap(source: Bitmap?, maxDimension: Int = 720): Bitmap? {
+    private val highQualityBitmapPaint = Paint(
+        Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG
+    )
+
+    fun toSafeSoftwareBitmap(source: Bitmap?, maxDimension: Int = 1024): Bitmap? {
         if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) {
             return null
         }
@@ -43,7 +51,7 @@ object BitmapBlurUtils {
                 val scale = maxDimension.toFloat() / maxSide.toFloat()
                 val targetW = (software.width * scale).roundToInt().coerceAtLeast(1)
                 val targetH = (software.height * scale).roundToInt().coerceAtLeast(1)
-                val resized = Bitmap.createScaledBitmap(software, targetW, targetH, true)
+                val resized = createProgressiveScaledBitmap(software, targetW, targetH)
                 if (software !== source && software !== resized && !software.isRecycled) {
                     software.recycle()
                 }
@@ -56,7 +64,161 @@ object BitmapBlurUtils {
         }
     }
 
-    fun decodeSampledResource(resources: Resources, resId: Int, maxDimension: Int = 720): Bitmap? {
+    /**
+     * Progressive 2x halving downscale followed by a filtered final step.
+     * Prevents Skia's single-pass bilinear sampler from skipping pixels when shrinking > 2x,
+     * keeping both crisp album covers and blurred backgrounds smooth instead of jagged/choppy.
+     */
+    fun createProgressiveScaledBitmap(source: Bitmap, targetW: Int, targetH: Int): Bitmap {
+        val dstW = targetW.coerceAtLeast(1)
+        val dstH = targetH.coerceAtLeast(1)
+        if (source.width == dstW && source.height == dstH) return source
+
+        // Upscaling or small (<2x) downscale works cleanly in one filtered pass
+        if (source.width <= dstW * 2 && source.height <= dstH * 2) {
+            return drawScaledBitmap(source, dstW, dstH)
+        }
+
+        var current = source
+        var curW = source.width
+        var curH = source.height
+        while (curW / 2 >= dstW && curH / 2 >= dstH && curW > 2 && curH > 2) {
+            val nextW = (curW / 2).coerceAtLeast(dstW)
+            val nextH = (curH / 2).coerceAtLeast(dstH)
+            if (nextW == curW && nextH == curH) break
+            val stepped = drawScaledBitmap(current, nextW, nextH)
+            if (current !== source && current !== stepped && !current.isRecycled) {
+                current.recycle()
+            }
+            current = stepped
+            curW = nextW
+            curH = nextH
+        }
+
+        if (curW != dstW || curH != dstH) {
+            val finalBitmap = drawScaledBitmap(current, dstW, dstH)
+            if (current !== source && current !== finalBitmap && !current.isRecycled) {
+                current.recycle()
+            }
+            return finalBitmap
+        }
+        return current
+    }
+
+    private fun drawScaledBitmap(source: Bitmap, dstW: Int, dstH: Int): Bitmap {
+        val out = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawBitmap(
+            source,
+            Rect(0, 0, source.width, source.height),
+            Rect(0, 0, dstW, dstH),
+            highQualityBitmapPaint
+        )
+        return out
+    }
+
+    /**
+     * Detects and trims symmetric near-pure-black letterbox or pillarbox bars commonly embedded in
+     * YouTube / YouTube Music thumbnails (e.g., 480x360 hqdefault or 1280x720 16:9 covers).
+     * Never alters genuine dark album covers because it requires symmetric pure-black outer bands
+     * AND non-black inner borders.
+     */
+    fun trimLetterboxBarsIfPresent(source: Bitmap): Bitmap {
+        val w = source.width
+        val h = source.height
+        if (w < 64 || h < 64 || source.isRecycled) return source
+
+        // Only inspect non-square artwork (or slight aspect mismatches typical of video thumbnails)
+        val aspect = w.toFloat() / h.toFloat()
+        if (aspect in 0.96f..1.04f) return source
+
+        return try {
+            val pixels = IntArray(w * h)
+            source.getPixels(pixels, 0, w, 0, 0, w, h)
+
+            fun isNearBlack(pixel: Int): Boolean {
+                val r = (pixel shr 16) and 0xFF
+                val g = (pixel shr 8) and 0xFF
+                val b = pixel and 0xFF
+                return r <= 12 && g <= 12 && b <= 12
+            }
+
+            fun isRowBlack(y: Int): Boolean {
+                val rowOffset = y * w
+                val step = max(1, w / 32)
+                var x = 2
+                while (x < w - 2) {
+                    if (!isNearBlack(pixels[rowOffset + x])) return false
+                    x += step
+                }
+                return true
+            }
+
+            fun isColBlack(x: Int): Boolean {
+                val step = max(1, h / 32)
+                var y = 2
+                while (y < h - 2) {
+                    if (!isNearBlack(pixels[y * w + x])) return false
+                    y += step
+                }
+                return true
+            }
+
+            var topBar = 0
+            val maxVBar = (h * 0.28f).roundToInt()
+            while (topBar < maxVBar && isRowBlack(topBar)) {
+                topBar++
+            }
+            var bottomBar = 0
+            while (bottomBar < maxVBar && isRowBlack(h - 1 - bottomBar)) {
+                bottomBar++
+            }
+
+            var leftBar = 0
+            val maxHBar = (w * 0.30f).roundToInt()
+            while (leftBar < maxHBar && isColBlack(leftBar)) {
+                leftBar++
+            }
+            var rightBar = 0
+            while (rightBar < maxHBar && isColBlack(w - 1 - rightBar)) {
+                rightBar++
+            }
+
+            val minVTrigger = (h * 0.06f).roundToInt()
+            val minHTrigger = (w * 0.06f).roundToInt()
+
+            val hasSymmetricVerticalBars =
+                topBar >= minVTrigger &&
+                    bottomBar >= minVTrigger &&
+                    abs(topBar - bottomBar) <= max(6, (h * 0.05f).roundToInt())
+
+            val hasSymmetricHorizontalBars =
+                leftBar >= minHTrigger &&
+                    rightBar >= minHTrigger &&
+                    abs(leftBar - rightBar) <= max(6, (w * 0.05f).roundToInt())
+
+            val cropTop = if (hasSymmetricVerticalBars) (topBar + 2).coerceAtMost(h / 3) else 0
+            val cropBottom = if (hasSymmetricVerticalBars) (h - bottomBar - 2).coerceAtLeast(cropTop + 32) else h
+            val cropLeft = if (hasSymmetricHorizontalBars) (leftBar + 2).coerceAtMost(w / 3) else 0
+            val cropRight = if (hasSymmetricHorizontalBars) (w - rightBar - 2).coerceAtLeast(cropLeft + 32) else w
+
+            val newW = cropRight - cropLeft
+            val newH = cropBottom - cropTop
+
+            if ((cropTop > 0 || cropBottom < h || cropLeft > 0 || cropRight < w) &&
+                newW >= w * 0.42f &&
+                newH >= h * 0.42f
+            ) {
+                Bitmap.createBitmap(source, cropLeft, cropTop, newW, newH)
+            } else {
+                source
+            }
+        } catch (_: Exception) {
+            source
+        }
+    }
+
+    fun decodeSampledResource(resources: Resources, resId: Int, maxDimension: Int = 1024): Bitmap? {
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeResource(resources, resId, bounds)
@@ -72,7 +234,7 @@ object BitmapBlurUtils {
         }
     }
 
-    fun decodeSampledFromUri(context: Context, uri: Uri, maxDimension: Int = 720): Bitmap? {
+    fun decodeSampledFromUri(context: Context, uri: Uri, maxDimension: Int = 1024): Bitmap? {
         return try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -92,12 +254,12 @@ object BitmapBlurUtils {
         }
     }
 
-    fun decodeSampledFromStream(stream: InputStream, maxDimension: Int = 720): Bitmap? {
+    fun decodeSampledFromStream(stream: InputStream, maxDimension: Int = 1024): Bitmap? {
         return try {
             val buffer = ByteArrayOutputStream()
             val chunk = ByteArray(8192)
             var total = 0
-            val maxBytes = 6 * 1024 * 1024 // 6 MB safety cap for budget RAM devices
+            val maxBytes = 8 * 1024 * 1024 // 8 MB safety cap for budget RAM devices
             while (true) {
                 val read = stream.read(chunk)
                 if (read <= 0) break
@@ -135,25 +297,31 @@ object BitmapBlurUtils {
     }
 
     /**
-     * Fast StackBlur on a pre-downscaled buffer (default maxDimension = 180 for live UI, 260 for export).
-     * Eliminates large lookup-table heap allocations so budget CPUs (Helio G35, Snapdragon 662)
-     * do not suffer GC pauses during live slider dragging.
+     * Smooth StackBlur with adaptive buffer sizing so low-blur (1..12px) backgrounds stay
+     * sharp and block-free on large phone/tablet screens while high-blur stays fast on budget CPUs.
      */
-    fun blurBitmap(source: Bitmap, radiusPx: Float, maxDimension: Int = 180): Bitmap {
-        val safeSource = toSafeSoftwareBitmap(source, maxDimension = 720) ?: return source
+    fun blurBitmap(source: Bitmap, radiusPx: Float, maxDimension: Int = 280): Bitmap {
+        val safeSource = toSafeSoftwareBitmap(source, maxDimension = 1024) ?: return source
         val clampedRadius = radiusPx.coerceIn(0f, 40f)
         if (clampedRadius <= 0.5f) {
             return safeSource
         }
 
+        // Preserve higher resolution at light blur radii to eliminate pixel blockiness
+        val effectiveMaxDim = if (clampedRadius <= 10f) {
+            max(maxDimension, 360)
+        } else {
+            maxDimension
+        }
+
         val scale = min(
             1f,
-            maxDimension.toFloat() / max(safeSource.width, safeSource.height).coerceAtLeast(1)
+            effectiveMaxDim.toFloat() / max(safeSource.width, safeSource.height).coerceAtLeast(1)
         )
         val targetW = (safeSource.width * scale).roundToInt().coerceAtLeast(1)
         val targetH = (safeSource.height * scale).roundToInt().coerceAtLeast(1)
 
-        val scaled = Bitmap.createScaledBitmap(safeSource, targetW, targetH, true)
+        val scaled = createProgressiveScaledBitmap(safeSource, targetW, targetH)
         val mutable = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) {
             scaled
         } else {
@@ -164,7 +332,8 @@ object BitmapBlurUtils {
             copy
         }
 
-        val maxEffective = max(8, (maxDimension * 0.14f).roundToInt())
+        val actualMaxSide = max(mutable.width, mutable.height).coerceAtLeast(1)
+        val maxEffective = max(10, (actualMaxSide * 0.14f).roundToInt())
         val effectiveRadius = ((clampedRadius / 40f) * maxEffective).roundToInt().coerceIn(1, maxEffective)
         stackBlurInPlace(mutable, effectiveRadius)
         return mutable

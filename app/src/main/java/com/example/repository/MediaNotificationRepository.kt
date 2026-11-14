@@ -60,7 +60,7 @@ object MediaNotificationRepository {
         val travisArt = BitmapBlurUtils.decodeSampledResource(
             context.resources,
             R.drawable.sample_art_travis,
-            maxDimension = 720
+            maxDimension = 1024
         ) ?: createFallbackArt("Travis Scott", 0xFF9E1B32.toInt(), 0xFF191414.toInt())
 
         val theWeekndArt = createFallbackArt("The Weeknd", 0xFFE50914.toInt(), 0xFF0D0D1A.toInt())
@@ -123,17 +123,26 @@ object MediaNotificationRepository {
 
     fun updateTrack(trackInfo: MediaTrackInfo) {
         val current = _currentTrack.value
-        val resolvedArt = if (
-            trackInfo.albumArt == null &&
-            !current.isSample &&
+        val isSameTrack = !current.isSample &&
             current.packageName == trackInfo.packageName &&
             current.title == trackInfo.title &&
-            current.artist == trackInfo.artist &&
-            current.albumArt != null
-        ) {
-            current.albumArt
-        } else {
-            trackInfo.albumArt
+            current.artist == trackInfo.artist
+
+        val currentArt = current.albumArt
+        val incomingArt = trackInfo.albumArt
+
+        val resolvedArt = when {
+            isSameTrack && currentArt != null && !currentArt.isRecycled -> {
+                if (incomingArt == null || incomingArt.isRecycled) {
+                    currentArt
+                } else {
+                    val currentPixels = currentArt.width.toLong() * currentArt.height.toLong()
+                    val incomingPixels = incomingArt.width.toLong() * incomingArt.height.toLong()
+                    // Never downgrade high-res URI/metadata art to a tiny notification/Binder thumbnail
+                    if (currentPixels > incomingPixels) currentArt else incomingArt
+                }
+            }
+            else -> incomingArt
         }
 
         val finalTrack = if (resolvedArt !== trackInfo.albumArt) {
@@ -157,9 +166,18 @@ object MediaNotificationRepository {
             current.title == title &&
             current.artist == artist
         ) {
-            val updated = current.copy(albumArt = albumArt)
-            _currentTrack.value = updated
-            extractPaletteForTrack(updated)
+            val existing = current.albumArt
+            val existingPixels = if (existing != null && !existing.isRecycled) {
+                existing.width.toLong() * existing.height.toLong()
+            } else {
+                0L
+            }
+            val newPixels = albumArt.width.toLong() * albumArt.height.toLong()
+            if (existingPixels == 0L || newPixels >= existingPixels) {
+                val updated = current.copy(albumArt = albumArt)
+                _currentTrack.value = updated
+                extractPaletteForTrack(updated)
+            }
         }
     }
 

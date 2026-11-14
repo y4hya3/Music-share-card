@@ -149,12 +149,11 @@ class MusicNotificationListenerService : NotificationListenerService() {
             // 1. Scan active MediaSession controllers directly (works even if notification wasn't re-posted)
             var foundTrack = scanActiveMediaSessions(appCtx)
 
-            // 2. Also scan active StatusBarNotifications if service is bound (provides notification largeIcon fallback)
+            // 2. Fallback to active StatusBarNotifications only if no active MediaSession yielded a track
             val service = activeInstance
             if (service != null) {
-                val notifFound = scanServiceNotifications(service)
-                if (notifFound) {
-                    foundTrack = true
+                if (!foundTrack) {
+                    foundTrack = scanServiceNotifications(service)
                 }
             } else {
                 rebindIfPossible(appCtx)
@@ -266,7 +265,6 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private fun scanServiceNotifications(service: MusicNotificationListenerService): Boolean {
             return try {
                 val activeNotifs = service.activeNotifications ?: return false
-                // Prioritize notifications whose MediaController is actively playing
                 for (sbn in activeNotifs) {
                     if (isMediaNotification(sbn)) {
                         if (processNotification(service, sbn)) {
@@ -297,6 +295,12 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 try {
                     val controller = MediaController(context, token)
                     registerControllerCallbacks(context, listOf(controller) + registeredCallbacks.values.map { it.first })
+                    val current = MediaNotificationRepository.currentTrack.value
+                    val isThisPlaying = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+                    // Don't let a paused background player hijack an actively playing session from another app
+                    if (!current.isSample && current.isPlaying && current.packageName != controller.packageName && !isThisPlaying) {
+                        return false
+                    }
                     if (extractFromController(context, controller, notificationBitmapFallback = notifFallbackArt)) {
                         return true
                     }
@@ -344,13 +348,19 @@ class MusicNotificationListenerService : NotificationListenerService() {
             val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
             val isPlaying = controller.playbackState?.state == PlaybackState.STATE_PLAYING
 
-            val rawArt = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
-                ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
-                ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
-                ?: notificationBitmapFallback
-                ?: findNotificationArtworkForPackage(context, controller.packageName)
+            val candidateBitmaps = listOfNotNull(
+                metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART),
+                metadata.getBitmap(MediaMetadata.METADATA_KEY_ART),
+                metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON),
+                notificationBitmapFallback,
+                findNotificationArtworkForPackage(context, controller.packageName)
+            ).filter { !it.isRecycled && it.width > 0 && it.height > 0 }
 
-            val safeArt = BitmapBlurUtils.toSafeSoftwareBitmap(rawArt, maxDimension = 1024)
+            val bestRawArt = candidateBitmaps.maxByOrNull { it.width.toLong() * it.height.toLong() }
+            val safeArt = BitmapBlurUtils.toSafeSoftwareBitmap(bestRawArt, maxDimension = 1024)?.let {
+                BitmapBlurUtils.trimLetterboxBarsIfPresent(it)
+            }
+
             val appName = resolveAppLabel(context, controller.packageName)
             val resolvedArtist = artist?.takeIf { it.isNotBlank() } ?: appName
 
@@ -365,18 +375,32 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 isSample = false
             )
 
-            Log.d(TAG, "Synced track: '${trackInfo.title}' by '${trackInfo.artist}' (hasArt=${safeArt != null})")
+            Log.d(
+                TAG,
+                "Synced track: '${trackInfo.title}' by '${trackInfo.artist}' (art=${safeArt?.width ?: 0}x${safeArt?.height ?: 0})"
+            )
             MediaNotificationRepository.updateTrack(trackInfo)
 
-            // If bitmap wasn't embedded directly, load from METADATA_KEY_*_URI asynchronously
-            if (safeArt == null) {
-                val artUri = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
-                    ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
-                    ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
-                if (!artUri.isNullOrBlank()) {
-                    loadArtFromUriAsync(
+            // Fetch high-resolution art from METADATA_KEY_*_URI whenever embedded art is missing OR low-res (< 600px)
+            val repoTrack = MediaNotificationRepository.currentTrack.value
+            val repoHasHighResForSameTrack = !repoTrack.isSample &&
+                repoTrack.packageName == controller.packageName &&
+                repoTrack.title == title &&
+                repoTrack.artist == resolvedArtist &&
+                maxOf(repoTrack.albumArt?.width ?: 0, repoTrack.albumArt?.height ?: 0) >= 600
+
+            val bestMaxDim = maxOf(safeArt?.width ?: 0, safeArt?.height ?: 0)
+            if (!repoHasHighResForSameTrack && (safeArt == null || bestMaxDim < 600)) {
+                val uris = listOfNotNull(
+                    metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
+                    metadata.getString(MediaMetadata.METADATA_KEY_ART_URI),
+                    metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+                ).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+
+                if (uris.isNotEmpty()) {
+                    loadArtFromUrisAsync(
                         context = context.applicationContext,
-                        uriString = artUri,
+                        uriStrings = uris,
                         packageName = controller.packageName,
                         title = title,
                         artist = resolvedArtist
@@ -403,46 +427,86 @@ class MusicNotificationListenerService : NotificationListenerService() {
             }
         }
 
-        private fun loadArtFromUriAsync(
+        private fun loadArtFromUrisAsync(
             context: Context,
-            uriString: String,
+            uriStrings: List<String>,
             packageName: String,
             title: String,
             artist: String
         ) {
             serviceScope.launch(Dispatchers.IO) {
-                try {
-                    val safe: Bitmap? = when {
-                        uriString.startsWith("http://") || uriString.startsWith("https://") -> {
-                            val conn = (URL(uriString).openConnection() as HttpURLConnection).apply {
-                                connectTimeout = 5000
-                                readTimeout = 5000
-                                instanceFollowRedirects = true
-                            }
-                            try {
-                                conn.inputStream.use {
-                                    BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = 720)
+                var bestUriBitmap: Bitmap? = null
+                var bestPixels = 0L
+
+                for (uriString in uriStrings) {
+                    try {
+                        val decoded = fetchBitmapFromUriString(context, uriString)?.let {
+                            BitmapBlurUtils.trimLetterboxBarsIfPresent(it)
+                        }
+                        if (decoded != null && !decoded.isRecycled) {
+                            val pixels = decoded.width.toLong() * decoded.height.toLong()
+                            if (pixels > bestPixels) {
+                                if (bestUriBitmap != null && bestUriBitmap !== decoded && !bestUriBitmap.isRecycled) {
+                                    bestUriBitmap.recycle()
                                 }
-                            } finally {
-                                conn.disconnect()
+                                bestUriBitmap = decoded
+                                bestPixels = pixels
+                            } else if (decoded !== bestUriBitmap) {
+                                decoded.recycle()
+                            }
+                            if (maxOf(decoded.width, decoded.height) >= 600) {
+                                break
                             }
                         }
-                        else -> {
-                            val uri = Uri.parse(uriString)
-                            BitmapBlurUtils.decodeSampledFromUri(context, uri, maxDimension = 720)
-                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to load album art URI: $uriString", e)
                     }
-                    if (safe != null) {
-                        MediaNotificationRepository.updateTrackArtworkIfMatching(
-                            packageName = packageName,
-                            title = title,
-                            artist = artist,
-                            albumArt = safe
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to load album art URI: $uriString", e)
                 }
+
+                if (bestUriBitmap != null) {
+                    MediaNotificationRepository.updateTrackArtworkIfMatching(
+                        packageName = packageName,
+                        title = title,
+                        artist = artist,
+                        albumArt = bestUriBitmap
+                    )
+                }
+            }
+        }
+
+        private fun fetchBitmapFromUriString(context: Context, uriString: String): Bitmap? {
+            return if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
+                var currentUrl = uriString
+                var redirects = 0
+                while (redirects < 4) {
+                    val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 6000
+                        readTimeout = 6000
+                        instanceFollowRedirects = false
+                        setRequestProperty("User-Agent", "BitChord/1.0 Android")
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code in 300..399) {
+                            val location = conn.getHeaderField("Location") ?: break
+                            currentUrl = URL(URL(currentUrl), location).toString()
+                            redirects++
+                            continue
+                        }
+                        if (code in 200..299) {
+                            return conn.inputStream.use {
+                                BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = 1024)
+                            }
+                        }
+                        return null
+                    } finally {
+                        conn.disconnect()
+                    }
+                }
+                null
+            } else {
+                val uri = Uri.parse(uriString)
+                BitmapBlurUtils.decodeSampledFromUri(context, uri, maxDimension = 1024)
             }
         }
 
@@ -460,29 +524,49 @@ class MusicNotificationListenerService : NotificationListenerService() {
 
         private fun extractNotificationArtwork(context: Context, notification: Notification): Bitmap? {
             return try {
-                val largeIcon: Icon? = notification.getLargeIcon()
-                val raw = if (largeIcon != null) {
-                    largeIcon.loadDrawable(context)?.toBitmap()
-                } else {
-                    val extras = notification.extras
-                    @Suppress("DEPRECATION")
-                    val extraBig = extras?.get(Notification.EXTRA_LARGE_ICON_BIG)
-                    @Suppress("DEPRECATION")
-                    val extraStd = extras?.get(Notification.EXTRA_LARGE_ICON)
-                    @Suppress("DEPRECATION")
-                    val extraPic = extras?.getParcelable<Bitmap>(Notification.EXTRA_PICTURE)
+                val extras = notification.extras
+                val candidates = mutableListOf<Bitmap>()
 
-                    when (extraBig) {
-                        is Bitmap -> extraBig
-                        is Icon -> extraBig.loadDrawable(context)?.toBitmap()
-                        else -> when (extraStd) {
-                            is Bitmap -> extraStd
-                            is Icon -> extraStd.loadDrawable(context)?.toBitmap()
-                            else -> extraPic
-                        }
+                fun addDrawableFromIcon(icon: Icon?) {
+                    val drawable = icon?.loadDrawable(context) ?: return
+                    if (drawable is android.graphics.drawable.BitmapDrawable && drawable.bitmap != null) {
+                        candidates.add(drawable.bitmap)
+                    } else {
+                        val w = drawable.intrinsicWidth.coerceAtLeast(128)
+                        val h = drawable.intrinsicHeight.coerceAtLeast(128)
+                        candidates.add(drawable.toBitmap(width = w, height = h, config = Bitmap.Config.ARGB_8888))
                     }
                 }
-                BitmapBlurUtils.toSafeSoftwareBitmap(raw, maxDimension = 1024)
+
+                addDrawableFromIcon(notification.getLargeIcon())
+
+                @Suppress("DEPRECATION")
+                val extraBig = extras?.get(Notification.EXTRA_LARGE_ICON_BIG)
+                when (extraBig) {
+                    is Bitmap -> candidates.add(extraBig)
+                    is Icon -> addDrawableFromIcon(extraBig)
+                }
+
+                @Suppress("DEPRECATION")
+                val extraStd = extras?.get(Notification.EXTRA_LARGE_ICON)
+                when (extraStd) {
+                    is Bitmap -> candidates.add(extraStd)
+                    is Icon -> addDrawableFromIcon(extraStd)
+                }
+
+                @Suppress("DEPRECATION")
+                val extraPic = extras?.getParcelable<Bitmap>(Notification.EXTRA_PICTURE)
+                if (extraPic != null) {
+                    candidates.add(extraPic)
+                }
+
+                val best = candidates
+                    .filter { !it.isRecycled && it.width > 0 && it.height > 0 }
+                    .maxByOrNull { it.width.toLong() * it.height.toLong() }
+
+                BitmapBlurUtils.toSafeSoftwareBitmap(best, maxDimension = 1024)?.let {
+                    BitmapBlurUtils.trimLetterboxBarsIfPresent(it)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error extracting notification artwork", e)
                 null
