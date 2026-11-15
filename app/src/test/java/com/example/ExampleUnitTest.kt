@@ -42,13 +42,16 @@ class ExampleUnitTest {
     fun testGradientStopsAndScaleConfig() {
         val config = CardStyleConfig(
             gradientStyle = GradientStyle.CINEMATIC_AURORA,
-            cardScale = 0.85f,
+            cardScale = 0.62f,
             autoSearchOnlineArt = true
         )
         val stops = resolveGradientStops(CardPalette.Default, config)
         assertEquals(3, stops.size)
-        assertEquals(0.85f, config.cardScale, 0.001f)
+        assertEquals(0.62f, config.cardScale, 0.001f)
         assertTrue(config.autoSearchOnlineArt)
+
+        val largeConfig = config.copy(cardScale = 1.18f)
+        assertEquals(1.18f, largeConfig.cardScale, 0.001f)
     }
 
     @Test
@@ -104,14 +107,14 @@ class ExampleUnitTest {
             title = "SICKO MODE",
             artist = "Travis Scott",
             album = "ASTROWORLD",
-            appName = "Bitchord",
+            appName = "EchoSnap",
             packageName = "com.example.music"
         )
 
         assertEquals("SICKO MODE", track.title)
         assertEquals("Travis Scott", track.artist)
         assertEquals("ASTROWORLD", track.album)
-        assertEquals("Bitchord", track.appName)
+        assertEquals("EchoSnap", track.appName)
     }
 
     @Test
@@ -145,21 +148,25 @@ class ExampleUnitTest {
             "Blinding Lights (Official Music Video) [Lyrics] (feat. Rosalía)"
         )
         assertEquals("Blinding Lights", cleaned)
+        assertEquals("Travis Scott", AnimatedCanvasSearchService.normalizeArtistText("Travis Scott - Topic"))
+        assertEquals("Rosalia", AnimatedCanvasSearchService.normalizeArtistText("Rosalía feat. The Weeknd"))
         assertEquals("abc123", AnimatedCanvasSearchService.normalizeSpotifyToken("  Bearer abc123  "))
 
-        val exactScore = AnimatedCanvasSearchService.scoreMatch(
+        val exactBreakdown = AnimatedCanvasSearchService.evaluateMatch(
             "SICKO MODE",
             "Travis Scott",
             "SICKO MODE (feat. Drake)",
             "Travis Scott"
         )
-        val karaokeScore = AnimatedCanvasSearchService.scoreMatch(
-            "SICKO MODE (Karaoke Version)",
-            "Karaoke Band",
+        val wrongArtistBreakdown = AnimatedCanvasSearchService.evaluateMatch(
+            "SICKO MODE",
+            "Random Cover Singer",
             "SICKO MODE",
             "Travis Scott"
         )
-        assertTrue(exactScore > karaokeScore)
+        assertTrue(exactBreakdown.artistScore > 0)
+        assertEquals(0, wrongArtistBreakdown.artistScore)
+        assertTrue(exactBreakdown.totalScore > wrongArtistBreakdown.totalScore)
 
         val protoReq = AnimatedCanvasSearchService.encodeEntityCanvazRequest(
             listOf("spotify:track:2xLMifQCjDGFmkHkpNLD9h")

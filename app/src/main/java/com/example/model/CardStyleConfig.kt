@@ -50,11 +50,15 @@ data class CardStyleConfig(
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
     val glowIntensity: Float = 0.75f, // soft drop shadow depth
     val cornerRadiusDp: Int = 16, // border-radius: 16px
-    val cardScale: Float = 1.0f, // 0.75f..1.15f unified card size multiplier
+    val cardScale: Float = 1.0f, // 0.60f..1.20f unified card size multiplier
     val showLogoWordmark: Boolean = true,
     val autoSearchOnlineArt: Boolean = false,
     val autoSearchAnimatedCanvas: Boolean = false,
     val spotifyAccessToken: String = "",
+    val spotifyRefreshToken: String = "",
+    val spotifyTokenExpiryMs: Long = 0L,
+    val spotifyClientId: String = "",
+    val spotifyAccountLabel: String = "",
     val customLyrics: String = ""
 ) {
     fun resolveLogoBadgeColor(palette: CardPalette): Color {

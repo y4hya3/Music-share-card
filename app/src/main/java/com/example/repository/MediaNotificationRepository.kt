@@ -49,7 +49,7 @@ object MediaNotificationRepository {
             title = "SICKO MODE",
             artist = "Travis Scott",
             album = "ASTROWORLD",
-            appName = "BitChord",
+            appName = "EchoSnap",
             packageName = "",
             albumArt = null,
             isPlaying = true,
@@ -116,7 +116,7 @@ object MediaNotificationRepository {
             title = "SICKO MODE",
             artist = "Travis Scott",
             album = "ASTROWORLD",
-            appName = "BitChord",
+            appName = "EchoSnap",
             packageName = "",
             albumArt = travisArt,
             isPlaying = true,
@@ -129,7 +129,7 @@ object MediaNotificationRepository {
                 title = "Blinding Lights",
                 artist = "The Weeknd",
                 album = "After Hours",
-                appName = "BitChord",
+                appName = "EchoSnap",
                 packageName = "",
                 albumArt = theWeekndArt,
                 isPlaying = true,
@@ -139,7 +139,7 @@ object MediaNotificationRepository {
                 title = "Get Lucky (feat. Pharrell)",
                 artist = "Daft Punk",
                 album = "Random Access Memories",
-                appName = "BitChord",
+                appName = "EchoSnap",
                 packageName = "",
                 albumArt = daftPunkArt,
                 isPlaying = true,
@@ -149,7 +149,7 @@ object MediaNotificationRepository {
                 title = "BIRDS OF A FEATHER",
                 artist = "Billie Eilish",
                 album = "HIT ME HARD AND SOFT",
-                appName = "BitChord",
+                appName = "EchoSnap",
                 packageName = "",
                 albumArt = billieArt,
                 isPlaying = true,
@@ -384,21 +384,39 @@ object MediaNotificationRepository {
     ) {
         val snapshot = _currentTrack.value
         val trackSnapshotKey = trackKey(snapshot)
-        val searchTerm = (customQuery ?: buildSearchQuery(snapshot)).trim()
+        val trimmedCustom = customQuery?.trim().orEmpty()
+        val searchTerm = (trimmedCustom.ifEmpty { buildSearchQuery(snapshot) }).trim()
         if (searchTerm.isEmpty()) return
+
+        // If the user typed a completely different search query manually, match against what they typed
+        val defaultQuery = "${snapshot.title} ${snapshot.artist}".trim()
+        val isCustomOverride = trimmedCustom.isNotEmpty() &&
+            !trimmedCustom.equals(defaultQuery, ignoreCase = true)
 
         canvasSearchJob?.cancel()
         canvasSearchJob = repositoryScope.launch {
             _isSearchingCanvas.value = true
             _canvasSearchStatus.value = "Smart searching animated canvases..."
             try {
+                val cfg = _styleConfig.value
                 val result = AnimatedCanvasSearchService.searchCanvases(
                     rawQuery = searchTerm,
-                    spotifyToken = _styleConfig.value.spotifyAccessToken,
-                    targetTitle = snapshot.title,
-                    targetArtist = snapshot.artist,
+                    spotifyToken = cfg.spotifyAccessToken,
+                    spotifyRefreshToken = cfg.spotifyRefreshToken,
+                    spotifyClientId = cfg.spotifyClientId,
+                    targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
+                    targetArtist = if (isCustomOverride) "" else snapshot.artist,
                     maxResults = 8
                 )
+                result.refreshedToken?.let { renewed ->
+                    updateStyleConfig { current ->
+                        current.copy(
+                            spotifyAccessToken = renewed.accessToken,
+                            spotifyRefreshToken = renewed.refreshToken.ifBlank { current.spotifyRefreshToken },
+                            spotifyTokenExpiryMs = renewed.expiresAtMs
+                        )
+                    }
+                }
                 _animatedCanvasCandidates.value = result.candidates
                 _canvasSearchStatus.value = result.statusMessage
 
@@ -414,6 +432,32 @@ object MediaNotificationRepository {
                 _isSearchingCanvas.value = false
             }
         }
+    }
+
+    fun applySpotifyLoginResult(result: com.example.service.SpotifyTokenResult) {
+        updateStyleConfig { current ->
+            current.copy(
+                spotifyAccessToken = result.accessToken,
+                spotifyRefreshToken = result.refreshToken.ifBlank { current.spotifyRefreshToken },
+                spotifyTokenExpiryMs = result.expiresAtMs,
+                spotifyAccountLabel = result.accountLabel.ifBlank { "Spotify Account" }
+            )
+        }
+        // Automatically scratch animated canvases for the currently active song once logged in
+        searchAnimatedCanvases(autoApplyBest = false)
+    }
+
+    fun disconnectSpotifyAccount() {
+        com.example.service.SpotifyAuthManager.clearSpotifyWebCookies()
+        updateStyleConfig { current ->
+            current.copy(
+                spotifyAccessToken = "",
+                spotifyRefreshToken = "",
+                spotifyTokenExpiryMs = 0L,
+                spotifyAccountLabel = ""
+            )
+        }
+        _canvasSearchStatus.value = "Spotify account disconnected"
     }
 
     fun selectAnimatedCanvas(candidate: AnimatedCanvasCandidate) {

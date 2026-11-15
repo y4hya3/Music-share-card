@@ -120,14 +120,17 @@ fun BitChordShareScreen(
     fun triggerSaveToGallery() {
         if (!isProcessingAction) {
             isProcessingAction = true
-            actionStatusText = "Saving to Pictures/BitChord..."
+            actionStatusText = "Saving to Pictures/EchoSnap..."
+            val latestTrack = MediaNotificationRepository.currentTrack.value
+            val latestPalette = MediaNotificationRepository.extractedPalette.value
+            val latestStyle = MediaNotificationRepository.styleConfig.value
             coroutineScope.launch {
                 try {
                     CardShareManager.saveCardToGallery(
                         context = context,
-                        track = currentTrack,
-                        palette = palette,
-                        styleConfig = styleConfig
+                        track = latestTrack,
+                        palette = latestPalette,
+                        styleConfig = latestStyle
                     )
                 } catch (e: Exception) {
                     Toast.makeText(context, "Error saving: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -316,28 +319,43 @@ fun BitChordShareScreen(
                                 onSaveToGallery = { handleSaveImageClick() },
                                 onPreviewCard = { showPreviewDialog = true },
                                 onShareWhatsApp = {
+                                    val t = MediaNotificationRepository.currentTrack.value
+                                    val p = MediaNotificationRepository.extractedPalette.value
+                                    val s = MediaNotificationRepository.styleConfig.value
                                     runShareAction("Preparing for WhatsApp...") {
-                                        CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
+                                        CardShareManager.shareToWhatsApp(context, t, p, s)
                                     }
                                 },
                                 onShareInstagramStory = {
+                                    val t = MediaNotificationRepository.currentTrack.value
+                                    val p = MediaNotificationRepository.extractedPalette.value
+                                    val s = MediaNotificationRepository.styleConfig.value
                                     runShareAction("Preparing Instagram Story...") {
-                                        CardShareManager.shareToInstagramStory(context, currentTrack, palette, styleConfig)
+                                        CardShareManager.shareToInstagramStory(context, t, p, s)
                                     }
                                 },
                                 onShareSnapchatStory = {
+                                    val t = MediaNotificationRepository.currentTrack.value
+                                    val p = MediaNotificationRepository.extractedPalette.value
+                                    val s = MediaNotificationRepository.styleConfig.value
                                     runShareAction("Preparing Snapchat Story...") {
-                                        CardShareManager.shareToSnapchatStory(context, currentTrack, palette, styleConfig)
+                                        CardShareManager.shareToSnapchatStory(context, t, p, s)
                                     }
                                 },
                                 onShareDiscord = {
+                                    val t = MediaNotificationRepository.currentTrack.value
+                                    val p = MediaNotificationRepository.extractedPalette.value
+                                    val s = MediaNotificationRepository.styleConfig.value
                                     runShareAction("Preparing for Discord...") {
-                                        CardShareManager.shareToDiscord(context, currentTrack, palette, styleConfig)
+                                        CardShareManager.shareToDiscord(context, t, p, s)
                                     }
                                 },
                                 onNativeShare = {
+                                    val t = MediaNotificationRepository.currentTrack.value
+                                    val p = MediaNotificationRepository.extractedPalette.value
+                                    val s = MediaNotificationRepository.styleConfig.value
                                     runShareAction("Opening Share Sheet...") {
-                                        CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                                        CardShareManager.shareStoryCard(context, t, p, s)
                                     }
                                 },
                                 modifier = Modifier.testTag("bottom_share_actions_bar")
@@ -421,28 +439,43 @@ fun BitChordShareScreen(
                             onSaveToGallery = { handleSaveImageClick() },
                             onPreviewCard = { showPreviewDialog = true },
                             onShareWhatsApp = {
+                                val t = MediaNotificationRepository.currentTrack.value
+                                val p = MediaNotificationRepository.extractedPalette.value
+                                val s = MediaNotificationRepository.styleConfig.value
                                 runShareAction("Preparing for WhatsApp...") {
-                                    CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
+                                    CardShareManager.shareToWhatsApp(context, t, p, s)
                                 }
                             },
                             onShareInstagramStory = {
+                                val t = MediaNotificationRepository.currentTrack.value
+                                val p = MediaNotificationRepository.extractedPalette.value
+                                val s = MediaNotificationRepository.styleConfig.value
                                 runShareAction("Preparing Instagram Story...") {
-                                    CardShareManager.shareToInstagramStory(context, currentTrack, palette, styleConfig)
+                                    CardShareManager.shareToInstagramStory(context, t, p, s)
                                 }
                             },
                             onShareSnapchatStory = {
+                                val t = MediaNotificationRepository.currentTrack.value
+                                val p = MediaNotificationRepository.extractedPalette.value
+                                val s = MediaNotificationRepository.styleConfig.value
                                 runShareAction("Preparing Snapchat Story...") {
-                                    CardShareManager.shareToSnapchatStory(context, currentTrack, palette, styleConfig)
+                                    CardShareManager.shareToSnapchatStory(context, t, p, s)
                                 }
                             },
                             onShareDiscord = {
+                                val t = MediaNotificationRepository.currentTrack.value
+                                val p = MediaNotificationRepository.extractedPalette.value
+                                val s = MediaNotificationRepository.styleConfig.value
                                 runShareAction("Preparing for Discord...") {
-                                    CardShareManager.shareToDiscord(context, currentTrack, palette, styleConfig)
+                                    CardShareManager.shareToDiscord(context, t, p, s)
                                 }
                             },
                             onNativeShare = {
+                                val t = MediaNotificationRepository.currentTrack.value
+                                val p = MediaNotificationRepository.extractedPalette.value
+                                val s = MediaNotificationRepository.styleConfig.value
                                 runShareAction("Opening Share Sheet...") {
-                                    CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                                    CardShareManager.shareStoryCard(context, t, p, s)
                                 }
                             },
                             modifier = Modifier.testTag("bottom_share_actions_bar")
@@ -480,8 +513,11 @@ fun BitChordShareScreen(
             },
             onShareClick = {
                 showPreviewDialog = false
+                val t = MediaNotificationRepository.currentTrack.value
+                val p = MediaNotificationRepository.extractedPalette.value
+                val s = MediaNotificationRepository.styleConfig.value
                 runShareAction("Opening Share Sheet...") {
-                    CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                    CardShareManager.shareStoryCard(context, t, p, s)
                 }
             }
         )

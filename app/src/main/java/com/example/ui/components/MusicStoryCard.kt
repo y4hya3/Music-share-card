@@ -202,10 +202,10 @@ fun MusicStoryCard(
     maxCardWidth: Dp = 330.dp,
     maxArtSize: Dp = 300.dp
 ) {
-    val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
-    val scaledMaxCardWidth = (maxCardWidth * scale).coerceAtLeast(180.dp)
-    val scaledMaxArtSize = (maxArtSize * scale).coerceAtLeast(140.dp)
-    val scaledCornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(8)
+    val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
+    val scaledMaxCardWidth = (maxCardWidth * scale).coerceAtLeast(155.dp)
+    val scaledMaxArtSize = (maxArtSize * scale).coerceAtLeast(125.dp)
+    val scaledCornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6)
 
     val badgeColor = remember(styleConfig.logoColorMode, styleConfig.customLogoColor, palette) {
         styleConfig.resolveLogoBadgeColor(palette)
@@ -302,7 +302,7 @@ private fun FloatingGlassShareCard(
     Box(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
-            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
+            .fillMaxWidth((0.84f * scale).coerceIn(0.49f, 0.98f))
             .shadow(
                 elevation = shadowElevation,
                 shape = cardShape,
@@ -415,7 +415,7 @@ private fun FloatingGlowArtwork(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
             .widthIn(max = effectiveWidth)
-            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
+            .fillMaxWidth((0.84f * scale).coerceIn(0.49f, 0.98f))
             .testTag("music_story_card_container")
     ) {
         Box(
@@ -505,7 +505,7 @@ private fun MinimalCleanStoryCard(
     Column(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
-            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
+            .fillMaxWidth((0.84f * scale).coerceIn(0.49f, 0.98f))
             .shadow(
                 elevation = (20 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale).dp,
                 shape = cardShape
@@ -619,7 +619,7 @@ private fun SpotifyLyricsShareCard(
     Box(
         modifier = modifier
             .widthIn(max = maxCardWidth)
-            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
+            .fillMaxWidth((0.84f * scale).coerceIn(0.49f, 0.98f))
             .shadow(
                 elevation = shadowElevation,
                 shape = cardShape,

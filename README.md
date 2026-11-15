@@ -1,6 +1,6 @@
-# BitChord — Music Share Card Generator
+# EchoSnap — Music Share Card Generator
 
-BitChord is an Android Jetpack Compose application that automatically reads active music playback notifications and media sessions from any music player (Spotify, YouTube Music, Apple Music, Samsung Music, SoundCloud, etc.) and turns the currently playing song into a sleek, customizable 9:16 Share Card ready to save or share anywhere.
+EchoSnap is an Android Jetpack Compose application that automatically reads active music playback notifications and media sessions from any music player (Spotify, YouTube Music, Apple Music, Samsung Music, SoundCloud, etc.) and turns the currently playing song into a sleek, customizable 9:16 Share Card ready to save or share anywhere.
 
 ---
 
@@ -21,6 +21,7 @@ BitChord is an Android Jetpack Compose application that automatically reads acti
 - Listens to Android `NotificationListenerService` and `MediaSessionManager` active sessions (`MediaController.Callback`) in real time.
 - Extracts track title, artist, album, and cover artwork from `MediaMetadata` bitmaps, `content://` / `https://` artwork URIs, and notification large-icon fallbacks.
 - Automatically updates the card artwork, blurred background, and adaptive colors whenever the playing song changes—plus instant manual **Refresh** and auto-sync on app resume.
+- Opens with a pure `#000000` splash screen showcasing the transparent **EchoSnap** mark with zero background box or clutter.
 
 ### 2. Full-Screen Blurred Background & Live Blur Slider
 - Displays the active album cover as a full-screen `ContentScale.Crop` background behind a `25%` dark contrast overlay (`rgba(0, 0, 0, 0.25)`).
@@ -39,17 +40,17 @@ BitChord is an Android Jetpack Compose application that automatically reads acti
 - **Logo Badge Colors:** Red, Template Dynamic (matches album art), Green, or Classic White—changing only the icon badge while keeping the brand wordmark crisp white.
 - **Background Modes:** Blurred Album Cover (`0px–40px`) or Palette Gradient presets.
 - **Card Layout Styles:** Floating Glass Card, Floating Glow Art, Minimal Story, or **Spotify-Style Lyrics Card** (with an inline manual multi-line lyrics editor, automatic light/dark ink contrast, and a **Palette Color / Song Cover Art** background toggle).
-- **Card Size Control:** Adjust card scale (`75%–115%`) cleanly for both preview and export.
+- **Card Size Control (`60%–120%`):** Adjust card scale consistently across the live screen, 9:16 Export Preview, Gallery Save, and Social Shares—with synchronous persistence across app restarts.
 - **High-Quality Cover Art & Online Search:** Auto-fetch or manually search 1000×1000 HD covers (iTunes HD & Deezer HD) and choose between online results or the original player cover art.
-- **Animated Song Canvas & Spotify Token Smart Search:** Smart-normalized search (with optional persisted Spotify Access Token) for looping Spotify Canvas MP4s and HD music clips rendered via hardware-accelerated looping `TextureView`.
+- **Spotify Account Login & Smart Animated Canvas:** Built-in **Login to Spotify** flow automatically captures and persists your session Bearer token (with optional OAuth PKCE & manual token fallback), paired with strict artist/title-verified matching for looping Spotify Canvas MP4s and HD music clips.
 - **Enhanced Adaptive Palette Gradients:** `clearFilters()` + HSV-harmonized multi-stop gradients (`Adaptive Harmony`, `Cinematic Aurora`, `Studio Glow`, etc.) that adapt cleanly to every cover including monochrome, ultra-dark, and bright art.
-- **Persistent Customizations:** All branding, size, blur, gradient, layout, Lyrics background mode, Spotify token, and canvas-search preferences automatically stay saved across song changes, player switches, and app restarts.
+- **Persistent Customizations:** All branding, size, blur, gradient, layout, Lyrics background mode, Spotify login token, and canvas-search preferences save synchronously and stay active across song changes, player switches, and app restarts.
 - **Track Editor & Sample Presets:** Edit track title/artist manually or preview with built-in demo tracks.
 
 ### 5. Export Preview, Save & Direct Social Sharing
 - **Copy link:** Copies track info cleanly to the clipboard.
-- **Save:** Exports a high-resolution `1080×1920` PNG directly to `Pictures/BitChord` via `MediaStore`.
-- **Preview:** Inspect the exact clutter-free `9:16` export before saving or sharing.
+- **Save:** Exports a high-resolution `1080×1920` PNG directly to `Pictures/EchoSnap` via `MediaStore`.
+- **Preview:** Inspect the exact clutter-free `9:16` export (reflecting your current card size and edits) before saving or sharing.
 - **Circular Social Logos:** Direct sharing via real circular app logos for **WhatsApp** (standard chat/status share), **Instagram Story** (Stories only), **Snapchat Story** (Stories only), **Discord**, and **Other** (Android share sheet).
 
 ---
@@ -65,12 +66,12 @@ BitChord is an Android Jetpack Compose application that automatically reads acti
 
 ## Setup & Permissions
 
-1. Install `app-debug.apk` on your Android device.
-2. Open **BitChord** and tap the **Notification Access Required** banner (or **Enable**).
-3. Allow Notification Access for BitChord in Android Settings.
-4. Play any song in your favorite music app—BitChord automatically pulls the cover art, title, and artist.
+1. Install `app-debug.apk` on your Android device (**EchoSnap**).
+2. Open **EchoSnap** and tap the **Notification Access Required** banner (or **Enable**).
+3. Allow Notification Access for **EchoSnap Media Listener** in Android Settings.
+4. Play any song in your favorite music app—EchoSnap automatically pulls the cover art, title, and artist.
 
-- **Privacy:** BitChord reads active media notifications locally on-device solely to render your share card. No tracking, analytics, or external servers are used.
+- **Privacy:** EchoSnap reads active media notifications locally on-device solely to render your share card. No tracking, analytics, or external servers are used.
 
 ---
 

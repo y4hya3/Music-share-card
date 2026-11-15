@@ -35,6 +35,10 @@ object CardStylePreferences {
     private const val KEY_LYRICS_BG_MODE = "lyrics_bg_mode"
     private const val KEY_AUTO_SEARCH_CANVAS = "auto_search_canvas"
     private const val KEY_SPOTIFY_ACCESS_TOKEN = "spotify_access_token"
+    private const val KEY_SPOTIFY_REFRESH_TOKEN = "spotify_refresh_token"
+    private const val KEY_SPOTIFY_TOKEN_EXPIRY_MS = "spotify_token_expiry_ms"
+    private const val KEY_SPOTIFY_CLIENT_ID = "spotify_client_id"
+    private const val KEY_SPOTIFY_ACCOUNT_LABEL = "spotify_account_label"
 
     fun load(context: Context): CardStyleConfig {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -75,11 +79,15 @@ object CardStylePreferences {
             darkOverlayAlpha = prefs.getFloat(KEY_DARK_OVERLAY_ALPHA, defaults.darkOverlayAlpha).coerceIn(0f, 0.7f),
             glowIntensity = prefs.getFloat(KEY_GLOW_INTENSITY, defaults.glowIntensity).coerceIn(0f, 1f),
             cornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS_DP, defaults.cornerRadiusDp).coerceIn(0, 32),
-            cardScale = prefs.getFloat(KEY_CARD_SCALE, defaults.cardScale).coerceIn(0.75f, 1.15f),
+            cardScale = prefs.getFloat(KEY_CARD_SCALE, defaults.cardScale).coerceIn(0.60f, 1.20f),
             showLogoWordmark = prefs.getBoolean(KEY_SHOW_WORDMARK, defaults.showLogoWordmark),
             autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt),
             autoSearchAnimatedCanvas = prefs.getBoolean(KEY_AUTO_SEARCH_CANVAS, defaults.autoSearchAnimatedCanvas),
             spotifyAccessToken = prefs.getString(KEY_SPOTIFY_ACCESS_TOKEN, defaults.spotifyAccessToken) ?: "",
+            spotifyRefreshToken = prefs.getString(KEY_SPOTIFY_REFRESH_TOKEN, defaults.spotifyRefreshToken) ?: "",
+            spotifyTokenExpiryMs = prefs.getLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, defaults.spotifyTokenExpiryMs),
+            spotifyClientId = prefs.getString(KEY_SPOTIFY_CLIENT_ID, defaults.spotifyClientId) ?: "",
+            spotifyAccountLabel = prefs.getString(KEY_SPOTIFY_ACCOUNT_LABEL, defaults.spotifyAccountLabel) ?: "",
             customLyrics = prefs.getString(KEY_CUSTOM_LYRICS, defaults.customLyrics) ?: ""
         )
     }
@@ -98,13 +106,17 @@ object CardStylePreferences {
             .putFloat(KEY_DARK_OVERLAY_ALPHA, config.darkOverlayAlpha.coerceIn(0f, 0.7f))
             .putFloat(KEY_GLOW_INTENSITY, config.glowIntensity.coerceIn(0f, 1f))
             .putInt(KEY_CORNER_RADIUS_DP, config.cornerRadiusDp.coerceIn(0, 32))
-            .putFloat(KEY_CARD_SCALE, config.cardScale.coerceIn(0.75f, 1.15f))
+            .putFloat(KEY_CARD_SCALE, config.cardScale.coerceIn(0.60f, 1.20f))
             .putBoolean(KEY_SHOW_WORDMARK, config.showLogoWordmark)
             .putBoolean(KEY_AUTO_SEARCH_ONLINE_ART, config.autoSearchOnlineArt)
             .putBoolean(KEY_AUTO_SEARCH_CANVAS, config.autoSearchAnimatedCanvas)
             .putString(KEY_SPOTIFY_ACCESS_TOKEN, config.spotifyAccessToken)
+            .putString(KEY_SPOTIFY_REFRESH_TOKEN, config.spotifyRefreshToken)
+            .putLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, config.spotifyTokenExpiryMs)
+            .putString(KEY_SPOTIFY_CLIENT_ID, config.spotifyClientId)
+            .putString(KEY_SPOTIFY_ACCOUNT_LABEL, config.spotifyAccountLabel)
             .putString(KEY_CUSTOM_LYRICS, config.customLyrics)
-            .apply()
+            .commit()
     }
 
     private inline fun <reified T : Enum<T>> enumValueOrDefault(raw: String?, default: T): T {

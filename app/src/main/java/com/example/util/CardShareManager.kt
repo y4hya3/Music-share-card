@@ -149,8 +149,8 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
-        val cardW = w * 0.78f * scale
+        val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
+        val cardW = (w * 0.78f * scale).coerceIn(w * 0.44f, w * 0.94f)
         val innerPad = 48f * scale
         val artSize = cardW - innerPad * 2f
         val cornerRadius = styleConfig.cornerRadiusDp * 3f * scale
@@ -274,8 +274,8 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
-        val artSize = (w * 0.72f * scale)
+        val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
+        val artSize = (w * 0.72f * scale).coerceIn(w * 0.42f, w * 0.90f)
         val artLeft = (w - artSize) / 2f
         val artTop = (h - artSize) * 0.36f
         val artRight = artLeft + artSize
@@ -355,8 +355,8 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
-        val cardW = w * 0.78f * scale
+        val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
+        val cardW = (w * 0.78f * scale).coerceIn(w * 0.44f, w * 0.94f)
         val innerPad = 42f * scale
         val artSize = cardW - innerPad * 2f
         val cornerRadius = styleConfig.cornerRadiusDp * 3f * scale
@@ -431,7 +431,7 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+        val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
         val useSongArtBg = styleConfig.lyricsCardBackgroundMode == LyricsCardBackgroundMode.SONG_ART &&
             track.albumArt != null
         val (cardColor, paletteInkColor) = com.example.ui.components.resolveLyricsCardColors(palette)
@@ -441,7 +441,7 @@ object CardShareManager {
         val isPlaceholder = styleConfig.customLyrics.trim().isEmpty() &&
             lyricsText.startsWith("Add your favorite lyric lines")
 
-        val cardW = w * 0.80f * scale
+        val cardW = (w * 0.80f * scale).coerceIn(w * 0.46f, w * 0.94f)
         val padH = 56f * scale
         val padV = 56f * scale
         val thumbSize = 132f * scale
@@ -861,7 +861,7 @@ object CardShareManager {
                 val contentValues = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
                     put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/BitChord")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/EchoSnap")
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
                 imageUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
@@ -877,8 +877,8 @@ object CardShareManager {
                 }
             } else {
                 val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val bitChordDir = File(picturesDir, "BitChord").apply { mkdirs() }
-                val file = File(bitChordDir, fileName)
+                val echoSnapDir = File(picturesDir, "EchoSnap").apply { mkdirs() }
+                val file = File(echoSnapDir, fileName)
                 FileOutputStream(file).use { out ->
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
                     out.flush()
@@ -891,7 +891,7 @@ object CardShareManager {
             }
 
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Saved to Gallery (Pictures/BitChord)!", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Saved to Gallery (Pictures/EchoSnap)!", Toast.LENGTH_LONG).show()
             }
             true
         } catch (e: Exception) {

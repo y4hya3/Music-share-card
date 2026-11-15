@@ -14,6 +14,7 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.text.Normalizer
 import java.util.Locale
 import kotlin.math.min
 
@@ -33,29 +34,38 @@ data class AnimatedCanvasCandidate(
 data class AnimatedCanvasSearchResult(
     val candidates: List<AnimatedCanvasCandidate>,
     val statusMessage: String,
-    val spotifyTokenAccepted: Boolean? = null
+    val spotifyTokenAccepted: Boolean? = null,
+    val refreshedToken: SpotifyTokenResult? = null
+)
+
+data class MatchScoreBreakdown(
+    val totalScore: Int,
+    val titleScore: Int,
+    val artistScore: Int
 )
 
 /**
  * Smart search ("scratching") engine for animated song canvases & high-res music clips.
  *
- * Strategy:
- * 1. Normalizes noisy media notification titles (removes "(Official Video)", "[Lyrics]",
- *    "feat.", remaster tags, etc.) into clean track + artist tokens.
- * 2. When the user supplies a Spotify Access Token:
- *    - Queries Spotify Web API (`GET /v1/search?type=track`) for exact track URIs and 640px+ art.
- *    - Encodes protobuf `EntityCanvazRequest` and posts to Spotify Canvas endpoint
- *      (`https://spclient.wg.spotify.com/canvaz-cache/v0/canvases`) to extract looping MP4 Canvases.
- * 3. Simultaneously searches public high-res animated music video loops (`iTunes Music Video API`
- *    returning HD .m4v/.mp4 clips + 1000x1000 artwork) and ranks every candidate by smart token overlap.
+ * Anti-mismatch accuracy safeguards:
+ * 1. Strips noisy suffixes ("- Topic", "VEVO", "(Official Video)", "[Lyrics]", "(feat. ...)") and accents.
+ * 2. Evaluates Title Score and Artist Score separately and strictly rejects candidates whose artist
+ *    doesn't match when targetArtist is known (preventing unrelated songs with similar words).
+ * 3. Uses Spotify Web API + Canvas protobuf (`EntityCanvazRequest`) when a Spotify token is connected
+ *    and automatically refreshes expired PKCE tokens if refresh credentials exist.
  */
 object AnimatedCanvasSearchService {
 
     private const val TAG = "AnimatedCanvasSearch"
+    private val GENERIC_APP_ARTISTS = setOf(
+        "spotify", "youtube music", "youtube", "apple music", "echosnap", "bitchord", "soundcloud", "music"
+    )
 
     suspend fun searchCanvases(
         rawQuery: String,
         spotifyToken: String,
+        spotifyRefreshToken: String = "",
+        spotifyClientId: String = "",
         targetTitle: String = "",
         targetArtist: String = "",
         maxResults: Int = 8
@@ -70,29 +80,66 @@ object AnimatedCanvasSearchService {
 
         val cleanTitle = normalizeQueryText(targetTitle).ifEmpty { cleaned }
         val cleanArtist = normalizeArtistText(targetArtist)
-        val trimmedToken = normalizeSpotifyToken(spotifyToken)
+        val hasRealTargetArtist = cleanArtist.isNotEmpty() &&
+            cleanArtist.lowercase(Locale.US) !in GENERIC_APP_ARTISTS
+        var activeToken = normalizeSpotifyToken(spotifyToken)
+        var refreshedToken: SpotifyTokenResult? = null
 
         var tokenAccepted: Boolean? = null
         var spotifyNote = ""
 
         coroutineScope {
-            val spotifyDeferred = if (trimmedToken.isNotEmpty()) {
+            val spotifyDeferred = if (activeToken.isNotEmpty() || (spotifyRefreshToken.isNotBlank() && spotifyClientId.isNotBlank())) {
                 async {
-                    querySpotifyTracksAndCanvases(
-                        cleanQuery = cleaned,
-                        cleanTitle = cleanTitle,
-                        cleanArtist = cleanArtist,
-                        bearerToken = trimmedToken
-                    )
+                    var outcome = if (activeToken.isNotEmpty()) {
+                        querySpotifyTracksAndCanvases(
+                            cleanQuery = cleaned,
+                            cleanTitle = cleanTitle,
+                            cleanArtist = if (hasRealTargetArtist) cleanArtist else "",
+                            bearerToken = activeToken
+                        )
+                    } else {
+                        SpotifyQueryOutcome(emptyList(), tokenAccepted = false, note = "Refreshing Spotify session...")
+                    }
+
+                    if (!outcome.tokenAccepted && spotifyRefreshToken.isNotBlank() && spotifyClientId.isNotBlank()) {
+                        val renewed = SpotifyAuthManager.refreshPkceToken(spotifyClientId, spotifyRefreshToken)
+                        if (renewed != null) {
+                            refreshedToken = renewed
+                            activeToken = renewed.accessToken
+                            outcome = querySpotifyTracksAndCanvases(
+                                cleanQuery = cleaned,
+                                cleanTitle = cleanTitle,
+                                cleanArtist = if (hasRealTargetArtist) cleanArtist else "",
+                                bearerToken = activeToken
+                            )
+                        }
+                    }
+                    outcome
                 }
             } else {
                 null
             }
 
             val itunesVideoDeferred = async {
-                var results = queryItunesMusicVideos(cleaned, cleanTitle, cleanArtist, limit = 8)
-                if (results.isEmpty() && cleanTitle != cleaned) {
-                    results = queryItunesMusicVideos(cleanTitle, cleanTitle, cleanArtist, limit = 6)
+                val primaryTerm = if (hasRealTargetArtist && cleanTitle.isNotEmpty()) {
+                    "$cleanTitle $cleanArtist"
+                } else {
+                    cleaned
+                }
+                var results = queryItunesMusicVideos(
+                    query = primaryTerm,
+                    targetTitle = cleanTitle,
+                    targetArtist = if (hasRealTargetArtist) cleanArtist else "",
+                    limit = 10
+                )
+                if (results.isEmpty() && cleanTitle != primaryTerm) {
+                    results = queryItunesMusicVideos(
+                        query = cleanTitle,
+                        targetTitle = cleanTitle,
+                        targetArtist = if (hasRealTargetArtist) cleanArtist else "",
+                        limit = 10
+                    )
                 }
                 results
             }
@@ -109,7 +156,7 @@ object AnimatedCanvasSearchService {
                 .distinctBy { it.videoUrl ?: it.hdPosterUrl ?: it.id }
                 .sortedWith(
                     compareByDescending<AnimatedCanvasCandidate> { it.isLoopingVideo }
-                        .thenByDescending { it.source.startsWith("Spotify Canvas") }
+                        .thenByDescending { it.source == "Spotify Canvas" }
                         .thenByDescending { it.matchScore }
                 )
                 .take(maxResults)
@@ -136,16 +183,22 @@ object AnimatedCanvasSearchService {
                     if (withThumbnails.isNotEmpty()) append(" • ")
                 }
                 if (withThumbnails.isEmpty()) {
-                    append("No animated canvas found for \"$cleaned\"")
+                    val targetDesc = if (hasRealTargetArtist) "\"$cleanTitle\" by $cleanArtist" else "\"$cleaned\""
+                    if (spotifyNote.isEmpty()) {
+                        append("No exact animated canvas matched $targetDesc")
+                    } else {
+                        append("No exact match for $targetDesc")
+                    }
                 } else {
-                    append("Found $videoCount animated clip${if (videoCount == 1) "" else "s"} & ${withThumbnails.size} HD match${if (withThumbnails.size == 1) "" else "es"}")
+                    append("Matched $videoCount animated clip${if (videoCount == 1) "" else "s"} (${withThumbnails.size} exact result${if (withThumbnails.size == 1) "" else "s"})")
                 }
             }
 
             AnimatedCanvasSearchResult(
                 candidates = withThumbnails,
                 statusMessage = status,
-                spotifyTokenAccepted = tokenAccepted
+                spotifyTokenAccepted = tokenAccepted,
+                refreshedToken = refreshedToken
             )
         }
     }
@@ -170,20 +223,87 @@ object AnimatedCanvasSearchService {
     }
 
     fun normalizeQueryText(input: String): String {
-        return input
-            .replace("\\([^)]*(feat\\.|ft\\.|official|video|audio|lyric|remaster|version|live|edit|mix|explicit|clean)[^)]*\\)".toRegex(RegexOption.IGNORE_CASE), " ")
+        val noDiacritics = stripDiacritics(input)
+        return noDiacritics
+            .replace("\\([^)]*(feat\\.|ft\\.|official|video|audio|lyric|remaster|version|live|edit|mix|explicit|clean|hd|4k)[^)]*\\)".toRegex(RegexOption.IGNORE_CASE), " ")
             .replace("\\[[^\\]]*\\]".toRegex(), " ")
-            .replace("\\s+[-–—]\\s+(official|lyric|audio|video).*".toRegex(RegexOption.IGNORE_CASE), " ")
+            .replace("\\s+[-–—]\\s+(official|lyric|audio|video|remaster).*".toRegex(RegexOption.IGNORE_CASE), " ")
             .replace("[\"“”'’]".toRegex(), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
     }
 
-    private fun normalizeArtistText(input: String): String {
-        return input
-            .replace("\\s*(feat\\.|ft\\.|with|&|,|•|x)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
+    fun normalizeArtistText(input: String): String {
+        val noDiacritics = stripDiacritics(input)
+        return noDiacritics
+            .replace("\\s*-\\s*Topic$".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("VEVO$".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("\\s*(feat\\.|ft\\.|featuring|with|&|,|•|/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
+    }
+
+    private fun stripDiacritics(text: String): String {
+        val normalized = Normalizer.normalize(text, Normalizer.Form.NFD)
+        return "\\p{InCombiningDiacriticalMarks}+".toRegex().replace(normalized, "")
+    }
+
+    fun evaluateMatch(
+        candidateTitle: String,
+        candidateArtist: String,
+        targetTitle: String,
+        targetArtist: String
+    ): MatchScoreBreakdown {
+        val cTitle = normalizeQueryText(candidateTitle).lowercase(Locale.US)
+        val cArtistRaw = stripDiacritics(candidateArtist).lowercase(Locale.US)
+        val cArtistPrimary = normalizeArtistText(candidateArtist).lowercase(Locale.US)
+        val tTitle = normalizeQueryText(targetTitle).lowercase(Locale.US)
+        val tArtist = normalizeArtistText(targetArtist).lowercase(Locale.US)
+
+        var titleScore = 0
+        if (tTitle.isNotEmpty()) {
+            if (cTitle == tTitle) {
+                titleScore = 65
+            } else if (cTitle.contains(tTitle) || tTitle.contains(cTitle)) {
+                titleScore = 46
+            } else {
+                val tTokens = tTitle.split(" ").filter { it.length > 1 }.toSet()
+                val cTokens = cTitle.split(" ").filter { it.length > 1 }.toSet()
+                if (tTokens.isNotEmpty()) {
+                    val overlap = tTokens.intersect(cTokens).size
+                    titleScore = (overlap * 40) / tTokens.size
+                }
+            }
+        }
+
+        var artistScore = 0
+        if (tArtist.isNotEmpty()) {
+            if (cArtistPrimary == tArtist || cArtistRaw.contains(tArtist) || (cArtistPrimary.isNotEmpty() && tArtist.contains(cArtistPrimary))) {
+                artistScore = 40
+            } else {
+                val aTokens = tArtist.split(" ").filter { it.length > 1 }.toSet()
+                val caTokens = cArtistRaw.split(" ", ",", "&", "/").filter { it.length > 1 }.toSet()
+                if (aTokens.isNotEmpty()) {
+                    val overlap = aTokens.intersect(caTokens).size
+                    if (overlap > 0) {
+                        artistScore = (overlap * 30) / aTokens.size
+                    }
+                }
+            }
+        }
+
+        var penalty = 0
+        val lowerCandidate = candidateTitle.lowercase(Locale.US)
+        val lowerCandidateArtist = candidateArtist.lowercase(Locale.US)
+        if (lowerCandidate.contains("karaoke") && !tTitle.contains("karaoke")) penalty += 45
+        if (lowerCandidate.contains("tribute") && !tTitle.contains("tribute")) penalty += 40
+        if (lowerCandidate.contains("instrumental") && !tTitle.contains("instrumental")) penalty += 35
+        if (lowerCandidate.contains("slowed") && !tTitle.contains("slowed")) penalty += 30
+        if (lowerCandidate.contains("nightcore") && !tTitle.contains("nightcore")) penalty += 30
+        if (lowerCandidateArtist.contains("karaoke") && !tArtist.contains("karaoke")) penalty += 50
+
+        val total = (titleScore + artistScore - penalty).coerceAtLeast(0)
+        return MatchScoreBreakdown(totalScore = total, titleScore = titleScore, artistScore = artistScore)
     }
 
     fun scoreMatch(
@@ -191,46 +311,21 @@ object AnimatedCanvasSearchService {
         candidateArtist: String,
         targetTitle: String,
         targetArtist: String
-    ): Int {
-        val cTitle = normalizeQueryText(candidateTitle).lowercase(Locale.US)
-        val cArtist = normalizeArtistText(candidateArtist).lowercase(Locale.US)
-        val tTitle = normalizeQueryText(targetTitle).lowercase(Locale.US)
-        val tArtist = normalizeArtistText(targetArtist).lowercase(Locale.US)
+    ): Int = evaluateMatch(candidateTitle, candidateArtist, targetTitle, targetArtist).totalScore
 
-        var score = 0
-        if (tTitle.isNotEmpty() && cTitle == tTitle) {
-            score += 65
-        } else if (tTitle.isNotEmpty() && (cTitle.contains(tTitle) || tTitle.contains(cTitle))) {
-            score += 42
-        } else if (tTitle.isNotEmpty()) {
-            val tTokens = tTitle.split(" ").filter { it.length > 1 }.toSet()
-            val cTokens = cTitle.split(" ").filter { it.length > 1 }.toSet()
-            if (tTokens.isNotEmpty()) {
-                val overlap = tTokens.intersect(cTokens).size
-                score += (overlap * 35) / tTokens.size
-            }
+    private fun isVerifiedMatch(
+        breakdown: MatchScoreBreakdown,
+        hasTargetTitle: Boolean,
+        hasTargetArtist: Boolean
+    ): Boolean {
+        if (!hasTargetTitle && !hasTargetArtist) return breakdown.totalScore >= 30
+        if (hasTargetArtist && breakdown.artistScore <= 0) return false
+        if (hasTargetTitle && breakdown.titleScore < 28) return false
+        return if (hasTargetTitle && hasTargetArtist) {
+            breakdown.totalScore >= 56
+        } else {
+            breakdown.totalScore >= 38
         }
-
-        if (tArtist.isNotEmpty()) {
-            if (cArtist == tArtist || candidateArtist.lowercase(Locale.US).contains(tArtist)) {
-                score += 35
-            } else {
-                val aTokens = tArtist.split(" ").filter { it.length > 1 }.toSet()
-                val caTokens = candidateArtist.lowercase(Locale.US).split(" ").filter { it.length > 1 }.toSet()
-                if (aTokens.isNotEmpty()) {
-                    val overlap = aTokens.intersect(caTokens).size
-                    score += (overlap * 25) / aTokens.size
-                }
-            }
-        }
-
-        // Penalize obvious cover / karaoke / slowed versions unless explicitly queried
-        val lowerCandidate = candidateTitle.lowercase(Locale.US)
-        if (lowerCandidate.contains("karaoke") && !tTitle.contains("karaoke")) score -= 40
-        if (lowerCandidate.contains("tribute") && !tTitle.contains("tribute")) score -= 35
-        if (lowerCandidate.contains("slowed") && !tTitle.contains("slowed")) score -= 25
-
-        return score.coerceAtLeast(0)
     }
 
     private data class SpotifyQueryOutcome(
@@ -256,19 +351,19 @@ object AnimatedCanvasSearchService {
     ): SpotifyQueryOutcome {
         return try {
             val structuredQuery = if (cleanTitle.isNotEmpty() && cleanArtist.isNotEmpty()) {
-                "track:$cleanTitle artist:$cleanArtist"
+                "track:\"$cleanTitle\" artist:\"$cleanArtist\""
             } else {
                 cleanQuery
             }
             val encoded = URLEncoder.encode(structuredQuery, "UTF-8")
-            val searchUrl = "https://api.spotify.com/v1/search?q=$encoded&type=track&limit=6"
+            val searchUrl = "https://api.spotify.com/v1/search?q=$encoded&type=track&limit=8"
 
             val (statusCode, body) = httpGetWithAuth(searchUrl, bearerToken)
             if (statusCode == 401 || statusCode == 403) {
                 return SpotifyQueryOutcome(
                     candidates = emptyList(),
                     tokenAccepted = false,
-                    note = "Spotify token expired/rejected ($statusCode)"
+                    note = "Spotify session expired ($statusCode) — log in again"
                 )
             }
             if (statusCode !in 200..299 || body.isNullOrBlank()) {
@@ -280,9 +375,8 @@ object AnimatedCanvasSearchService {
             }
 
             var tracks = parseSpotifyTracks(body, cleanTitle, cleanArtist)
-            // Fallback to free-text search if field-filtered search found nothing
             if (tracks.isEmpty() && structuredQuery != cleanQuery) {
-                val broadUrl = "https://api.spotify.com/v1/search?q=${URLEncoder.encode(cleanQuery, "UTF-8")}&type=track&limit=6"
+                val broadUrl = "https://api.spotify.com/v1/search?q=${URLEncoder.encode(cleanQuery, "UTF-8")}&type=track&limit=8"
                 val (broadCode, broadBody) = httpGetWithAuth(broadUrl, bearerToken)
                 if (broadCode in 200..299 && !broadBody.isNullOrBlank()) {
                     tracks = parseSpotifyTracks(broadBody, cleanTitle, cleanArtist)
@@ -293,28 +387,28 @@ object AnimatedCanvasSearchService {
                 return SpotifyQueryOutcome(
                     candidates = emptyList(),
                     tokenAccepted = true,
-                    note = "Spotify connected (no track match)"
+                    note = "Spotify connected (no exact track match)"
                 )
             }
 
-            // Query Spotify Canvas cache via protobuf EntityCanvazRequest
             val canvasByTrackUri = fetchSpotifyCanvases(tracks.map { it.uri }, bearerToken)
 
             val out = mutableListOf<AnimatedCanvasCandidate>()
             tracks.sortedByDescending { it.matchScore }.forEach { track ->
-                val canvasUrl = canvasByTrackUri[track.uri]
-                if (!canvasUrl.isNullOrBlank()) {
+                val canvasInfo = canvasByTrackUri[track.uri]
+                if (canvasInfo != null && canvasInfo.url.isNotBlank()) {
+                    val isVideo = canvasInfo.type != 0 || canvasInfo.url.endsWith(".mp4", ignoreCase = true)
                     out.add(
                         AnimatedCanvasCandidate(
                             id = "sp_canvas_${track.id}",
                             title = track.title,
                             artist = track.artist,
-                            videoUrl = canvasUrl,
-                            hdPosterUrl = track.coverUrl,
+                            videoUrl = if (isVideo) canvasInfo.url else null,
+                            hdPosterUrl = if (!isVideo) canvasInfo.url else track.coverUrl,
                             source = "Spotify Canvas",
-                            resolutionLabel = "Canvas MP4",
-                            matchScore = track.matchScore + 25,
-                            isLoopingVideo = true
+                            resolutionLabel = if (isVideo) "Canvas MP4" else "Canvas HD",
+                            matchScore = track.matchScore + 30,
+                            isLoopingVideo = isVideo
                         )
                     )
                 } else if (!track.coverUrl.isNullOrBlank()) {
@@ -338,7 +432,7 @@ object AnimatedCanvasSearchService {
             val note = if (canvasCount > 0) {
                 "Spotify Canvas unlocked ($canvasCount loop${if (canvasCount == 1) "" else "s"})"
             } else {
-                "Spotify connected (matched ${out.size} track${if (out.size == 1) "" else "s"})"
+                "Spotify connected (no Canvas loop on track)"
             }
 
             SpotifyQueryOutcome(
@@ -382,6 +476,11 @@ object AnimatedCanvasSearchService {
                 }
             }.joinToString(", ")
 
+            val breakdown = evaluateMatch(name, artistNames, targetTitle, targetArtist)
+            if (!isVerifiedMatch(breakdown, targetTitle.isNotEmpty(), targetArtist.isNotEmpty())) {
+                continue
+            }
+
             val imagesArr = item.optJSONObject("album")?.optJSONArray("images")
             var bestCoverUrl: String? = null
             var bestArea = -1
@@ -405,21 +504,23 @@ object AnimatedCanvasSearchService {
                     title = name,
                     artist = artistNames,
                     coverUrl = bestCoverUrl,
-                    matchScore = scoreMatch(name, artistNames, targetTitle, targetArtist)
+                    matchScore = breakdown.totalScore
                 )
             )
         }
         return list
     }
 
-    /**
-     * Queries Spotify's `canvaz-cache/v0/canvases` endpoint with a minimal protobuf
-     * `EntityCanvazRequest` payload and extracts any returned looping `.mp4` canvas URLs.
-     */
+    internal data class ParsedCanvazEntry(
+        val url: String,
+        val entityUri: String,
+        val type: Int
+    )
+
     private fun fetchSpotifyCanvases(
         trackUris: List<String>,
         bearerToken: String
-    ): Map<String, String> {
+    ): Map<String, ParsedCanvazEntry> {
         if (trackUris.isEmpty()) return emptyMap()
         return try {
             val requestBytes = encodeEntityCanvazRequest(trackUris)
@@ -437,7 +538,7 @@ object AnimatedCanvasSearchService {
                 conn.outputStream.use { it.write(requestBytes) }
                 if (conn.responseCode in 200..299) {
                     val respBytes = conn.inputStream.use { it.readBytes() }
-                    decodeEntityCanvazResponse(respBytes)
+                    decodeEntityCanvazEntries(respBytes)
                 } else {
                     emptyMap()
                 }
@@ -455,13 +556,11 @@ object AnimatedCanvasSearchService {
         for (uri in trackUris) {
             val uriBytes = uri.toByteArray(Charsets.UTF_8)
             val entityMsg = ByteArrayOutputStream()
-            // Field 1 (string entity_uri): wire tag (1 << 3) | 2 = 0x0A
             entityMsg.write(0x0A)
             writeVarint(entityMsg, uriBytes.size)
             entityMsg.write(uriBytes)
 
             val entityBytes = entityMsg.toByteArray()
-            // Field 1 (repeated Entity entities): wire tag 0x0A
             out.write(0x0A)
             writeVarint(out, entityBytes.size)
             out.write(entityBytes)
@@ -469,8 +568,11 @@ object AnimatedCanvasSearchService {
         return out.toByteArray()
     }
 
-    internal fun decodeEntityCanvazResponse(bytes: ByteArray): Map<String, String> {
-        val result = linkedMapOf<String, String>()
+    internal fun decodeEntityCanvazResponse(bytes: ByteArray): Map<String, String> =
+        decodeEntityCanvazEntries(bytes).mapValues { it.value.url }
+
+    internal fun decodeEntityCanvazEntries(bytes: ByteArray): Map<String, ParsedCanvazEntry> {
+        val result = linkedMapOf<String, ParsedCanvazEntry>()
         var offset = 0
         while (offset < bytes.size) {
             val (tag, nextOffset) = readVarint(bytes, offset) ?: break
@@ -482,9 +584,9 @@ object AnimatedCanvasSearchService {
                 val end = min(bytes.size, afterLen + len.toInt().coerceAtLeast(0))
                 if (fieldNumber == 1 && end > afterLen) {
                     val sub = bytes.copyOfRange(afterLen, end)
-                    val (url, entityUri) = parseSingleCanvazMessage(sub)
-                    if (!url.isNullOrBlank() && !entityUri.isNullOrBlank()) {
-                        result[entityUri] = url
+                    val entry = parseSingleCanvazMessage(sub)
+                    if (entry != null) {
+                        result[entry.entityUri] = entry
                     }
                 }
                 offset = end
@@ -495,9 +597,10 @@ object AnimatedCanvasSearchService {
         return result
     }
 
-    private fun parseSingleCanvazMessage(bytes: ByteArray): Pair<String?, String?> {
+    private fun parseSingleCanvazMessage(bytes: ByteArray): ParsedCanvazEntry? {
         var canvasUrl: String? = null
         var entityUri: String? = null
+        var type = 2 // default VIDEO_LOOPING
         var offset = 0
         while (offset < bytes.size) {
             val (tag, nextOffset) = readVarint(bytes, offset) ?: break
@@ -517,11 +620,19 @@ object AnimatedCanvasSearchService {
                     }
                 }
                 offset = end
+            } else if (wireType == 0 && fieldNumber == 4) {
+                val (valLong, afterVal) = readVarint(bytes, offset) ?: break
+                type = valLong.toInt()
+                offset = afterVal
             } else {
                 offset = skipProtobufField(bytes, offset, wireType) ?: break
             }
         }
-        return Pair(canvasUrl, entityUri)
+        return if (!canvasUrl.isNullOrBlank() && !entityUri.isNullOrBlank()) {
+            ParsedCanvazEntry(url = canvasUrl, entityUri = entityUri, type = type)
+        } else {
+            null
+        }
     }
 
     private fun writeVarint(out: ByteArrayOutputStream, value: Int) {
@@ -589,14 +700,17 @@ object AnimatedCanvasSearchService {
 
                 val trackName = item.optString("trackName", "").ifBlank { "Music Video" }
                 val artistName = item.optString("artistName", "")
+                val breakdown = evaluateMatch(trackName, artistName, targetTitle, targetArtist)
+                if (!isVerifiedMatch(breakdown, targetTitle.isNotEmpty(), targetArtist.isNotEmpty())) {
+                    continue
+                }
+
                 val artwork100 = item.optString("artworkUrl100", "").trim()
                 val hdPoster = if (artwork100.isNotEmpty()) {
                     artwork100.replace("100x100bb", "1000x1000bb")
                 } else {
                     null
                 }
-                val score = scoreMatch(trackName, artistName, targetTitle, targetArtist)
-                if (score < 20 && targetTitle.isNotBlank()) continue
 
                 list.add(
                     AnimatedCanvasCandidate(
@@ -607,7 +721,7 @@ object AnimatedCanvasSearchService {
                         hdPosterUrl = hdPoster,
                         source = "HD Clip",
                         resolutionLabel = "HD Video",
-                        matchScore = score,
+                        matchScore = breakdown.totalScore,
                         isLoopingVideo = true
                     )
                 )
@@ -649,7 +763,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "BitChord/1.0 Android")
+                setRequestProperty("User-Agent", "EchoSnap/1.0 Android")
                 setRequestProperty("Accept", "application/json")
                 if (!bearerToken.isNullOrBlank()) {
                     setRequestProperty("Authorization", "Bearer $bearerToken")
@@ -684,7 +798,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "BitChord/1.0 Android")
+                setRequestProperty("User-Agent", "EchoSnap/1.0 Android")
             }
             try {
                 val code = conn.responseCode

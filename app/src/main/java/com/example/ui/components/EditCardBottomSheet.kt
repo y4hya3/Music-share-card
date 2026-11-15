@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -59,6 +60,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -76,6 +78,7 @@ import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
 import com.example.service.AnimatedCanvasCandidate
+import com.example.service.SpotifyAuthManager
 import kotlin.math.roundToInt
 
 /**
@@ -119,7 +122,10 @@ fun EditCardBottomSheet(
     var canvasSearchQuery by remember(currentTrack.title, currentTrack.artist) {
         mutableStateOf("${currentTrack.title} ${currentTrack.artist}".trim())
     }
+    val context = LocalContext.current
     var revealSpotifyToken by remember { mutableStateOf(false) }
+    var showSpotifyLoginDialog by remember { mutableStateOf(false) }
+    var showAdvancedSpotifyOptions by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -449,15 +455,15 @@ fun EditCardBottomSheet(
 
             Spacer(modifier = Modifier.height(22.dp))
 
-            // 3B. ANIMATED SONG CANVAS & SPOTIFY TOKEN SMART SEARCH
+            // 3B. ANIMATED SONG CANVAS & SPOTIFY ACCOUNT LOGIN
             Text(
-                text = "Animated Song Canvas (HD Video & Spotify)",
+                text = "Animated Song Canvas & Spotify Login",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color.White.copy(alpha = 0.9f)
             )
             Text(
-                text = "Smart search looping Spotify Canvases & HD music clips. Paste your Spotify access token for direct Spotify Canvas lookup.",
+                text = "Log in to your Spotify account to automatically capture your token for animated Canvas loops, or smart-search HD music clips.",
                 fontSize = 12.sp,
                 color = Color.White.copy(alpha = 0.6f),
                 modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -483,7 +489,7 @@ fun EditCardBottomSheet(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "Automatically finds looping HD canvas backgrounds for active songs",
+                            text = "Automatically finds exact looping HD canvas backgrounds for active songs",
                             color = Color.White.copy(alpha = 0.6f),
                             fontSize = 11.sp
                         )
@@ -510,65 +516,273 @@ fun EditCardBottomSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            OutlinedTextField(
-                value = styleConfig.spotifyAccessToken,
-                onValueChange = { token ->
-                    onStyleChange(styleConfig.copy(spotifyAccessToken = token))
-                },
-                singleLine = true,
-                label = { Text("Spotify Access Token (optional)") },
-                placeholder = { Text("Paste Bearer / OAuth token", fontSize = 12.sp) },
-                visualTransformation = if (revealSpotifyToken) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(end = 6.dp)
-                    ) {
-                        Surface(
-                            onClick = { revealSpotifyToken = !revealSpotifyToken },
-                            shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFF2E2E3A),
-                            modifier = Modifier.testTag("toggle_spotify_token_visibility")
+            // Primary Spotify Account Login Card
+            val isSpotifyConnected = styleConfig.spotifyAccessToken.isNotBlank()
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (isSpotifyConnected) Color(0xFF1A2A20) else Color(0xFF22242D),
+                border = androidx.compose.foundation.BorderStroke(
+                    width = 1.dp,
+                    color = if (isSpotifyConnected) Color(0xFF1DB954).copy(alpha = 0.55f) else Color.White.copy(alpha = 0.10f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    if (isSpotifyConnected) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(
-                                text = if (revealSpotifyToken) "Hide" else "Show",
-                                color = Color.White.copy(alpha = 0.85f),
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-                            )
-                        }
-                        if (styleConfig.spotifyAccessToken.isNotEmpty()) {
-                            IconButton(
-                                onClick = { onStyleChange(styleConfig.copy(spotifyAccessToken = "")) },
-                                modifier = Modifier.size(32.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Clear token",
-                                    tint = Color.White.copy(alpha = 0.65f),
-                                    modifier = Modifier.size(16.dp)
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF1DB954))
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Connected: ${styleConfig.spotifyAccountLabel.ifBlank { "Spotify Account" }}",
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("spotify_connected_label")
+                                    )
+                                    Text(
+                                        text = "Spotify Canvas token active & saved",
+                                        color = Color(0xFF9BE7B3),
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                onClick = { showSpotifyLoginDialog = true },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF253A2C),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("spotify_reconnect_button")
+                            ) {
+                                Text(
+                                    text = "Reconnect",
+                                    color = Color(0xFF1DB954),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = {
+                                    MediaNotificationRepository.disconnectSpotifyAccount()
+                                    Toast.makeText(context, "Logged out of Spotify", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF3A2429),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("spotify_logout_button")
+                            ) {
+                                Text(
+                                    text = "Log Out",
+                                    color = Color(0xFFFF8A96),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
                                 )
                             }
                         }
+                    } else {
+                        Button(
+                            onClick = { showSpotifyLoginDialog = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1DB954),
+                                contentColor = Color(0xFF0A0C0B)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("spotify_login_button")
+                        ) {
+                            Text(
+                                text = "Login to Spotify",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Sign in once — EchoSnap automatically captures and saves your Spotify token.",
+                            color = Color.White.copy(alpha = 0.65f),
+                            fontSize = 11.sp
+                        )
                     }
-                },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color(0xFF1DB954),
-                    unfocusedBorderColor = Color(0xFF444450),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White,
-                    focusedLabelColor = Color(0xFF1DB954),
-                    unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("spotify_token_input")
-            )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Surface(
+                        onClick = { showAdvancedSpotifyOptions = !showAdvancedSpotifyOptions },
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color(0xFF2B2D38),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("toggle_advanced_spotify_button")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Advanced: Manual Token / PKCE Client ID",
+                                color = Color.White.copy(alpha = 0.82f),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (showAdvancedSpotifyOptions) "Hide" else "Show",
+                                color = Color(0xFF1DB954),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    if (showAdvancedSpotifyOptions) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = styleConfig.spotifyAccessToken,
+                            onValueChange = { token ->
+                                onStyleChange(styleConfig.copy(spotifyAccessToken = token))
+                            },
+                            singleLine = true,
+                            label = { Text("Spotify Access Token (manual)") },
+                            placeholder = { Text("Paste Bearer / OAuth token", fontSize = 12.sp) },
+                            visualTransformation = if (revealSpotifyToken) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                ) {
+                                    Surface(
+                                        onClick = { revealSpotifyToken = !revealSpotifyToken },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFF2E2E3A),
+                                        modifier = Modifier.testTag("toggle_spotify_token_visibility")
+                                    ) {
+                                        Text(
+                                            text = if (revealSpotifyToken) "Hide" else "Show",
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                    if (styleConfig.spotifyAccessToken.isNotEmpty()) {
+                                        IconButton(
+                                            onClick = { onStyleChange(styleConfig.copy(spotifyAccessToken = "")) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = "Clear token",
+                                                tint = Color.White.copy(alpha = 0.65f),
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFF1DB954),
+                                unfocusedBorderColor = Color(0xFF444450),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = Color(0xFF1DB954),
+                                unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("spotify_token_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = styleConfig.spotifyClientId,
+                                onValueChange = { cid ->
+                                    onStyleChange(styleConfig.copy(spotifyClientId = cid))
+                                },
+                                singleLine = true,
+                                label = { Text("Spotify Client ID (PKCE)", fontSize = 12.sp) },
+                                placeholder = { Text("Optional App Client ID", fontSize = 11.sp) },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF1DB954),
+                                    unfocusedBorderColor = Color(0xFF444450),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedLabelColor = Color(0xFF1DB954),
+                                    unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("spotify_client_id_input")
+                            )
+
+                            Button(
+                                onClick = {
+                                    val intent = SpotifyAuthManager.buildPkceAuthorizeIntent(
+                                        context = context,
+                                        clientId = styleConfig.spotifyClientId
+                                    )
+                                    if (intent != null) {
+                                        context.startActivity(intent)
+                                    } else {
+                                        Toast.makeText(
+                                            context,
+                                            "Enter a Spotify Client ID or tap Login to Spotify above",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF2D303C),
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
+                                modifier = Modifier.testTag("spotify_pkce_oauth_button")
+                            ) {
+                                Text("OAuth", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(10.dp))
 
@@ -718,11 +932,11 @@ fun EditCardBottomSheet(
                 )
             }
             Slider(
-                value = styleConfig.cardScale.coerceIn(0.75f, 1.15f),
+                value = styleConfig.cardScale.coerceIn(0.60f, 1.20f),
                 onValueChange = { newScale ->
-                    onStyleChange(styleConfig.copy(cardScale = newScale.coerceIn(0.75f, 1.15f)))
+                    onStyleChange(styleConfig.copy(cardScale = newScale.coerceIn(0.60f, 1.20f)))
                 },
-                valueRange = 0.75f..1.15f,
+                valueRange = 0.60f..1.20f,
                 colors = SliderDefaults.colors(
                     thumbColor = Color(0xFFFF2B44),
                     activeTrackColor = Color(0xFFFF2B44),
@@ -1154,6 +1368,21 @@ fun EditCardBottomSheet(
                     .testTag("edit_artist_name_input")
             )
         }
+    }
+
+    if (showSpotifyLoginDialog) {
+        SpotifyWebLoginDialog(
+            onDismiss = { showSpotifyLoginDialog = false },
+            onTokenCaptured = { result ->
+                showSpotifyLoginDialog = false
+                MediaNotificationRepository.applySpotifyLoginResult(result)
+                Toast.makeText(
+                    context,
+                    "Spotify connected (${result.accountLabel})",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
     }
 }
 
