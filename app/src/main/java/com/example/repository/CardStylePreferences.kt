@@ -8,6 +8,7 @@ import com.example.model.CardLayoutType
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
+import com.example.model.LyricsCardBackgroundMode
 
 /**
  * Persists user CardStyleConfig customizations across song changes, different music players,
@@ -30,6 +31,10 @@ object CardStylePreferences {
     private const val KEY_CARD_SCALE = "card_scale"
     private const val KEY_SHOW_WORDMARK = "show_wordmark"
     private const val KEY_AUTO_SEARCH_ONLINE_ART = "auto_search_online_art"
+    private const val KEY_CUSTOM_LYRICS = "custom_lyrics"
+    private const val KEY_LYRICS_BG_MODE = "lyrics_bg_mode"
+    private const val KEY_AUTO_SEARCH_CANVAS = "auto_search_canvas"
+    private const val KEY_SPOTIFY_ACCESS_TOKEN = "spotify_access_token"
 
     fun load(context: Context): CardStyleConfig {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -51,6 +56,10 @@ object CardStylePreferences {
             prefs.getString(KEY_CARD_LAYOUT_TYPE, defaults.cardLayoutType.name),
             defaults.cardLayoutType
         )
+        val lyricsBgMode = enumValueOrDefault(
+            prefs.getString(KEY_LYRICS_BG_MODE, defaults.lyricsCardBackgroundMode.name),
+            defaults.lyricsCardBackgroundMode
+        )
 
         val customColorArgb = prefs.getInt(KEY_CUSTOM_LOGO_COLOR, defaults.customLogoColor.toArgb())
 
@@ -60,6 +69,7 @@ object CardStylePreferences {
             customLogoColor = Color(customColorArgb),
             gradientStyle = gradientStyle,
             cardLayoutType = cardLayoutType,
+            lyricsCardBackgroundMode = lyricsBgMode,
             useBlurredAlbumBackground = prefs.getBoolean(KEY_USE_BLURRED_BG, defaults.useBlurredAlbumBackground),
             backgroundBlurRadius = prefs.getFloat(KEY_BLUR_RADIUS, defaults.backgroundBlurRadius).coerceIn(0f, 40f),
             darkOverlayAlpha = prefs.getFloat(KEY_DARK_OVERLAY_ALPHA, defaults.darkOverlayAlpha).coerceIn(0f, 0.7f),
@@ -67,7 +77,10 @@ object CardStylePreferences {
             cornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS_DP, defaults.cornerRadiusDp).coerceIn(0, 32),
             cardScale = prefs.getFloat(KEY_CARD_SCALE, defaults.cardScale).coerceIn(0.75f, 1.15f),
             showLogoWordmark = prefs.getBoolean(KEY_SHOW_WORDMARK, defaults.showLogoWordmark),
-            autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt)
+            autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt),
+            autoSearchAnimatedCanvas = prefs.getBoolean(KEY_AUTO_SEARCH_CANVAS, defaults.autoSearchAnimatedCanvas),
+            spotifyAccessToken = prefs.getString(KEY_SPOTIFY_ACCESS_TOKEN, defaults.spotifyAccessToken) ?: "",
+            customLyrics = prefs.getString(KEY_CUSTOM_LYRICS, defaults.customLyrics) ?: ""
         )
     }
 
@@ -79,6 +92,7 @@ object CardStylePreferences {
             .putInt(KEY_CUSTOM_LOGO_COLOR, config.customLogoColor.toArgb())
             .putString(KEY_GRADIENT_STYLE, config.gradientStyle.name)
             .putString(KEY_CARD_LAYOUT_TYPE, config.cardLayoutType.name)
+            .putString(KEY_LYRICS_BG_MODE, config.lyricsCardBackgroundMode.name)
             .putBoolean(KEY_USE_BLURRED_BG, config.useBlurredAlbumBackground)
             .putFloat(KEY_BLUR_RADIUS, config.backgroundBlurRadius.coerceIn(0f, 40f))
             .putFloat(KEY_DARK_OVERLAY_ALPHA, config.darkOverlayAlpha.coerceIn(0f, 0.7f))
@@ -87,6 +101,9 @@ object CardStylePreferences {
             .putFloat(KEY_CARD_SCALE, config.cardScale.coerceIn(0.75f, 1.15f))
             .putBoolean(KEY_SHOW_WORDMARK, config.showLogoWordmark)
             .putBoolean(KEY_AUTO_SEARCH_ONLINE_ART, config.autoSearchOnlineArt)
+            .putBoolean(KEY_AUTO_SEARCH_CANVAS, config.autoSearchAnimatedCanvas)
+            .putString(KEY_SPOTIFY_ACCESS_TOKEN, config.spotifyAccessToken)
+            .putString(KEY_CUSTOM_LYRICS, config.customLyrics)
             .apply()
     }
 

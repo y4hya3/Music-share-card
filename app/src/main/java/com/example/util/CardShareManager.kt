@@ -37,6 +37,7 @@ import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
+import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -118,6 +119,9 @@ object CardShareManager {
             }
             CardLayoutType.MINIMAL_CLEAN -> {
                 drawMinimalLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
+            }
+            CardLayoutType.SPOTIFY_LYRICS_CARD -> {
+                drawSpotifyLyricsCardLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
             }
         }
 
@@ -418,6 +422,198 @@ object CardShareManager {
         )
     }
 
+    private fun drawSpotifyLyricsCardLayout(
+        context: Context,
+        canvas: Canvas,
+        w: Int,
+        h: Int,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig
+    ) {
+        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+        val useSongArtBg = styleConfig.lyricsCardBackgroundMode == LyricsCardBackgroundMode.SONG_ART &&
+            track.albumArt != null
+        val (cardColor, paletteInkColor) = com.example.ui.components.resolveLyricsCardColors(palette)
+        val cardArgb = cardColor.toArgb()
+        val inkArgb = if (useSongArtBg) AndroidColor.WHITE else paletteInkColor.toArgb()
+        val lyricsText = styleConfig.resolveLyricsDisplayLines(track)
+        val isPlaceholder = styleConfig.customLyrics.trim().isEmpty() &&
+            lyricsText.startsWith("Add your favorite lyric lines")
+
+        val cardW = w * 0.80f * scale
+        val padH = 56f * scale
+        val padV = 56f * scale
+        val thumbSize = 132f * scale
+        val thumbCorner = 14f * scale
+        val cornerRadius = styleConfig.cornerRadiusDp * 3f * scale
+
+        val headerTextLeft = padH + thumbSize + (34f * scale)
+        val headerTextMaxW = (cardW - headerTextLeft - padH).toInt().coerceAtLeast(100)
+
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = inkArgb
+            textSize = 42f * scale
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            letterSpacing = -0.02f
+        }
+        val titleLayout = buildEllipsizedLayout(track.title, titlePaint, headerTextMaxW, maxLines = 1)
+
+        val artistPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = withAlpha(inkArgb, 0.78f)
+            textSize = 35f * scale
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val artistLayout = buildEllipsizedLayout(track.artist, artistPaint, headerTextMaxW, maxLines = 1)
+
+        val headerHeight = max(thumbSize, (titleLayout.height + 6f * scale + artistLayout.height))
+
+        val lyricsMaxW = (cardW - padH * 2f).toInt().coerceAtLeast(140)
+        val lyricsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (isPlaceholder) withAlpha(inkArgb, 0.72f) else inkArgb
+            textSize = 60f * scale
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            letterSpacing = -0.025f
+        }
+        val lyricsLayout = buildEllipsizedLayout(
+            text = lyricsText,
+            paint = lyricsPaint,
+            width = lyricsMaxW,
+            maxLines = 8,
+            spacingMult = 1.22f
+        )
+
+        val badgeSize = 56f * scale
+        val gapHeaderLyrics = 62f * scale
+        val gapLyricsFooter = 66f * scale
+        val cardH = padV + headerHeight + gapHeaderLyrics + lyricsLayout.height + gapLyricsFooter + badgeSize + padV
+
+        val cardLeft = (w - cardW) / 2f
+        val cardTop = (h - cardH) / 2f
+        val cardRight = cardLeft + cardW
+        val cardBottom = cardTop + cardH
+        val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
+
+        val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
+        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = AndroidColor.argb((135 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).roundToInt().coerceIn(0, 255), 0, 0, 0)
+            maskFilter = BlurMaskFilter(58f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+        }
+        canvas.drawRoundRect(
+            RectF(cardLeft, cardTop + (20f * scale), cardRight, cardBottom + (20f * scale)),
+            cornerRadius,
+            cornerRadius,
+            shadowPaint
+        )
+
+        val albumArt = track.albumArt
+        if (useSongArtBg && albumArt != null) {
+            canvas.save()
+            val cardClip = Path().apply {
+                addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
+            }
+            canvas.clipPath(cardClip)
+            drawCenterCroppedBitmap(
+                canvas = canvas,
+                bitmap = albumArt,
+                destRect = cardRect,
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            )
+            val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    cardLeft, cardTop, cardLeft, cardBottom,
+                    intArrayOf(
+                        AndroidColor.argb(112, 0, 0, 0),
+                        AndroidColor.argb(143, 0, 0, 0),
+                        AndroidColor.argb(188, 0, 0, 0)
+                    ),
+                    floatArrayOf(0f, 0.5f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(cardRect, scrimPaint)
+            canvas.restore()
+
+            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 3f
+                color = AndroidColor.argb(42, 255, 255, 255)
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
+        } else {
+            val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = cardArgb
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
+        }
+
+        // Header cover thumbnail
+        val thumbLeft = cardLeft + padH
+        val thumbTop = cardTop + padV
+        val thumbRect = RectF(thumbLeft, thumbTop, thumbLeft + thumbSize, thumbTop + thumbSize)
+        canvas.save()
+        val thumbPath = Path().apply {
+            addRoundRect(thumbRect, thumbCorner, thumbCorner, Path.Direction.CW)
+        }
+        canvas.clipPath(thumbPath)
+        if (albumArt != null) {
+            drawCenterCroppedBitmap(
+                canvas = canvas,
+                bitmap = albumArt,
+                destRect = thumbRect,
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            )
+        } else {
+            val placeholderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = withAlpha(inkArgb, 0.22f)
+            }
+            canvas.drawRect(thumbRect, placeholderPaint)
+        }
+        canvas.restore()
+
+        // Header title & artist vertically centered next to cover thumbnail
+        val metaBlockH = titleLayout.height + 6f * scale + artistLayout.height
+        val metaTop = thumbTop + ((thumbSize - metaBlockH) / 2f).coerceAtLeast(0f)
+        val metaLeft = cardLeft + headerTextLeft
+        canvas.save()
+        canvas.translate(metaLeft, metaTop)
+        titleLayout.draw(canvas)
+        canvas.restore()
+
+        canvas.save()
+        canvas.translate(metaLeft, metaTop + titleLayout.height + 6f * scale)
+        artistLayout.draw(canvas)
+        canvas.restore()
+
+        // Main bold editorial lyrics block
+        val lyricsTop = thumbTop + headerHeight + gapHeaderLyrics
+        canvas.save()
+        canvas.translate(thumbLeft, lyricsTop)
+        lyricsLayout.draw(canvas)
+        canvas.restore()
+
+        // Footer brand badge + wordmark
+        val footerTop = lyricsTop + lyricsLayout.height + gapLyricsFooter
+        val badgeColor = if (styleConfig.logoColorMode == LogoColorMode.TEMPLATE_DYNAMIC) {
+            inkArgb
+        } else {
+            styleConfig.resolveLogoBadgeColor(palette).toArgb()
+        }
+        drawBrandFooter(
+            context = context,
+            canvas = canvas,
+            leftX = thumbLeft,
+            topY = footerTop,
+            brandMode = styleConfig.brandMode,
+            badgeColor = badgeColor,
+            logoColorMode = styleConfig.logoColorMode,
+            badgeSize = badgeSize,
+            textSize = 40f * scale,
+            showWordmark = styleConfig.showLogoWordmark,
+            textColor = withAlpha(inkArgb, 0.95f)
+        )
+    }
+
     private fun drawBrandFooter(
         context: Context,
         canvas: Canvas,
@@ -428,7 +624,8 @@ object CardShareManager {
         logoColorMode: LogoColorMode,
         badgeSize: Float,
         textSize: Float,
-        showWordmark: Boolean
+        showWordmark: Boolean,
+        textColor: Int = AndroidColor.WHITE
     ) {
         val badgeRect = RectF(leftX, topY, leftX + badgeSize, topY + badgeSize)
 
@@ -566,7 +763,7 @@ object CardShareManager {
 
         if (showWordmark) {
             val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = AndroidColor.WHITE
+                color = textColor
                 this.textSize = textSize
                 typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
                 letterSpacing = -0.02f
@@ -611,16 +808,18 @@ object CardShareManager {
         text: String,
         paint: TextPaint,
         width: Int,
-        maxLines: Int
+        maxLines: Int,
+        spacingMult: Float = 1.0f
     ): StaticLayout {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setLineSpacing(0f, spacingMult)
                 .setMaxLines(maxLines)
                 .setEllipsize(TextUtils.TruncateAt.END)
                 .build()
         } else {
-            StaticLayout(text, paint, width, Layout.Alignment.ALIGN_NORMAL, 1.0f, 0.0f, false)
+            StaticLayout(text, paint, width, Layout.Alignment.ALIGN_NORMAL, spacingMult, 0.0f, false)
         }
     }
 

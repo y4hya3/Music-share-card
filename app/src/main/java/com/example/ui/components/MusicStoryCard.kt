@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,6 +36,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -48,6 +51,7 @@ import com.example.model.CardLayoutType
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
+import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import com.example.util.BitmapBlurUtils
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +71,8 @@ fun BlurredAlbumBackground(
     track: MediaTrackInfo,
     palette: CardPalette,
     styleConfig: CardStyleConfig,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    activeCanvasVideoUrl: String? = null
 ) {
     val blurRadius = styleConfig.backgroundBlurRadius.coerceIn(0f, 40f)
     val quantizedRadius = blurRadius.roundToInt()
@@ -156,6 +161,24 @@ fun BlurredAlbumBackground(
             )
         }
 
+        if (!activeCanvasVideoUrl.isNullOrBlank()) {
+            AnimatedCanvasVideoBackground(
+                videoUrl = activeCanvasVideoUrl,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurRadius > 2f) {
+                            Modifier.blur(
+                                radius = (blurRadius * 0.45f).dp,
+                                edgeTreatment = BlurredEdgeTreatment.Rectangle
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
+            )
+        }
+
         // Subtle dark overlay rgba(0, 0, 0, 0.25) for contrast on bright/white album covers
         Box(
             modifier = Modifier
@@ -232,6 +255,19 @@ fun MusicStoryCard(
                 cardShape = cardShape,
                 maxCardWidth = scaledMaxCardWidth,
                 maxArtSize = scaledMaxArtSize,
+                scale = scale,
+                modifier = modifier
+            )
+        }
+        CardLayoutType.SPOTIFY_LYRICS_CARD -> {
+            SpotifyLyricsShareCard(
+                track = track,
+                crispArtImageBitmap = crispArtImageBitmap,
+                palette = palette,
+                badgeColor = badgeColor,
+                styleConfig = styleConfig,
+                cardShape = cardShape,
+                maxCardWidth = scaledMaxCardWidth,
                 scale = scale,
                 modifier = modifier
             )
@@ -541,6 +577,200 @@ private fun MinimalCleanStoryCard(
             showWordmark = styleConfig.showLogoWordmark
         )
     }
+}
+
+/**
+ * Exact Spotify-style Lyrics Share Card:
+ * - Solid vibrant album-matched color block with rounded corners & soft shadow
+ * - Header: small square cover art thumbnail + bold track title & artist
+ * - Center: large bold editorial lyric lines (manually editable in Edit)
+ * - Bottom-left: clean brand badge & wordmark with automatic light/dark ink contrast
+ */
+@Composable
+private fun SpotifyLyricsShareCard(
+    track: MediaTrackInfo,
+    crispArtImageBitmap: androidx.compose.ui.graphics.ImageBitmap?,
+    palette: CardPalette,
+    badgeColor: Color,
+    styleConfig: CardStyleConfig,
+    cardShape: RoundedCornerShape,
+    maxCardWidth: Dp,
+    scale: Float,
+    modifier: Modifier = Modifier
+) {
+    val useSongArtBg = styleConfig.lyricsCardBackgroundMode == LyricsCardBackgroundMode.SONG_ART &&
+        crispArtImageBitmap != null
+
+    val (cardBgColor, paletteInkColor) = remember(palette.vibrantColor, palette.dominantColor, palette.darkVibrantColor) {
+        resolveLyricsCardColors(palette)
+    }
+    val inkColor = if (useSongArtBg) Color.White else paletteInkColor
+
+    val lyricsText = remember(styleConfig.customLyrics, track.title) {
+        styleConfig.resolveLyricsDisplayLines(track)
+    }
+    val isPlaceholder = styleConfig.customLyrics.trim().isEmpty() && lyricsText.startsWith("Add your favorite lyric lines")
+
+    val shadowElevation = (22 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale).dp
+    val horizontalPad = (20 * scale).dp
+    val verticalPad = (20 * scale).dp
+    val thumbSize = (44 * scale).dp
+
+    Box(
+        modifier = modifier
+            .widthIn(max = maxCardWidth)
+            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
+            .shadow(
+                elevation = shadowElevation,
+                shape = cardShape,
+                ambientColor = Color.Black.copy(alpha = 0.55f),
+                spotColor = Color.Black.copy(alpha = 0.65f)
+            )
+            .clip(cardShape)
+            .background(if (useSongArtBg) Color(0xFF141418) else cardBgColor)
+            .then(
+                if (useSongArtBg) {
+                    Modifier.border(1.dp, Color.White.copy(alpha = 0.16f), cardShape)
+                } else {
+                    Modifier
+                }
+            )
+            .testTag("music_story_card_container")
+    ) {
+        if (useSongArtBg && crispArtImageBitmap != null) {
+            Image(
+                bitmap = crispArtImageBitmap,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.High,
+                modifier = Modifier.matchParentSize()
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.44f),
+                                Color.Black.copy(alpha = 0.56f),
+                                Color.Black.copy(alpha = 0.74f)
+                            )
+                        )
+                    )
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = horizontalPad, vertical = verticalPad)
+        ) {
+            // Header Row: compact album cover + title & artist
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(thumbSize)
+                        .clip(RoundedCornerShape((5 * scale).dp))
+                        .background(Color.Black.copy(alpha = 0.25f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (crispArtImageBitmap != null) {
+                        Image(
+                            bitmap = crispArtImageBitmap,
+                            contentDescription = "Album art for ${track.title}",
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.High,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_music_note),
+                            contentDescription = null,
+                            tint = inkColor.copy(alpha = 0.7f),
+                            modifier = Modifier.size((22 * scale).dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width((12 * scale).dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = track.title,
+                        color = inkColor,
+                        fontSize = (14 * scale).sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("track_title_text")
+                    )
+                    Spacer(modifier = Modifier.height((2 * scale).dp))
+                    Text(
+                        text = track.artist,
+                        color = inkColor.copy(alpha = 0.78f),
+                        fontSize = (12 * scale).sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("track_artist_text")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height((22 * scale).dp))
+
+            // Main Bold Spotify-style Lyrics Block
+            Text(
+                text = lyricsText,
+                color = inkColor.copy(alpha = if (isPlaceholder) 0.72f else 1f),
+                fontSize = (20 * scale).sp,
+                lineHeight = (26 * scale).sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.45).sp,
+                maxLines = 8,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("lyrics_card_body_text")
+            )
+
+            Spacer(modifier = Modifier.height((24 * scale).dp))
+
+            // Footer Brand Mark + Wordmark
+            val footerBadgeColor = if (styleConfig.logoColorMode == com.example.model.LogoColorMode.TEMPLATE_DYNAMIC) {
+                inkColor
+            } else {
+                badgeColor
+            }
+            BitChordBranding(
+                brandMode = styleConfig.brandMode,
+                badgeColor = footerBadgeColor,
+                logoColorMode = styleConfig.logoColorMode,
+                badgeSize = (19 * scale).dp,
+                textSize = (13.5 * scale).sp,
+                textColor = inkColor.copy(alpha = 0.95f),
+                showWordmark = styleConfig.showLogoWordmark
+            )
+        }
+    }
+}
+
+fun resolveLyricsCardColors(palette: CardPalette): Pair<Color, Color> {
+    val blended = lerp(palette.vibrantColor, palette.dominantColor, 0.25f)
+    val hsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(blended.toArgb(), hsv)
+    if (hsv[1] >= 0.10f) {
+        hsv[1] = hsv[1].coerceIn(0.45f, 0.88f)
+        hsv[2] = hsv[2].coerceIn(0.36f, 0.78f)
+    } else {
+        hsv[2] = hsv[2].coerceIn(0.24f, 0.76f)
+    }
+    val cardColor = Color(android.graphics.Color.HSVToColor(hsv))
+    val inkColor = if (cardColor.luminance() > 0.46f) Color(0xFF111114) else Color.White
+    return Pair(cardColor, inkColor)
 }
 
 fun resolveGradientStops(

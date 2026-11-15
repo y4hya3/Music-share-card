@@ -110,6 +110,7 @@ fun BitChordShareScreen(
     val palette by MediaNotificationRepository.extractedPalette.collectAsState()
     val styleConfig by MediaNotificationRepository.styleConfig.collectAsState()
     val isAccessGranted by MediaNotificationRepository.isNotificationAccessEnabled.collectAsState()
+    val activeCanvasUrl by MediaNotificationRepository.activeCanvasUrl.collectAsState()
 
     var showEditSheet by remember { mutableStateOf(false) }
     var showPreviewDialog by remember { mutableStateOf(false) }
@@ -212,6 +213,7 @@ fun BitChordShareScreen(
             track = currentTrack,
             palette = palette,
             styleConfig = styleConfig,
+            activeCanvasVideoUrl = activeCanvasUrl,
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("fullscreen_blurred_background")

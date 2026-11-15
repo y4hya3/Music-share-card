@@ -2,12 +2,15 @@ package com.example
 
 import androidx.compose.ui.graphics.Color
 import com.example.model.CardBrandMode
+import com.example.model.CardLayoutType
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
+import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
+import com.example.service.AnimatedCanvasSearchService
 import com.example.ui.components.resolveGradientStops
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -109,6 +112,59 @@ class ExampleUnitTest {
         assertEquals("Travis Scott", track.artist)
         assertEquals("ASTROWORLD", track.album)
         assertEquals("Bitchord", track.appName)
+    }
+
+    @Test
+    fun testSpotifyLyricsCardAndManualLyrics() {
+        val sampleTrack = MediaTrackInfo(
+            title = "Custom Track",
+            artist = "Independent Artist"
+        )
+        val blankConfig = CardStyleConfig(
+            cardLayoutType = CardLayoutType.SPOTIFY_LYRICS_CARD,
+            customLyrics = ""
+        )
+        assertTrue(blankConfig.resolveLyricsDisplayLines(sampleTrack).contains("Manual Lyrics"))
+
+        val manualConfig = blankConfig.copy(
+            customLyrics = "Line one of my lyrics\nLine two of my lyrics"
+        )
+        assertEquals(
+            "Line one of my lyrics\nLine two of my lyrics",
+            manualConfig.resolveLyricsDisplayLines(sampleTrack)
+        )
+        assertEquals(LyricsCardBackgroundMode.PALETTE_COLOR, manualConfig.lyricsCardBackgroundMode)
+
+        val artBgConfig = manualConfig.copy(lyricsCardBackgroundMode = LyricsCardBackgroundMode.SONG_ART)
+        assertEquals(LyricsCardBackgroundMode.SONG_ART, artBgConfig.lyricsCardBackgroundMode)
+    }
+
+    @Test
+    fun testSmartCanvasQueryNormalizationAndTokenCleanup() {
+        val cleaned = AnimatedCanvasSearchService.normalizeQueryText(
+            "Blinding Lights (Official Music Video) [Lyrics] (feat. Rosalía)"
+        )
+        assertEquals("Blinding Lights", cleaned)
+        assertEquals("abc123", AnimatedCanvasSearchService.normalizeSpotifyToken("  Bearer abc123  "))
+
+        val exactScore = AnimatedCanvasSearchService.scoreMatch(
+            "SICKO MODE",
+            "Travis Scott",
+            "SICKO MODE (feat. Drake)",
+            "Travis Scott"
+        )
+        val karaokeScore = AnimatedCanvasSearchService.scoreMatch(
+            "SICKO MODE (Karaoke Version)",
+            "Karaoke Band",
+            "SICKO MODE",
+            "Travis Scott"
+        )
+        assertTrue(exactScore > karaokeScore)
+
+        val protoReq = AnimatedCanvasSearchService.encodeEntityCanvazRequest(
+            listOf("spotify:track:2xLMifQCjDGFmkHkpNLD9h")
+        )
+        assertTrue(protoReq.isNotEmpty())
     }
 
     @Test

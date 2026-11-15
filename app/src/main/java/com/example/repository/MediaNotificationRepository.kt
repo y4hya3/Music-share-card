@@ -11,6 +11,8 @@ import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
+import com.example.service.AnimatedCanvasCandidate
+import com.example.service.AnimatedCanvasSearchService
 import com.example.service.CoverArtSearchService
 import com.example.service.MusicNotificationListenerService
 import com.example.service.OnlineCoverCandidate
@@ -36,8 +38,11 @@ object MediaNotificationRepository {
     private var appContext: Context? = null
 
     private var onlineSearchJob: Job? = null
+    private var canvasSearchJob: Job? = null
     private var lastAutoSearchedTrackKey: String? = null
+    private var lastAutoCanvasTrackKey: String? = null
     private var userManuallySelectedCoverTrackKey: String? = null
+    private var userManuallySelectedCanvasTrackKey: String? = null
 
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
@@ -73,6 +78,21 @@ object MediaNotificationRepository {
 
     private val _selectedCoverId = MutableStateFlow("player")
     val selectedCoverId: StateFlow<String> = _selectedCoverId.asStateFlow()
+
+    private val _animatedCanvasCandidates = MutableStateFlow<List<AnimatedCanvasCandidate>>(emptyList())
+    val animatedCanvasCandidates: StateFlow<List<AnimatedCanvasCandidate>> = _animatedCanvasCandidates.asStateFlow()
+
+    private val _isSearchingCanvas = MutableStateFlow(false)
+    val isSearchingCanvas: StateFlow<Boolean> = _isSearchingCanvas.asStateFlow()
+
+    private val _canvasSearchStatus = MutableStateFlow<String?>(null)
+    val canvasSearchStatus: StateFlow<String?> = _canvasSearchStatus.asStateFlow()
+
+    private val _activeCanvasUrl = MutableStateFlow<String?>(null)
+    val activeCanvasUrl: StateFlow<String?> = _activeCanvasUrl.asStateFlow()
+
+    private val _activeCanvasId = MutableStateFlow("none")
+    val activeCanvasId: StateFlow<String> = _activeCanvasId.asStateFlow()
 
     private var sampleTracksList: List<MediaTrackInfo> = emptyList()
 
@@ -158,7 +178,12 @@ object MediaNotificationRepository {
             _originalPlayerArt.value = trackInfo.albumArt
             _selectedCoverId.value = "player"
             _onlineCoverCandidates.value = emptyList()
+            _animatedCanvasCandidates.value = emptyList()
+            _canvasSearchStatus.value = null
+            _activeCanvasUrl.value = null
+            _activeCanvasId.value = "none"
             userManuallySelectedCoverTrackKey = null
+            userManuallySelectedCanvasTrackKey = null
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
             val prevPixels = if (prevOrig != null && !prevOrig.isRecycled) prevOrig.width.toLong() * prevOrig.height.toLong() else 0L
@@ -203,6 +228,15 @@ object MediaNotificationRepository {
         ) {
             lastAutoSearchedTrackKey = newKey
             searchOnlineCovers(autoApplyBest = true)
+        }
+
+        // If Auto-Search Animated Canvas is enabled, look up looping canvases automatically for new live tracks
+        if (!finalTrack.isSample &&
+            _styleConfig.value.autoSearchAnimatedCanvas &&
+            lastAutoCanvasTrackKey != newKey
+        ) {
+            lastAutoCanvasTrackKey = newKey
+            searchAnimatedCanvases(autoApplyBest = true)
         }
     }
 
@@ -249,8 +283,14 @@ object MediaNotificationRepository {
         _originalPlayerArt.value = track.albumArt
         _selectedCoverId.value = "player"
         _onlineCoverCandidates.value = emptyList()
+        _animatedCanvasCandidates.value = emptyList()
+        _canvasSearchStatus.value = null
+        _activeCanvasUrl.value = null
+        _activeCanvasId.value = "none"
         userManuallySelectedCoverTrackKey = null
+        userManuallySelectedCanvasTrackKey = null
         lastAutoSearchedTrackKey = null
+        lastAutoCanvasTrackKey = null
         _currentTrack.value = track
         extractPaletteForTrack(track)
     }
@@ -336,6 +376,81 @@ object MediaNotificationRepository {
         val updated = current.copy(albumArt = hdBitmap)
         _currentTrack.value = updated
         extractPaletteForTrack(updated)
+    }
+
+    fun searchAnimatedCanvases(
+        customQuery: String? = null,
+        autoApplyBest: Boolean = false
+    ) {
+        val snapshot = _currentTrack.value
+        val trackSnapshotKey = trackKey(snapshot)
+        val searchTerm = (customQuery ?: buildSearchQuery(snapshot)).trim()
+        if (searchTerm.isEmpty()) return
+
+        canvasSearchJob?.cancel()
+        canvasSearchJob = repositoryScope.launch {
+            _isSearchingCanvas.value = true
+            _canvasSearchStatus.value = "Smart searching animated canvases..."
+            try {
+                val result = AnimatedCanvasSearchService.searchCanvases(
+                    rawQuery = searchTerm,
+                    spotifyToken = _styleConfig.value.spotifyAccessToken,
+                    targetTitle = snapshot.title,
+                    targetArtist = snapshot.artist,
+                    maxResults = 8
+                )
+                _animatedCanvasCandidates.value = result.candidates
+                _canvasSearchStatus.value = result.statusMessage
+
+                if (autoApplyBest &&
+                    result.candidates.isNotEmpty() &&
+                    trackKey(_currentTrack.value) == trackSnapshotKey &&
+                    userManuallySelectedCanvasTrackKey != trackSnapshotKey
+                ) {
+                    val best = result.candidates.firstOrNull { it.isLoopingVideo } ?: result.candidates.first()
+                    applyAnimatedCanvasCandidate(best, markAsManual = false)
+                }
+            } finally {
+                _isSearchingCanvas.value = false
+            }
+        }
+    }
+
+    fun selectAnimatedCanvas(candidate: AnimatedCanvasCandidate) {
+        repositoryScope.launch {
+            _isSearchingCanvas.value = true
+            try {
+                applyAnimatedCanvasCandidate(candidate, markAsManual = true)
+            } finally {
+                _isSearchingCanvas.value = false
+            }
+        }
+    }
+
+    fun clearAnimatedCanvas() {
+        userManuallySelectedCanvasTrackKey = null
+        _activeCanvasUrl.value = null
+        _activeCanvasId.value = "none"
+    }
+
+    private suspend fun applyAnimatedCanvasCandidate(
+        candidate: AnimatedCanvasCandidate,
+        markAsManual: Boolean
+    ) {
+        val current = _currentTrack.value
+        if (markAsManual) {
+            userManuallySelectedCanvasTrackKey = trackKey(current)
+        }
+        _activeCanvasId.value = candidate.id
+        _activeCanvasUrl.value = candidate.videoUrl
+
+        // Also upgrade art / export frame to HD poster or extracted video frame so palette + 9:16 exports stay crisp
+        val hdFrame = AnimatedCanvasSearchService.extractHighResPosterOrFrame(candidate)
+        if (hdFrame != null) {
+            val updated = current.copy(albumArt = hdFrame)
+            _currentTrack.value = updated
+            extractPaletteForTrack(updated)
+        }
     }
 
     private fun buildSearchQuery(track: MediaTrackInfo): String {

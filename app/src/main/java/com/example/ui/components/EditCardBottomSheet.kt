@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,6 +61,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,8 +72,10 @@ import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
+import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
+import com.example.service.AnimatedCanvasCandidate
 import kotlin.math.roundToInt
 
 /**
@@ -97,6 +102,11 @@ fun EditCardBottomSheet(
     val originalPlayerArt by MediaNotificationRepository.originalPlayerArt.collectAsState()
     val selectedCoverId by MediaNotificationRepository.selectedCoverId.collectAsState()
 
+    val canvasCandidates by MediaNotificationRepository.animatedCanvasCandidates.collectAsState()
+    val isSearchingCanvas by MediaNotificationRepository.isSearchingCanvas.collectAsState()
+    val canvasSearchStatus by MediaNotificationRepository.canvasSearchStatus.collectAsState()
+    val activeCanvasId by MediaNotificationRepository.activeCanvasId.collectAsState()
+
     var editTitle by remember(currentTrack.title, currentTrack.packageName) {
         mutableStateOf(currentTrack.title)
     }
@@ -106,6 +116,10 @@ fun EditCardBottomSheet(
     var coverSearchQuery by remember(currentTrack.title, currentTrack.artist) {
         mutableStateOf("${currentTrack.title} ${currentTrack.artist}".trim())
     }
+    var canvasSearchQuery by remember(currentTrack.title, currentTrack.artist) {
+        mutableStateOf("${currentTrack.title} ${currentTrack.artist}".trim())
+    }
+    var revealSpotifyToken by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -435,6 +449,255 @@ fun EditCardBottomSheet(
 
             Spacer(modifier = Modifier.height(22.dp))
 
+            // 3B. ANIMATED SONG CANVAS & SPOTIFY TOKEN SMART SEARCH
+            Text(
+                text = "Animated Song Canvas (HD Video & Spotify)",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(alpha = 0.9f)
+            )
+            Text(
+                text = "Smart search looping Spotify Canvases & HD music clips. Paste your Spotify access token for direct Spotify Canvas lookup.",
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.6f),
+                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+            )
+
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFF262630),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                        Text(
+                            text = "Auto-scratch animated canvas",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Automatically finds looping HD canvas backgrounds for active songs",
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = styleConfig.autoSearchAnimatedCanvas,
+                        onCheckedChange = { enabled ->
+                            onStyleChange(styleConfig.copy(autoSearchAnimatedCanvas = enabled))
+                            if (enabled && canvasCandidates.isEmpty()) {
+                                MediaNotificationRepository.searchAnimatedCanvases(
+                                    customQuery = canvasSearchQuery,
+                                    autoApplyBest = !currentTrack.isSample
+                                )
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF1DB954)
+                        ),
+                        modifier = Modifier.testTag("auto_search_canvas_switch")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedTextField(
+                value = styleConfig.spotifyAccessToken,
+                onValueChange = { token ->
+                    onStyleChange(styleConfig.copy(spotifyAccessToken = token))
+                },
+                singleLine = true,
+                label = { Text("Spotify Access Token (optional)") },
+                placeholder = { Text("Paste Bearer / OAuth token", fontSize = 12.sp) },
+                visualTransformation = if (revealSpotifyToken) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(end = 6.dp)
+                    ) {
+                        Surface(
+                            onClick = { revealSpotifyToken = !revealSpotifyToken },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF2E2E3A),
+                            modifier = Modifier.testTag("toggle_spotify_token_visibility")
+                        ) {
+                            Text(
+                                text = if (revealSpotifyToken) "Hide" else "Show",
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            )
+                        }
+                        if (styleConfig.spotifyAccessToken.isNotEmpty()) {
+                            IconButton(
+                                onClick = { onStyleChange(styleConfig.copy(spotifyAccessToken = "")) },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Clear token",
+                                    tint = Color.White.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Color(0xFF1DB954),
+                    unfocusedBorderColor = Color(0xFF444450),
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    focusedLabelColor = Color(0xFF1DB954),
+                    unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("spotify_token_input")
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = canvasSearchQuery,
+                    onValueChange = { canvasSearchQuery = it },
+                    singleLine = true,
+                    placeholder = { Text("Smart canvas query", fontSize = 13.sp) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF1DB954),
+                        unfocusedBorderColor = Color(0xFF444450),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("canvas_search_input")
+                )
+
+                Button(
+                    onClick = {
+                        MediaNotificationRepository.searchAnimatedCanvases(
+                            customQuery = canvasSearchQuery,
+                            autoApplyBest = false
+                        )
+                    },
+                    enabled = !isSearchingCanvas && canvasSearchQuery.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF1DB954),
+                        contentColor = Color(0xFF0A0A0D)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 14.dp),
+                    modifier = Modifier.testTag("search_animated_canvas_button")
+                ) {
+                    if (isSearchingCanvas) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF0A0A0D),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Search animated canvas",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Canvas", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            canvasSearchStatus?.let { status ->
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFF232530),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = status,
+                        color = Color.White.copy(alpha = 0.82f),
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("canvas_search_status_text")
+                    )
+                }
+            }
+
+            if (canvasCandidates.isNotEmpty() || activeCanvasId != "none") {
+                Spacer(modifier = Modifier.height(10.dp))
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    item(key = "canvas_static_none") {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier
+                                .width(92.dp)
+                                .height(118.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { MediaNotificationRepository.clearAnimatedCanvas() }
+                                .background(if (activeCanvasId == "none") Color(0xFF233028) else Color(0xFF26262F))
+                                .border(
+                                    width = if (activeCanvasId == "none") 2.dp else 1.dp,
+                                    color = if (activeCanvasId == "none") Color(0xFF1DB954) else Color.White.copy(alpha = 0.12f),
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(8.dp)
+                                .testTag("canvas_choice_none")
+                        ) {
+                            Text(
+                                text = "Static",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "Cover Art Only",
+                                color = Color.White.copy(alpha = 0.62f),
+                                fontSize = 9.sp,
+                                maxLines = 2
+                            )
+                        }
+                    }
+
+                    items(canvasCandidates, key = { it.id }) { candidate ->
+                        AnimatedCanvasChoiceTile(
+                            candidate = candidate,
+                            isSelected = activeCanvasId == candidate.id,
+                            onClick = { MediaNotificationRepository.selectAnimatedCanvas(candidate) },
+                            modifier = Modifier.testTag("canvas_choice_${candidate.id}")
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(22.dp))
+
             // 4. SINGLE CARD SIZE CONTROL
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -608,9 +871,11 @@ fun EditCardBottomSheet(
             )
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                maxItemsInEachRow = 2
             ) {
                 CardLayoutType.values().forEach { layout ->
                     val isSelected = styleConfig.cardLayoutType == layout
@@ -627,11 +892,140 @@ fun EditCardBottomSheet(
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-                            maxLines = 2
+                            modifier = Modifier.padding(vertical = 12.dp, horizontal = 12.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
+            }
+
+            if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_LYRICS_CARD) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = "Lyrics Card Background",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.92f)
+                )
+                Text(
+                    text = "Switch between album-matched color card or full song cover art",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.58f),
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    LyricsCardBackgroundMode.values().forEach { bgMode ->
+                        val isBgSelected = styleConfig.lyricsCardBackgroundMode == bgMode
+                        Surface(
+                            onClick = {
+                                onStyleChange(styleConfig.copy(lyricsCardBackgroundMode = bgMode))
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isBgSelected) Color(0xFFFF2B44) else Color(0xFF2C2C34),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("lyrics_bg_${bgMode.name}")
+                        ) {
+                            Text(
+                                text = bgMode.label,
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = if (isBgSelected) FontWeight.Bold else FontWeight.Medium,
+                                modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Manual Lyrics",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.92f)
+                        )
+                        Text(
+                            text = "Type or paste up to 6 lines for the Lyrics Card",
+                            fontSize = 11.sp,
+                            color = Color.White.copy(alpha = 0.58f)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Surface(
+                            onClick = {
+                                val sampleSnippet =
+                                    "Turn the lights down low\n" +
+                                        "Feel the bassline echo through the room\n" +
+                                        "Every chord hits right on time"
+                                onStyleChange(styleConfig.copy(customLyrics = sampleSnippet))
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF2C2C36),
+                            modifier = Modifier.testTag("sample_lyrics_button")
+                        ) {
+                            Text(
+                                text = "Sample",
+                                color = Color.White.copy(alpha = 0.9f),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                        if (styleConfig.customLyrics.isNotEmpty()) {
+                            Surface(
+                                onClick = { onStyleChange(styleConfig.copy(customLyrics = "")) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color(0xFF3A2429),
+                                modifier = Modifier.testTag("clear_lyrics_button")
+                            ) {
+                                Text(
+                                    text = "Clear",
+                                    color = Color(0xFFFF8A96),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = styleConfig.customLyrics,
+                    onValueChange = { newLyrics ->
+                        onStyleChange(styleConfig.copy(customLyrics = newLyrics))
+                    },
+                    placeholder = {
+                        Text(
+                            text = "Enter song lyrics line by line...",
+                            fontSize = 13.sp,
+                            color = Color.White.copy(alpha = 0.45f)
+                        )
+                    },
+                    minLines = 3,
+                    maxLines = 6,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFFFF2B44),
+                        unfocusedBorderColor = Color(0xFF444450),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("manual_lyrics_input")
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
@@ -903,6 +1297,84 @@ private fun LogoColorOption(
             fontSize = 11.sp,
             color = if (isSelected) Color.White else Color.White.copy(alpha = 0.65f),
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun AnimatedCanvasChoiceTile(
+    candidate: AnimatedCanvasCandidate,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val imageBitmap = remember(candidate.thumbnailBitmap) {
+        candidate.thumbnailBitmap?.asImageBitmap()
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .width(96.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .background(if (isSelected) Color(0xFF1F3025) else Color(0xFF26262F))
+            .border(
+                width = if (isSelected) 2.dp else 1.dp,
+                color = if (isSelected) Color(0xFF1DB954) else Color.White.copy(alpha = 0.12f),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .padding(6.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(80.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF121216)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (imageBitmap != null) {
+                Image(
+                    bitmap = imageBitmap,
+                    contentDescription = candidate.title,
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.High,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            if (candidate.isLoopingVideo) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = Color.Black.copy(alpha = 0.72f),
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Animated video",
+                        tint = Color(0xFF1DB954),
+                        modifier = Modifier
+                            .size(16.dp)
+                            .padding(2.dp)
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = candidate.source,
+            color = Color.White,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            text = candidate.resolutionLabel,
+            color = Color.White.copy(alpha = 0.65f),
+            fontSize = 9.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

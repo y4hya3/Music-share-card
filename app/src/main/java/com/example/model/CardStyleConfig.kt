@@ -29,7 +29,13 @@ enum class GradientStyle(val label: String) {
 enum class CardLayoutType(val label: String) {
     SPOTIFY_INNER_CARD("Floating Glass Card"),
     FLOATING_ARTWORK("Floating Glow Art"),
-    MINIMAL_CLEAN("Minimal Story")
+    MINIMAL_CLEAN("Minimal Story"),
+    SPOTIFY_LYRICS_CARD("Lyrics Card")
+}
+
+enum class LyricsCardBackgroundMode(val label: String) {
+    PALETTE_COLOR("Palette Color"),
+    SONG_ART("Song Cover Art")
 }
 
 data class CardStyleConfig(
@@ -38,6 +44,7 @@ data class CardStyleConfig(
     val customLogoColor: Color = Color(0xFFFF2B44),
     val gradientStyle: GradientStyle = GradientStyle.ADAPTIVE_HARMONY,
     val cardLayoutType: CardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+    val lyricsCardBackgroundMode: LyricsCardBackgroundMode = LyricsCardBackgroundMode.PALETTE_COLOR,
     val useBlurredAlbumBackground: Boolean = true,
     val backgroundBlurRadius: Float = 24f, // 0f (sharp) to 40f (heavily blurred)
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
@@ -45,7 +52,10 @@ data class CardStyleConfig(
     val cornerRadiusDp: Int = 16, // border-radius: 16px
     val cardScale: Float = 1.0f, // 0.75f..1.15f unified card size multiplier
     val showLogoWordmark: Boolean = true,
-    val autoSearchOnlineArt: Boolean = false
+    val autoSearchOnlineArt: Boolean = false,
+    val autoSearchAnimatedCanvas: Boolean = false,
+    val spotifyAccessToken: String = "",
+    val customLyrics: String = ""
 ) {
     fun resolveLogoBadgeColor(palette: CardPalette): Color {
         return when (logoColorMode) {
@@ -54,6 +64,25 @@ data class CardStyleConfig(
             LogoColorMode.GREEN -> Color(0xFF1DB954)
             LogoColorMode.WHITE -> Color.White
             LogoColorMode.CUSTOM -> customLogoColor
+        }
+    }
+
+    fun resolveLyricsDisplayLines(track: MediaTrackInfo): String {
+        val trimmed = customLyrics.trim()
+        if (trimmed.isNotEmpty()) {
+            return trimmed
+        }
+        return when {
+            track.title.contains("SICKO MODE", ignoreCase = true) ->
+                "Sun is down, freezin' cold\nThat's how we already know\nWinter's here"
+            track.title.contains("Blinding Lights", ignoreCase = true) ->
+                "I said, ooh, I'm blinded by the lights\nNo, I can't sleep until I feel your touch"
+            track.title.contains("Get Lucky", ignoreCase = true) ->
+                "We're up all night to get lucky\nWe're up all night to get some"
+            track.title.contains("BIRDS OF A FEATHER", ignoreCase = true) ->
+                "Birds of a feather, we should stick together\nI know I said I'd never think I wasn't better alone"
+            else ->
+                "Add your favorite lyric lines\nin Edit → Manual Lyrics"
         }
     }
 }
