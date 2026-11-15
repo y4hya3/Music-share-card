@@ -17,9 +17,11 @@ enum class LogoColorMode(val label: String) {
 }
 
 enum class GradientStyle(val label: String) {
-    VIBRANT_TO_DARK_MUTED("Vibrant → Dark Muted"),
-    DOMINANT_TO_DARK_MUTED("Dominant → Dark Muted"),
-    LIGHT_VIBRANT_TO_DARK_VIBRANT("Light Vibrant → Dark Vibrant"),
+    ADAPTIVE_HARMONY("Adaptive Harmony"),
+    VIBRANT_TO_DARK_MUTED("Vibrant → Dark"),
+    DOMINANT_TO_DARK_MUTED("Dominant → Dark"),
+    LIGHT_VIBRANT_TO_DARK_VIBRANT("Studio Glow"),
+    CINEMATIC_AURORA("Cinematic Aurora"),
     DEEP_NIGHT("Deep Dark Mode"),
     SUNSET_GLOW("Warm Sunset")
 }
@@ -34,14 +36,16 @@ data class CardStyleConfig(
     val brandMode: CardBrandMode = CardBrandMode.BITCHORD,
     val logoColorMode: LogoColorMode = LogoColorMode.RED,
     val customLogoColor: Color = Color(0xFFFF2B44),
-    val gradientStyle: GradientStyle = GradientStyle.VIBRANT_TO_DARK_MUTED,
+    val gradientStyle: GradientStyle = GradientStyle.ADAPTIVE_HARMONY,
     val cardLayoutType: CardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
     val useBlurredAlbumBackground: Boolean = true,
     val backgroundBlurRadius: Float = 24f, // 0f (sharp) to 40f (heavily blurred)
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
     val glowIntensity: Float = 0.75f, // soft drop shadow depth
     val cornerRadiusDp: Int = 16, // border-radius: 16px
-    val showLogoWordmark: Boolean = true
+    val cardScale: Float = 1.0f, // 0.75f..1.15f unified card size multiplier
+    val showLogoWordmark: Boolean = true,
+    val autoSearchOnlineArt: Boolean = false
 ) {
     fun resolveLogoBadgeColor(palette: CardPalette): Color {
         return when (logoColorMode) {

@@ -139,12 +139,12 @@ fun BlurredAlbumBackground(
                 )
             }
         } else {
-            val (gradientStart, gradientEnd) = remember(palette, styleConfig.gradientStyle) {
-                resolveGradientColors(palette, styleConfig)
+            val gradientStops = remember(palette, styleConfig.gradientStyle) {
+                resolveGradientStops(palette, styleConfig)
             }
-            val bgBrush = remember(gradientStart, gradientEnd) {
+            val bgBrush = remember(gradientStops) {
                 Brush.linearGradient(
-                    colors = listOf(gradientStart, gradientEnd),
+                    colors = gradientStops,
                     start = Offset(0f, 0f),
                     end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
                 )
@@ -179,11 +179,16 @@ fun MusicStoryCard(
     maxCardWidth: Dp = 330.dp,
     maxArtSize: Dp = 300.dp
 ) {
+    val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+    val scaledMaxCardWidth = (maxCardWidth * scale).coerceAtLeast(180.dp)
+    val scaledMaxArtSize = (maxArtSize * scale).coerceAtLeast(140.dp)
+    val scaledCornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(8)
+
     val badgeColor = remember(styleConfig.logoColorMode, styleConfig.customLogoColor, palette) {
         styleConfig.resolveLogoBadgeColor(palette)
     }
-    val cardShape = remember(styleConfig.cornerRadiusDp) {
-        RoundedCornerShape(styleConfig.cornerRadiusDp.dp)
+    val cardShape = remember(scaledCornerDp) {
+        RoundedCornerShape(scaledCornerDp.dp)
     }
     val crispArtImageBitmap = remember(track.albumArt) {
         track.albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 1024)?.asImageBitmap() }
@@ -198,8 +203,9 @@ fun MusicStoryCard(
                 badgeColor = badgeColor,
                 styleConfig = styleConfig,
                 cardShape = cardShape,
-                maxCardWidth = maxCardWidth,
-                maxArtSize = maxArtSize,
+                maxCardWidth = scaledMaxCardWidth,
+                maxArtSize = scaledMaxArtSize,
+                scale = scale,
                 modifier = modifier
             )
         }
@@ -210,8 +216,9 @@ fun MusicStoryCard(
                 palette = palette,
                 badgeColor = badgeColor,
                 styleConfig = styleConfig,
-                maxCardWidth = maxCardWidth,
-                maxArtSize = maxArtSize,
+                maxCardWidth = scaledMaxCardWidth,
+                maxArtSize = scaledMaxArtSize,
+                scale = scale,
                 modifier = modifier
             )
         }
@@ -223,8 +230,9 @@ fun MusicStoryCard(
                 badgeColor = badgeColor,
                 styleConfig = styleConfig,
                 cardShape = cardShape,
-                maxCardWidth = maxCardWidth,
-                maxArtSize = maxArtSize,
+                maxCardWidth = scaledMaxCardWidth,
+                maxArtSize = scaledMaxArtSize,
+                scale = scale,
                 modifier = modifier
             )
         }
@@ -241,21 +249,24 @@ private fun FloatingGlassShareCard(
     cardShape: RoundedCornerShape,
     maxCardWidth: Dp,
     maxArtSize: Dp,
+    scale: Float,
     modifier: Modifier = Modifier
 ) {
-    val cardBackgroundBrush = remember(palette.dominantColor, palette.darkMutedColor) {
-        val adaptiveTop = lerp(palette.dominantColor, Color(0xFF141418), 0.45f).copy(alpha = 0.86f)
-        val adaptiveBottom = lerp(palette.darkMutedColor, Color(0xFF0E0E12), 0.45f).copy(alpha = 0.90f)
+    val cardBackgroundBrush = remember(palette.vibrantColor, palette.dominantColor, palette.darkMutedColor) {
+        val accentTint = lerp(palette.dominantColor, palette.vibrantColor, 0.18f)
+        val adaptiveTop = lerp(accentTint, Color(0xFF16161C), 0.42f).copy(alpha = 0.87f)
+        val adaptiveBottom = lerp(palette.darkMutedColor, Color(0xFF0C0C10), 0.40f).copy(alpha = 0.92f)
         Brush.verticalGradient(colors = listOf(adaptiveTop, adaptiveBottom))
     }
 
-    val shadowElevation = (24 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).dp
-    val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + 32.dp)
+    val shadowElevation = (24 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale).dp
+    val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (32 * scale).dp)
+    val innerPadding = (16 * scale).dp
 
     Box(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
-            .fillMaxWidth(0.88f)
+            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
             .shadow(
                 elevation = shadowElevation,
                 shape = cardShape,
@@ -274,7 +285,7 @@ private fun FloatingGlassShareCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(innerPadding)
         ) {
             Box(
                 modifier = Modifier
@@ -309,12 +320,12 @@ private fun FloatingGlassShareCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height((14 * scale).dp))
 
             Text(
                 text = track.title,
                 color = Color.White,
-                fontSize = 18.sp,
+                fontSize = (18 * scale).sp,
                 fontWeight = FontWeight.Bold,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -322,26 +333,26 @@ private fun FloatingGlassShareCard(
                 modifier = Modifier.testTag("track_title_text")
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height((4 * scale).dp))
 
             Text(
                 text = track.artist,
                 color = Color.White.copy(alpha = 0.72f),
-                fontSize = 14.sp,
+                fontSize = (14 * scale).sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.testTag("track_artist_text")
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height((16 * scale).dp))
 
             BitChordBranding(
                 brandMode = styleConfig.brandMode,
                 badgeColor = badgeColor,
                 logoColorMode = styleConfig.logoColorMode,
-                badgeSize = 20.dp,
-                textSize = 14.sp,
+                badgeSize = (20 * scale).dp,
+                textSize = (14 * scale).sp,
                 textColor = Color.White.copy(alpha = 0.95f),
                 showWordmark = styleConfig.showLogoWordmark
             )
@@ -358,16 +369,17 @@ private fun FloatingGlowArtwork(
     styleConfig: CardStyleConfig,
     maxCardWidth: Dp,
     maxArtSize: Dp,
+    scale: Float,
     modifier: Modifier = Modifier
 ) {
     val glowIntensity = styleConfig.glowIntensity
-    val effectiveWidth = minOf(maxCardWidth, maxArtSize + 16.dp)
+    val effectiveWidth = minOf(maxCardWidth, maxArtSize + (16 * scale).dp)
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
             .widthIn(max = effectiveWidth)
-            .fillMaxWidth(0.88f)
+            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
             .testTag("music_story_card_container")
     ) {
         Box(
@@ -402,38 +414,38 @@ private fun FloatingGlowArtwork(
             }
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height((18 * scale).dp))
 
         Text(
             text = track.title,
             color = Color.White,
-            fontSize = 20.sp,
+            fontSize = (20 * scale).sp,
             fontWeight = FontWeight.Bold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("track_title_text")
         )
 
-        Spacer(modifier = Modifier.height(5.dp))
+        Spacer(modifier = Modifier.height((5 * scale).dp))
 
         Text(
             text = track.artist,
             color = Color.White.copy(alpha = 0.78f),
-            fontSize = 15.sp,
+            fontSize = (15 * scale).sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("track_artist_text")
         )
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height((18 * scale).dp))
 
         BitChordBranding(
             brandMode = styleConfig.brandMode,
             badgeColor = badgeColor,
             logoColorMode = styleConfig.logoColorMode,
-            badgeSize = 22.dp,
-            textSize = 15.sp,
+            badgeSize = (22 * scale).dp,
+            textSize = (15 * scale).sp,
             showWordmark = styleConfig.showLogoWordmark
         )
     }
@@ -449,22 +461,23 @@ private fun MinimalCleanStoryCard(
     cardShape: RoundedCornerShape,
     maxCardWidth: Dp,
     maxArtSize: Dp,
+    scale: Float,
     modifier: Modifier = Modifier
 ) {
-    val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + 28.dp)
+    val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (28 * scale).dp)
 
     Column(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
-            .fillMaxWidth(0.88f)
+            .fillMaxWidth((0.88f * scale).coerceIn(0.66f, 0.96f))
             .shadow(
-                elevation = (20 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).dp,
+                elevation = (20 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale).dp,
                 shape = cardShape
             )
             .clip(cardShape)
             .background(Color(0xFF141418).copy(alpha = 0.88f))
             .border(1.dp, Color.White.copy(alpha = 0.10f), cardShape)
-            .padding(14.dp)
+            .padding((14 * scale).dp)
             .testTag("music_story_card_container")
     ) {
         Box(
@@ -493,39 +506,82 @@ private fun MinimalCleanStoryCard(
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height((14 * scale).dp))
 
         Text(
             text = track.title,
             color = Color.White,
-            fontSize = 18.sp,
+            fontSize = (18 * scale).sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("track_title_text")
         )
 
-        Spacer(modifier = Modifier.height(3.dp))
+        Spacer(modifier = Modifier.height((3 * scale).dp))
 
         Text(
             text = track.artist,
             color = Color.White.copy(alpha = 0.72f),
-            fontSize = 13.sp,
+            fontSize = (13 * scale).sp,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("track_artist_text")
         )
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height((14 * scale).dp))
 
         BitChordBranding(
             brandMode = styleConfig.brandMode,
             badgeColor = badgeColor,
             logoColorMode = styleConfig.logoColorMode,
-            badgeSize = 18.dp,
-            textSize = 13.sp,
+            badgeSize = (18 * scale).dp,
+            textSize = (13 * scale).sp,
             showWordmark = styleConfig.showLogoWordmark
+        )
+    }
+}
+
+fun resolveGradientStops(
+    palette: CardPalette,
+    styleConfig: CardStyleConfig
+): List<Color> {
+    return when (styleConfig.gradientStyle) {
+        GradientStyle.ADAPTIVE_HARMONY -> listOf(
+            lerp(palette.vibrantColor, palette.dominantColor, 0.28f),
+            lerp(palette.dominantColor, palette.darkMutedColor, 0.48f),
+            palette.darkMutedColor
+        )
+        GradientStyle.VIBRANT_TO_DARK_MUTED -> listOf(
+            palette.vibrantColor,
+            lerp(palette.vibrantColor, palette.darkMutedColor, 0.55f),
+            palette.darkMutedColor
+        )
+        GradientStyle.DOMINANT_TO_DARK_MUTED -> listOf(
+            palette.dominantColor,
+            lerp(palette.dominantColor, palette.darkMutedColor, 0.52f),
+            palette.darkMutedColor
+        )
+        GradientStyle.LIGHT_VIBRANT_TO_DARK_VIBRANT -> listOf(
+            palette.lightVibrantColor,
+            palette.vibrantColor,
+            palette.darkVibrantColor
+        )
+        GradientStyle.CINEMATIC_AURORA -> listOf(
+            palette.vibrantColor,
+            palette.mutedColor,
+            palette.darkVibrantColor
+        )
+        GradientStyle.DEEP_NIGHT -> listOf(
+            Color(0xFF1F1D24),
+            Color(0xFF121216),
+            Color(0xFF070709)
+        )
+        GradientStyle.SUNSET_GLOW -> listOf(
+            Color(0xFFFF5E36),
+            Color(0xFF9E1B44),
+            Color(0xFF280618)
         )
     }
 }
@@ -534,16 +590,6 @@ fun resolveGradientColors(
     palette: CardPalette,
     styleConfig: CardStyleConfig
 ): Pair<Color, Color> {
-    return when (styleConfig.gradientStyle) {
-        GradientStyle.VIBRANT_TO_DARK_MUTED ->
-            Pair(palette.vibrantColor, palette.darkMutedColor)
-        GradientStyle.DOMINANT_TO_DARK_MUTED ->
-            Pair(palette.dominantColor, palette.darkMutedColor)
-        GradientStyle.LIGHT_VIBRANT_TO_DARK_VIBRANT ->
-            Pair(palette.lightVibrantColor, palette.darkVibrantColor)
-        GradientStyle.DEEP_NIGHT ->
-            Pair(Color(0xFF191414), Color(0xFF08080A))
-        GradientStyle.SUNSET_GLOW ->
-            Pair(Color(0xFFFF5E36), Color(0xFF3E0A24))
-    }
+    val stops = resolveGradientStops(palette, styleConfig)
+    return Pair(stops.first(), stops.last())
 }

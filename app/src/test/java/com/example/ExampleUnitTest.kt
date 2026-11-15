@@ -4,11 +4,14 @@ import androidx.compose.ui.graphics.Color
 import com.example.model.CardBrandMode
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
+import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
+import com.example.ui.components.resolveGradientStops
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -26,7 +29,23 @@ class ExampleUnitTest {
         assertEquals(24f, config.backgroundBlurRadius, 0.001f)
         assertEquals(0.25f, config.darkOverlayAlpha, 0.001f)
         assertEquals(16, config.cornerRadiusDp)
+        assertEquals(1.0f, config.cardScale, 0.001f)
+        assertFalse(config.autoSearchOnlineArt)
         assertEquals(LogoColorMode.RED, config.logoColorMode)
+        assertEquals(GradientStyle.ADAPTIVE_HARMONY, config.gradientStyle)
+    }
+
+    @Test
+    fun testGradientStopsAndScaleConfig() {
+        val config = CardStyleConfig(
+            gradientStyle = GradientStyle.CINEMATIC_AURORA,
+            cardScale = 0.85f,
+            autoSearchOnlineArt = true
+        )
+        val stops = resolveGradientStops(CardPalette.Default, config)
+        assertEquals(3, stops.size)
+        assertEquals(0.85f, config.cardScale, 0.001f)
+        assertTrue(config.autoSearchOnlineArt)
     }
 
     @Test

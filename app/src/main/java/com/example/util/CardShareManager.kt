@@ -88,11 +88,12 @@ object CardShareManager {
                 blurredBg.recycle()
             }
         } else {
-            val (startColorInt, endColorInt) = resolveGradientColors(palette, styleConfig)
-            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            val gradientStops = resolveGradientStopsArgb(palette, styleConfig)
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
                 shader = LinearGradient(
                     0f, 0f, width.toFloat(), height.toFloat(),
-                    startColorInt, endColorInt,
+                    gradientStops,
+                    floatArrayOf(0f, 0.52f, 1f),
                     Shader.TileMode.CLAMP
                 )
             }
@@ -123,22 +124,16 @@ object CardShareManager {
         bitmap
     }
 
-    private fun resolveGradientColors(
+    private fun resolveGradientStopsArgb(
         palette: CardPalette,
         styleConfig: CardStyleConfig
-    ): Pair<Int, Int> {
-        return when (styleConfig.gradientStyle) {
-            GradientStyle.VIBRANT_TO_DARK_MUTED ->
-                Pair(palette.vibrantColor.toArgb(), palette.darkMutedColor.toArgb())
-            GradientStyle.DOMINANT_TO_DARK_MUTED ->
-                Pair(palette.dominantColor.toArgb(), palette.darkMutedColor.toArgb())
-            GradientStyle.LIGHT_VIBRANT_TO_DARK_VIBRANT ->
-                Pair(palette.lightVibrantColor.toArgb(), palette.darkVibrantColor.toArgb())
-            GradientStyle.DEEP_NIGHT ->
-                Pair(0xFF191414.toInt(), 0xFF08080A.toInt())
-            GradientStyle.SUNSET_GLOW ->
-                Pair(0xFFFF5E36.toInt(), 0xFF3E0A24.toInt())
-        }
+    ): IntArray {
+        val stops = com.example.ui.components.resolveGradientStops(palette, styleConfig)
+        return intArrayOf(
+            stops[0].toArgb(),
+            stops[1].toArgb(),
+            stops[2].toArgb()
+        )
     }
 
     private fun drawFloatingGlassCardLayout(
@@ -150,15 +145,16 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val cardW = w * 0.78f
-        val innerPad = 48f
+        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+        val cardW = w * 0.78f * scale
+        val innerPad = 48f * scale
         val artSize = cardW - innerPad * 2f
-        val cornerRadius = styleConfig.cornerRadiusDp * 3f
+        val cornerRadius = styleConfig.cornerRadiusDp * 3f * scale
 
-        val textMaxW = artSize.toInt()
+        val textMaxW = artSize.toInt().coerceAtLeast(100)
         val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.WHITE
-            textSize = 54f
+            textSize = 54f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             letterSpacing = -0.02f
         }
@@ -166,13 +162,13 @@ object CardShareManager {
 
         val artistPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.argb(185, 255, 255, 255)
-            textSize = 40f
+            textSize = 40f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
         }
         val artistLayout = buildEllipsizedLayout(track.artist, artistPaint, textMaxW, maxLines = 1)
 
-        val badgeSize = 60f
-        val cardH = innerPad + artSize + 42f + titleLayout.height + 12f + artistLayout.height + 54f + badgeSize + innerPad
+        val badgeSize = 60f * scale
+        val cardH = innerPad + artSize + (42f * scale) + titleLayout.height + (12f * scale) + artistLayout.height + (54f * scale) + badgeSize + innerPad
 
         val cardLeft = (w - cardW) / 2f
         val cardTop = (h - cardH) / 2f
@@ -180,20 +176,21 @@ object CardShareManager {
         val cardBottom = cardTop + cardH
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
 
-        val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f)
+        val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
         val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.argb((145 * shadowStrength).roundToInt().coerceIn(0, 255), 0, 0, 0)
+            color = AndroidColor.argb((145 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).roundToInt().coerceIn(0, 255), 0, 0, 0)
             maskFilter = BlurMaskFilter(64f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
         }
         canvas.drawRoundRect(
-            RectF(cardLeft, cardTop + 22f, cardRight, cardBottom + 22f),
+            RectF(cardLeft, cardTop + (22f * scale), cardRight, cardBottom + (22f * scale)),
             cornerRadius,
             cornerRadius,
             shadowPaint
         )
 
-        val topCardColor = withAlpha(lerpArgb(palette.dominantColor.toArgb(), 0xFF141418.toInt(), 0.45f), 0.86f)
-        val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0E0E12.toInt(), 0.45f), 0.90f)
+        val accentTint = lerpArgb(palette.dominantColor.toArgb(), palette.vibrantColor.toArgb(), 0.18f)
+        val topCardColor = withAlpha(lerpArgb(accentTint, 0xFF16161C.toInt(), 0.42f), 0.87f)
+        val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0C0C10.toInt(), 0.40f), 0.92f)
         val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 cardLeft, cardTop, cardLeft, cardBottom,
@@ -213,7 +210,7 @@ object CardShareManager {
         val artLeft = cardLeft + innerPad
         val artTop = cardTop + innerPad
         val artRect = RectF(artLeft, artTop, artLeft + artSize, artTop + artSize)
-        val artCorner = 30f
+        val artCorner = 30f * scale
 
         canvas.save()
         val clipPath = Path().apply {
@@ -236,19 +233,19 @@ object CardShareManager {
         }
         canvas.restore()
 
-        var cursorY = artTop + artSize + 42f
+        var cursorY = artTop + artSize + (42f * scale)
         canvas.save()
         canvas.translate(artLeft, cursorY)
         titleLayout.draw(canvas)
         canvas.restore()
 
-        cursorY += titleLayout.height + 12f
+        cursorY += titleLayout.height + (12f * scale)
         canvas.save()
         canvas.translate(artLeft, cursorY)
         artistLayout.draw(canvas)
         canvas.restore()
 
-        val footerTop = cursorY + artistLayout.height + 54f
+        val footerTop = cursorY + artistLayout.height + (54f * scale)
         val badgeColor = styleConfig.resolveLogoBadgeColor(palette).toArgb()
         drawBrandFooter(
             context = context,
@@ -259,7 +256,7 @@ object CardShareManager {
             badgeColor = badgeColor,
             logoColorMode = styleConfig.logoColorMode,
             badgeSize = badgeSize,
-            textSize = 42f,
+            textSize = 42f * scale,
             showWordmark = styleConfig.showLogoWordmark
         )
     }
@@ -273,18 +270,19 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val artSize = (w * 0.72f)
+        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+        val artSize = (w * 0.72f * scale)
         val artLeft = (w - artSize) / 2f
-        val artTop = (h * 0.26f)
+        val artTop = (h - artSize) * 0.36f
         val artRight = artLeft + artSize
         val artBottom = artTop + artSize
-        val artRadius = styleConfig.cornerRadiusDp * 3f
+        val artRadius = styleConfig.cornerRadiusDp * 3f * scale
 
         if (styleConfig.glowIntensity > 0.05f) {
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = palette.vibrantColor.toArgb()
                 alpha = (180 * styleConfig.glowIntensity).toInt().coerceIn(0, 255)
-                maskFilter = BlurMaskFilter(80f * styleConfig.glowIntensity, BlurMaskFilter.Blur.NORMAL)
+                maskFilter = BlurMaskFilter(80f * styleConfig.glowIntensity * scale, BlurMaskFilter.Blur.NORMAL)
             }
             canvas.drawRoundRect(
                 RectF(artLeft - 20f, artTop - 20f, artRight + 20f, artBottom + 20f),
@@ -311,19 +309,19 @@ object CardShareManager {
         }
         canvas.restore()
 
-        var textY = artBottom + 96f
+        var textY = artBottom + (96f * scale)
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.WHITE
-            textSize = 58f
+            textSize = 58f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             textAlign = Paint.Align.CENTER
         }
         canvas.drawText(track.title.take(30), w / 2f, textY, titlePaint)
 
-        textY += 60f
+        textY += 60f * scale
         val artistPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.argb(200, 255, 255, 255)
-            textSize = 42f
+            textSize = 42f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
             textAlign = Paint.Align.CENTER
         }
@@ -333,13 +331,13 @@ object CardShareManager {
         drawBrandFooter(
             context = context,
             canvas = canvas,
-            leftX = (w / 2f) - 135f,
-            topY = textY + 72f,
+            leftX = (w / 2f) - (135f * scale),
+            topY = textY + (72f * scale),
             brandMode = styleConfig.brandMode,
             badgeColor = badgeColor,
             logoColorMode = styleConfig.logoColorMode,
-            badgeSize = 62f,
-            textSize = 44f,
+            badgeSize = 62f * scale,
+            textSize = 44f * scale,
             showWordmark = styleConfig.showLogoWordmark
         )
     }
@@ -353,11 +351,12 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig
     ) {
-        val cardW = w * 0.78f
-        val innerPad = 42f
+        val scale = styleConfig.cardScale.coerceIn(0.75f, 1.15f)
+        val cardW = w * 0.78f * scale
+        val innerPad = 42f * scale
         val artSize = cardW - innerPad * 2f
-        val cornerRadius = styleConfig.cornerRadiusDp * 3f
-        val cardH = innerPad + artSize + 290f
+        val cornerRadius = styleConfig.cornerRadiusDp * 3f * scale
+        val cardH = innerPad + artSize + (290f * scale)
 
         val cardLeft = (w - cardW) / 2f
         val cardTop = (h - cardH) / 2f
@@ -373,7 +372,7 @@ object CardShareManager {
         val artRect = RectF(artLeft, artTop, artLeft + artSize, artTop + artSize)
         canvas.save()
         val clipPath = Path()
-        clipPath.addRoundRect(artRect, 28f, 28f, Path.Direction.CW)
+        clipPath.addRoundRect(artRect, 28f * scale, 28f * scale, Path.Direction.CW)
         canvas.clipPath(clipPath)
         val albumArt = track.albumArt
         if (albumArt != null) {
@@ -389,18 +388,18 @@ object CardShareManager {
         }
         canvas.restore()
 
-        var textY = artTop + artSize + 72f
+        var textY = artTop + artSize + (72f * scale)
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.WHITE
-            textSize = 52f
+            textSize = 52f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
         canvas.drawText(track.title.take(30), artLeft, textY, titlePaint)
 
-        textY += 52f
+        textY += 52f * scale
         val artistPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.argb(185, 255, 255, 255)
-            textSize = 38f
+            textSize = 38f * scale
         }
         canvas.drawText(track.artist.take(36), artLeft, textY, artistPaint)
 
@@ -409,12 +408,12 @@ object CardShareManager {
             context = context,
             canvas = canvas,
             leftX = artLeft,
-            topY = textY + 42f,
+            topY = textY + (42f * scale),
             brandMode = styleConfig.brandMode,
             badgeColor = badgeColor,
             logoColorMode = styleConfig.logoColorMode,
-            badgeSize = 54f,
-            textSize = 38f,
+            badgeSize = 54f * scale,
+            textSize = 38f * scale,
             showWordmark = styleConfig.showLogoWordmark
         )
     }
@@ -766,7 +765,7 @@ object CardShareManager {
         }
     }
 
-    suspend fun shareToMessages(
+    suspend fun shareToInstagramStory(
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
@@ -774,39 +773,7 @@ object CardShareManager {
     ) = withContext(Dispatchers.IO) {
         try {
             val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_story_${System.currentTimeMillis()}.png")
-
-            withContext(Dispatchers.Main) {
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(Intent.EXTRA_TEXT, "Check out this song: ${track.title} by ${track.artist}")
-                    putExtra("sms_body", "Check out this song: ${track.title} by ${track.artist}")
-                    clipData = ClipData.newRawUri("Share Card", uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                val chooser = Intent.createChooser(intent, "Share via Messages").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                context.startActivity(chooser)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Unable to share: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    suspend fun shareToStories(
-        context: Context,
-        track: MediaTrackInfo,
-        palette: CardPalette,
-        styleConfig: CardStyleConfig
-    ) = withContext(Dispatchers.IO) {
-        try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_story_${System.currentTimeMillis()}.png")
+            val uri = saveBitmapToCache(context, bitmap, "bitchord_ig_story_${System.currentTimeMillis()}.png")
 
             withContext(Dispatchers.Main) {
                 val storyIntent = Intent("com.instagram.share.ADD_TO_STORY").apply {
@@ -814,21 +781,96 @@ object CardShareManager {
                     putExtra("interactive_asset_uri", uri)
                     putExtra("top_background_color", String.format("#%06X", (0xFFFFFF and palette.vibrantColor.toArgb())))
                     putExtra("bottom_background_color", String.format("#%06X", (0xFFFFFF and palette.darkMutedColor.toArgb())))
-                    clipData = ClipData.newRawUri("Share Story", uri)
+                    clipData = ClipData.newRawUri("Instagram Story", uri)
+                    setPackage("com.instagram.android")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
                 try {
+                    context.grantUriPermission("com.instagram.android", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     context.startActivity(storyIntent)
                 } catch (_: Exception) {
+                    Toast.makeText(context, "Instagram app not found for Stories", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Unable to share Instagram Story: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    suspend fun shareToSnapchatStory(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
+            val uri = saveBitmapToCache(context, bitmap, "bitchord_snap_story_${System.currentTimeMillis()}.png")
+            val brand = styleConfig.brandMode.wordmark
+
+            withContext(Dispatchers.Main) {
+                val snapIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "image/png"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
+                    clipData = ClipData.newRawUri("Snapchat Story", uri)
+                    setPackage("com.snapchat.android")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                try {
+                    context.grantUriPermission("com.snapchat.android", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(snapIntent)
+                } catch (_: Exception) {
+                    Toast.makeText(context, "Snapchat app not found for Stories", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Unable to share Snapchat Story: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    suspend fun shareToDiscord(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
+            val uri = saveBitmapToCache(context, bitmap, "bitchord_discord_${System.currentTimeMillis()}.png")
+            val brand = styleConfig.brandMode.wordmark
+
+            withContext(Dispatchers.Main) {
+                val discordIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "image/png"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
+                    clipData = ClipData.newRawUri("Discord Share Card", uri)
+                    setPackage("com.discord")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                try {
+                    context.grantUriPermission("com.discord", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(discordIntent)
+                } catch (_: Exception) {
+                    Toast.makeText(context, "Discord app not found — opening share menu", Toast.LENGTH_SHORT).show()
                     val fallback = Intent(Intent.ACTION_SEND).apply {
                         type = "image/png"
                         putExtra(Intent.EXTRA_STREAM, uri)
-                        putExtra(Intent.EXTRA_TEXT, "My Music Story: ${track.title} - ${track.artist}")
-                        clipData = ClipData.newRawUri("Share Story", uri)
+                        putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
+                        clipData = ClipData.newRawUri("Share Card", uri)
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    val chooser = Intent.createChooser(fallback, "Share Story via").apply {
+                    val chooser = Intent.createChooser(fallback, "Share to Discord via").apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     context.startActivity(chooser)
@@ -837,7 +879,7 @@ object CardShareManager {
         } catch (e: Exception) {
             e.printStackTrace()
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Unable to share story: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Unable to share to Discord: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }

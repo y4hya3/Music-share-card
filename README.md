@@ -39,12 +39,17 @@ BitChord is an Android Jetpack Compose application that automatically reads acti
 - **Logo Badge Colors:** Red, Template Dynamic (matches album art), Green, or Classic White—changing only the icon badge while keeping the brand wordmark crisp white.
 - **Background Modes:** Blurred Album Cover (`0px–40px`) or Palette Gradient presets.
 - **Card Layout Styles:** Floating Glass Card, Floating Glow Art, or Minimal Story.
+- **Card Size Control:** Adjust card scale (`75%–115%`) cleanly for both preview and export.
+- **High-Quality Cover Art & Online Search:** Auto-fetch or manually search 1000×1000 HD covers (iTunes HD & Deezer HD) and choose between online results or the original player cover art.
+- **Enhanced Adaptive Palette Gradients:** `clearFilters()` + HSV-harmonized multi-stop gradients (`Adaptive Harmony`, `Cinematic Aurora`, `Studio Glow`, etc.) that adapt cleanly to every cover including monochrome, ultra-dark, and bright art.
+- **Persistent Customizations:** All branding, size, blur, gradient, layout, and cover-search preferences automatically stay saved across song changes, player switches, and app restarts.
 - **Track Editor & Sample Presets:** Edit track title/artist manually or preview with built-in demo tracks.
 
-### 5. One-Tap Save & Social Sharing
+### 5. Export Preview, Save & Direct Social Sharing
 - **Copy link:** Copies track info cleanly to the clipboard.
-- **Save image:** Exports a high-resolution `1080×1920` PNG directly to `Pictures/BitChord` via `MediaStore`.
-- **Share Anywhere:** Direct share actions for **WhatsApp**, **Messages**, **Instagram Stories**, and the Android system share sheet via `FileProvider`.
+- **Save:** Exports a high-resolution `1080×1920` PNG directly to `Pictures/BitChord` via `MediaStore`.
+- **Preview:** Inspect the exact clutter-free `9:16` export before saving or sharing.
+- **Circular Social Logos:** Direct sharing via real circular app logos for **WhatsApp** (standard chat/status share), **Instagram Story** (Stories only), **Snapchat Story** (Stories only), **Discord**, and **Other** (Android share sheet).
 
 ---
 

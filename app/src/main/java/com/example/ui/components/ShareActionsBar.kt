@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +18,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,9 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -39,9 +40,11 @@ import com.example.R
 fun ShareActionsBar(
     onCopyLink: () -> Unit,
     onSaveToGallery: () -> Unit,
+    onPreviewCard: () -> Unit,
     onShareWhatsApp: () -> Unit,
-    onShareMessages: () -> Unit,
-    onShareStories: () -> Unit,
+    onShareInstagramStory: () -> Unit,
+    onShareSnapchatStory: () -> Unit,
+    onShareDiscord: () -> Unit,
     onNativeShare: () -> Unit,
     modifier: Modifier = Modifier,
     isGridLayout: Boolean = false
@@ -50,17 +53,19 @@ fun ShareActionsBar(
         FlowRow(
             modifier = modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 6.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            maxItemsInEachRow = 3
+            maxItemsInEachRow = 4
         ) {
             ShareActionItemsContent(
                 onCopyLink = onCopyLink,
                 onSaveToGallery = onSaveToGallery,
+                onPreviewCard = onPreviewCard,
                 onShareWhatsApp = onShareWhatsApp,
-                onShareMessages = onShareMessages,
-                onShareStories = onShareStories,
+                onShareInstagramStory = onShareInstagramStory,
+                onShareSnapchatStory = onShareSnapchatStory,
+                onShareDiscord = onShareDiscord,
                 onNativeShare = onNativeShare
             )
         }
@@ -77,9 +82,11 @@ fun ShareActionsBar(
             ShareActionItemsContent(
                 onCopyLink = onCopyLink,
                 onSaveToGallery = onSaveToGallery,
+                onPreviewCard = onPreviewCard,
                 onShareWhatsApp = onShareWhatsApp,
-                onShareMessages = onShareMessages,
-                onShareStories = onShareStories,
+                onShareInstagramStory = onShareInstagramStory,
+                onShareSnapchatStory = onShareSnapchatStory,
+                onShareDiscord = onShareDiscord,
                 onNativeShare = onNativeShare
             )
         }
@@ -90,110 +97,202 @@ fun ShareActionsBar(
 private fun ShareActionItemsContent(
     onCopyLink: () -> Unit,
     onSaveToGallery: () -> Unit,
+    onPreviewCard: () -> Unit,
     onShareWhatsApp: () -> Unit,
-    onShareMessages: () -> Unit,
-    onShareStories: () -> Unit,
+    onShareInstagramStory: () -> Unit,
+    onShareSnapchatStory: () -> Unit,
+    onShareDiscord: () -> Unit,
     onNativeShare: () -> Unit
 ) {
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_copy),
+    // 1. Copy Link
+    CircularActionItem(
         label = "Copy link",
-        bgColor = Color.White,
-        iconTint = Color.Black,
         onClick = onCopyLink,
         tag = "action_copy_link"
-    )
-
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_download),
-        label = "Save image",
-        bgColor = Color(0xFFFF2B44),
-        iconTint = Color.White,
-        onClick = onSaveToGallery,
-        tag = "action_save_image"
-    )
-
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_chat),
-        label = "WhatsApp",
-        bgColor = Color(0xFF25D366),
-        iconTint = Color.White,
-        onClick = onShareWhatsApp,
-        tag = "action_whatsapp"
-    )
-
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_send),
-        label = "Messages",
-        bgColor = Color(0xFF833AB4),
-        iconTint = Color.White,
-        onClick = onShareMessages,
-        tag = "action_messages"
-    )
-
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_stories),
-        label = "Stories",
-        brush = Brush.linearGradient(
-            colors = listOf(Color(0xFF833AB4), Color(0xFFFD1D1D), Color(0xFFFCB045))
-        ),
-        iconTint = Color.White,
-        onClick = onShareStories,
-        tag = "action_stories"
-    )
-
-    ShareActionItem(
-        painter = painterResource(R.drawable.ic_send),
-        label = "More",
-        bgColor = Color(0xFF2C2C34),
-        iconTint = Color.White,
-        onClick = onNativeShare,
-        tag = "action_native_share"
-    )
-}
-
-@Composable
-private fun ShareActionItem(
-    painter: Painter,
-    label: String,
-    iconTint: Color,
-    onClick: () -> Unit,
-    tag: String,
-    bgColor: Color = Color.Transparent,
-    brush: Brush? = null
-) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-            .testTag(tag)
     ) {
         Box(
             modifier = Modifier
                 .size(52.dp)
                 .shadow(4.dp, CircleShape)
                 .clip(CircleShape)
-                .then(
-                    if (brush != null) {
-                        Modifier.background(brush)
-                    } else {
-                        Modifier.background(bgColor)
-                    }
-                ),
+                .background(Color.White),
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                painter = painter,
-                contentDescription = label,
-                tint = iconTint,
-                modifier = Modifier.size(23.dp)
+                painter = painterResource(R.drawable.ic_copy),
+                contentDescription = "Copy link",
+                tint = Color.Black,
+                modifier = Modifier.size(22.dp)
             )
         }
+    }
 
+    // 2. Save Image
+    CircularActionItem(
+        label = "Save",
+        onClick = onSaveToGallery,
+        tag = "action_save_image"
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xFFFF2B44)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_download),
+                contentDescription = "Save image",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+
+    // 3. Preview Before Sharing
+    CircularActionItem(
+        label = "Preview",
+        onClick = onPreviewCard,
+        tag = "action_preview_card"
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xFF23232C))
+                .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            PreviewEyeIcon(modifier = Modifier.size(24.dp))
+        }
+    }
+
+    // 4. WhatsApp (Normal Share to WhatsApp)
+    CircularActionItem(
+        label = "WhatsApp",
+        onClick = onShareWhatsApp,
+        tag = "action_whatsapp"
+    ) {
+        WhatsAppCircularLogo(
+            size = 52.dp,
+            modifier = Modifier
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+        )
+    }
+
+    // 5. Instagram (Story Only)
+    CircularActionItem(
+        label = "IG Story",
+        onClick = onShareInstagramStory,
+        tag = "action_instagram_story"
+    ) {
+        InstagramCircularLogo(
+            size = 52.dp,
+            modifier = Modifier
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+        )
+    }
+
+    // 6. Snapchat (Story Only)
+    CircularActionItem(
+        label = "Snap Story",
+        onClick = onShareSnapchatStory,
+        tag = "action_snapchat_story"
+    ) {
+        SnapchatCircularLogo(
+            size = 52.dp,
+            modifier = Modifier
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+        )
+    }
+
+    // 7. Discord
+    CircularActionItem(
+        label = "Discord",
+        onClick = onShareDiscord,
+        tag = "action_discord"
+    ) {
+        DiscordCircularLogo(
+            size = 52.dp,
+            modifier = Modifier
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+        )
+    }
+
+    // 8. Other
+    CircularActionItem(
+        label = "Other",
+        onClick = onNativeShare,
+        tag = "action_native_share"
+    ) {
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .shadow(4.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color(0xFF2C2C34))
+                .border(1.dp, Color.White.copy(alpha = 0.16f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Share,
+                contentDescription = "Other share options",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PreviewEyeIcon(modifier: Modifier = Modifier) {
+    androidx.compose.foundation.Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val cx = w / 2f
+        val cy = h / 2f
+        val eyePath = androidx.compose.ui.graphics.Path().apply {
+            moveTo(w * 0.08f, cy)
+            quadraticTo(cx, h * 0.12f, w * 0.92f, cy)
+            quadraticTo(cx, h * 0.88f, w * 0.08f, cy)
+            close()
+        }
+        drawPath(
+            path = eyePath,
+            color = Color.White,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = w * 0.09f)
+        )
+        drawCircle(
+            color = Color.White,
+            radius = w * 0.14f,
+            center = androidx.compose.ui.geometry.Offset(cx, cy)
+        )
+    }
+}
+
+@Composable
+private fun CircularActionItem(
+    label: String,
+    onClick: () -> Unit,
+    tag: String,
+    iconContent: @Composable () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 7.dp, vertical = 6.dp)
+            .testTag(tag)
+    ) {
+        iconContent()
         Spacer(modifier = Modifier.height(6.dp))
-
         Text(
             text = label,
             color = Color.White.copy(alpha = 0.94f),

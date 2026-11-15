@@ -11,6 +11,8 @@
     <queries>
         <package android:name="com.whatsapp" />
         <package android:name="com.instagram.android" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.discord" />
         <intent>
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/png" />

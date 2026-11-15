@@ -5,12 +5,15 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -37,6 +40,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
@@ -48,6 +53,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -57,13 +63,24 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import com.example.R
+import com.example.model.CardPalette
+import com.example.model.CardStyleConfig
+import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
 import com.example.service.MusicNotificationListenerService
 import com.example.ui.components.BlurredAlbumBackground
@@ -95,6 +112,7 @@ fun BitChordShareScreen(
     val isAccessGranted by MediaNotificationRepository.isNotificationAccessEnabled.collectAsState()
 
     var showEditSheet by remember { mutableStateOf(false) }
+    var showPreviewDialog by remember { mutableStateOf(false) }
     var isProcessingAction by remember { mutableStateOf(false) }
     var actionStatusText by remember { mutableStateOf("") }
 
@@ -294,19 +312,25 @@ fun BitChordShareScreen(
                                     CardShareManager.copyTrackLink(context, currentTrack, styleConfig.brandMode)
                                 },
                                 onSaveToGallery = { handleSaveImageClick() },
+                                onPreviewCard = { showPreviewDialog = true },
                                 onShareWhatsApp = {
                                     runShareAction("Preparing for WhatsApp...") {
                                         CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
                                     }
                                 },
-                                onShareMessages = {
-                                    runShareAction("Preparing for Messages...") {
-                                        CardShareManager.shareToMessages(context, currentTrack, palette, styleConfig)
+                                onShareInstagramStory = {
+                                    runShareAction("Preparing Instagram Story...") {
+                                        CardShareManager.shareToInstagramStory(context, currentTrack, palette, styleConfig)
                                     }
                                 },
-                                onShareStories = {
-                                    runShareAction("Preparing 9:16 Story...") {
-                                        CardShareManager.shareToStories(context, currentTrack, palette, styleConfig)
+                                onShareSnapchatStory = {
+                                    runShareAction("Preparing Snapchat Story...") {
+                                        CardShareManager.shareToSnapchatStory(context, currentTrack, palette, styleConfig)
+                                    }
+                                },
+                                onShareDiscord = {
+                                    runShareAction("Preparing for Discord...") {
+                                        CardShareManager.shareToDiscord(context, currentTrack, palette, styleConfig)
                                     }
                                 },
                                 onNativeShare = {
@@ -393,19 +417,25 @@ fun BitChordShareScreen(
                                 CardShareManager.copyTrackLink(context, currentTrack, styleConfig.brandMode)
                             },
                             onSaveToGallery = { handleSaveImageClick() },
+                            onPreviewCard = { showPreviewDialog = true },
                             onShareWhatsApp = {
                                 runShareAction("Preparing for WhatsApp...") {
                                     CardShareManager.shareToWhatsApp(context, currentTrack, palette, styleConfig)
                                 }
                             },
-                            onShareMessages = {
-                                runShareAction("Preparing for Messages...") {
-                                    CardShareManager.shareToMessages(context, currentTrack, palette, styleConfig)
+                            onShareInstagramStory = {
+                                runShareAction("Preparing Instagram Story...") {
+                                    CardShareManager.shareToInstagramStory(context, currentTrack, palette, styleConfig)
                                 }
                             },
-                            onShareStories = {
-                                runShareAction("Preparing 9:16 Story...") {
-                                    CardShareManager.shareToStories(context, currentTrack, palette, styleConfig)
+                            onShareSnapchatStory = {
+                                runShareAction("Preparing Snapchat Story...") {
+                                    CardShareManager.shareToSnapchatStory(context, currentTrack, palette, styleConfig)
+                                }
+                            },
+                            onShareDiscord = {
+                                runShareAction("Preparing for Discord...") {
+                                    CardShareManager.shareToDiscord(context, currentTrack, palette, styleConfig)
                                 }
                             },
                             onNativeShare = {
@@ -434,6 +464,177 @@ fun BitChordShareScreen(
                 MediaNotificationRepository.selectSampleTrack(selectedTrack)
             }
         )
+    }
+
+    if (showPreviewDialog) {
+        CleanExportPreviewDialog(
+            track = currentTrack,
+            palette = palette,
+            styleConfig = styleConfig,
+            onDismiss = { showPreviewDialog = false },
+            onSaveClick = {
+                showPreviewDialog = false
+                handleSaveImageClick()
+            },
+            onShareClick = {
+                showPreviewDialog = false
+                runShareAction("Opening Share Sheet...") {
+                    CardShareManager.shareStoryCard(context, currentTrack, palette, styleConfig)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun CleanExportPreviewDialog(
+    track: MediaTrackInfo,
+    palette: CardPalette,
+    styleConfig: CardStyleConfig,
+    onDismiss: () -> Unit,
+    onSaveClick: () -> Unit,
+    onShareClick: () -> Unit
+) {
+    val context = LocalContext.current
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var showHud by remember { mutableStateOf(true) }
+
+    LaunchedEffect(track, palette, styleConfig) {
+        val rendered = CardShareManager.generateStoryBitmap(context, track, palette, styleConfig)
+        val previous = previewBitmap
+        previewBitmap = rendered
+        if (previous != null && previous !== rendered && !previous.isRecycled) {
+            previous.recycle()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            val current = previewBitmap
+            if (current != null && !current.isRecycled) {
+                current.recycle()
+            }
+            previewBitmap = null
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .clickable { showHud = !showHud }
+                .testTag("export_preview_dialog"),
+            contentAlignment = Alignment.Center
+        ) {
+            val bmp = previewBitmap
+            if (bmp != null && !bmp.isRecycled) {
+                val imgBmp = remember(bmp) { bmp.asImageBitmap() }
+                Image(
+                    bitmap = imgBmp,
+                    contentDescription = "Share Card 9:16 Export Preview",
+                    contentScale = ContentScale.Fit,
+                    filterQuality = FilterQuality.High,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(vertical = 12.dp, horizontal = 8.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color(0xFFFF2B44))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Rendering 9:16 preview...",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            if (showHud) {
+                // Top bar
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 28.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.62f),
+                        shape = RoundedCornerShape(50)
+                    ) {
+                        Text(
+                            text = "Export Preview (9:16) • Tap image to hide UI",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(44.dp)
+                            .background(Color.Black.copy(alpha = 0.65f), CircleShape)
+                            .testTag("close_preview_dialog_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close preview",
+                            tint = Color.White
+                        )
+                    }
+                }
+
+                // Bottom quick Save / Share buttons
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 28.dp, start = 24.dp, end = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = onSaveClick,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF2B44)),
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("preview_save_button")
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_download),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Save", fontWeight = FontWeight.Bold)
+                    }
+
+                    Button(
+                        onClick = onShareClick,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color.White,
+                            contentColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.testTag("preview_share_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Share", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
     }
 }
 

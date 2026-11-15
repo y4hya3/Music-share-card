@@ -1,26 +1,24 @@
 package com.example.palette
 
 import android.graphics.Bitmap
+import android.graphics.Color as AndroidColor
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.palette.graphics.Palette
 import com.example.model.CardPalette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * Palette Color Extraction module using AndroidX Palette.
- * Extracts dominant visual colors (VibrantColor, DarkMutedColor, etc.) from album artwork.
+ * Enhanced Palette Color Extraction module using AndroidX Palette + HSV harmonization.
+ * Works reliably on ALL album cover types:
+ * - Monochrome / black-and-white / ultra-dark / ultra-bright covers (where default Palette
+ *   filters reject swatches) via clearFilters() and weighted population fallback.
+ * - Derives harmonious vibrant, dominant, dark-muted, light-vibrant, and dark-vibrant colors
+ *   so white typography remains sharp and gradients never look muddy.
  */
 object PaletteColorExtractor {
-
-    private const val DEFAULT_VIBRANT = 0xFFB8253B.toInt()
-    private const val DEFAULT_DARK_MUTED = 0xFF1E0E14.toInt()
-    private const val DEFAULT_DOMINANT = 0xFF88192A.toInt()
-    private const val DEFAULT_LIGHT_VIBRANT = 0xFFF25A70.toInt()
-    private const val DEFAULT_DARK_VIBRANT = 0xFF4C0A15.toInt()
-    private const val DEFAULT_MUTED = 0xFF6E4249.toInt()
-    private const val DEFAULT_LIGHT_MUTED = 0xFFE0B8BE.toInt()
 
     /**
      * Extracts palette colors asynchronously on Dispatchers.Default.
@@ -32,35 +30,61 @@ object PaletteColorExtractor {
         }
 
         try {
-            // Build palette from the software ARGB_8888 bitmap
+            // Clear default luminance filters so pure-dark, bright, and skin/red covers still yield real swatches
             val palette = Palette.from(safeBitmap)
                 .maximumColorCount(24)
+                .clearFilters()
                 .generate()
 
-            val vibrant = palette.getVibrantColor(
-                palette.getDominantColor(DEFAULT_VIBRANT)
-            )
-            val darkMuted = palette.getDarkMutedColor(
-                palette.getDarkVibrantColor(DEFAULT_DARK_MUTED)
-            )
-            val dominant = palette.getDominantColor(DEFAULT_DOMINANT)
-            val lightVibrant = palette.getLightVibrantColor(DEFAULT_LIGHT_VIBRANT)
-            val darkVibrant = palette.getDarkVibrantColor(DEFAULT_DARK_VIBRANT)
-            val muted = palette.getMutedColor(DEFAULT_MUTED)
-            val lightMuted = palette.getLightMutedColor(DEFAULT_LIGHT_MUTED)
+            val swatchesByPop = palette.swatches.sortedByDescending { it.population }
+            if (swatchesByPop.isEmpty()) {
+                return@withContext CardPalette.Default
+            }
 
-            // Determine optimal text contrast based on darkMuted / vibrant background luminance
-            val vibrantColor = Color(vibrant)
-            val darkMutedColor = Color(darkMuted)
+            // Pick the most chromatic swatch among the top weighted swatches for vibrant fallback
+            val bestChromaticSwatch = swatchesByPop.maxByOrNull { swatch ->
+                val hsv = swatch.hsl
+                val saturation = hsv[1]
+                val lightness = hsv[2]
+                val lightnessScore = 1f - kotlin.math.abs(lightness - 0.5f) * 1.4f
+                saturation * 2.2f + lightnessScore.coerceAtLeast(0.1f) +
+                    (swatch.population.toFloat() / max(1, swatchesByPop.first().population)) * 0.45f
+            }
+
+            val dominantArgb = palette.dominantSwatch?.rgb ?: swatchesByPop.first().rgb
+
+            val rawVibrant = palette.vibrantSwatch?.rgb
+                ?: bestChromaticSwatch?.takeIf { it.hsl[1] >= 0.14f }?.rgb
+                ?: deriveVibrantFrom(dominantArgb)
+            val vibrantArgb = ensureReadableAccent(rawVibrant, minValue = 0.34f, maxValue = 0.88f)
+
+            val rawDarkMuted = palette.darkMutedSwatch?.rgb
+                ?: palette.darkVibrantSwatch?.rgb
+                ?: deriveDeepAnchorFrom(dominantArgb, vibrantArgb)
+            val darkMutedArgb = ensureDeepAnchor(rawDarkMuted, maxValue = 0.22f)
+
+            val dominantSafeArgb = harmonizeDominant(dominantArgb, darkMutedArgb)
+
+            val lightVibrantArgb = palette.lightVibrantSwatch?.rgb
+                ?: deriveLightAccent(vibrantArgb)
+
+            val darkVibrantArgb = palette.darkVibrantSwatch?.rgb
+                ?: deriveDarkAccent(vibrantArgb)
+
+            val mutedArgb = palette.mutedSwatch?.rgb
+                ?: deriveMutedFrom(dominantArgb, vibrantArgb)
+
+            val lightMutedArgb = palette.lightMutedSwatch?.rgb
+                ?: deriveLightAccent(mutedArgb)
 
             CardPalette(
-                vibrantColor = vibrantColor,
-                darkMutedColor = darkMutedColor,
-                dominantColor = Color(dominant),
-                lightVibrantColor = Color(lightVibrant),
-                darkVibrantColor = Color(darkVibrant),
-                mutedColor = Color(muted),
-                lightMutedColor = Color(lightMuted),
+                vibrantColor = Color(vibrantArgb),
+                darkMutedColor = Color(darkMutedArgb),
+                dominantColor = Color(dominantSafeArgb),
+                lightVibrantColor = Color(lightVibrantArgb),
+                darkVibrantColor = Color(darkVibrantArgb),
+                mutedColor = Color(mutedArgb),
+                lightMutedColor = Color(lightMutedArgb),
                 titleTextColor = Color.White,
                 subtitleTextColor = Color(0xCCFFFFFF)
             )
@@ -68,5 +92,94 @@ object PaletteColorExtractor {
             e.printStackTrace()
             CardPalette.Default
         }
+    }
+
+    private fun deriveVibrantFrom(baseArgb: Int): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(baseArgb, hsv)
+        if (hsv[1] < 0.08f) {
+            // Monochrome / black-and-white cover: craft a sleek slate-blue/silver accent instead of mismatched red
+            return AndroidColor.rgb(122, 134, 154)
+        }
+        hsv[1] = max(hsv[1], 0.56f).coerceAtMost(0.92f)
+        hsv[2] = hsv[2].coerceIn(0.45f, 0.84f)
+        return AndroidColor.HSVToColor(hsv)
+    }
+
+    private fun deriveDeepAnchorFrom(dominantArgb: Int, vibrantArgb: Int): Int {
+        val hsvDom = FloatArray(3)
+        AndroidColor.colorToHSV(dominantArgb, hsvDom)
+        val hsvVib = FloatArray(3)
+        AndroidColor.colorToHSV(vibrantArgb, hsvVib)
+
+        val useHue = if (hsvDom[1] >= 0.10f) hsvDom[0] else hsvVib[0]
+        val useSat = if (hsvDom[1] >= 0.08f || hsvVib[1] >= 0.08f) {
+            max(hsvDom[1], hsvVib[1] * 0.72f).coerceIn(0.18f, 0.65f)
+        } else {
+            0.08f
+        }
+        return AndroidColor.HSVToColor(floatArrayOf(useHue, useSat, 0.14f))
+    }
+
+    private fun ensureReadableAccent(argb: Int, minValue: Float, maxValue: Float): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(argb, hsv)
+        hsv[2] = hsv[2].coerceIn(minValue, maxValue)
+        if (hsv[1] in 0.08f..0.38f) {
+            hsv[1] = (hsv[1] * 1.25f).coerceAtMost(0.65f)
+        }
+        return AndroidColor.HSVToColor(hsv)
+    }
+
+    private fun ensureDeepAnchor(argb: Int, maxValue: Float): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(argb, hsv)
+        hsv[2] = min(hsv[2], maxValue).coerceAtLeast(0.06f)
+        hsv[1] = hsv[1].coerceAtMost(0.70f)
+        return AndroidColor.HSVToColor(hsv)
+    }
+
+    private fun harmonizeDominant(dominantArgb: Int, darkMutedArgb: Int): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(dominantArgb, hsv)
+        // Prevent pure-white album covers from making dominant gradient stops unreadable under white text
+        if (hsv[2] > 0.72f) {
+            hsv[2] = 0.42f
+            if (hsv[1] < 0.10f) {
+                hsv[1] = 0.08f
+            }
+            return AndroidColor.HSVToColor(hsv)
+        }
+        if (hsv[2] < 0.06f) {
+            return darkMutedArgb
+        }
+        return dominantArgb
+    }
+
+    private fun deriveLightAccent(baseArgb: Int): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(baseArgb, hsv)
+        hsv[1] = (hsv[1] * 0.80f).coerceAtMost(0.85f)
+        hsv[2] = max(hsv[2], 0.74f).coerceAtMost(0.92f)
+        return AndroidColor.HSVToColor(hsv)
+    }
+
+    private fun deriveDarkAccent(baseArgb: Int): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(baseArgb, hsv)
+        hsv[1] = min(0.88f, max(hsv[1], 0.35f))
+        hsv[2] = hsv[2].coerceIn(0.16f, 0.32f)
+        return AndroidColor.HSVToColor(hsv)
+    }
+
+    private fun deriveMutedFrom(dominantArgb: Int, vibrantArgb: Int): Int {
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(dominantArgb, hsv)
+        if (hsv[1] < 0.08f) {
+            AndroidColor.colorToHSV(vibrantArgb, hsv)
+        }
+        hsv[1] = hsv[1].coerceIn(0.15f, 0.45f)
+        hsv[2] = hsv[2].coerceIn(0.28f, 0.55f)
+        return AndroidColor.HSVToColor(hsv)
     }
 }

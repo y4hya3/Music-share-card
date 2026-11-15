@@ -11,10 +11,13 @@ import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
+import com.example.service.CoverArtSearchService
 import com.example.service.MusicNotificationListenerService
+import com.example.service.OnlineCoverCandidate
 import com.example.util.BitmapBlurUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,11 +26,18 @@ import kotlinx.coroutines.launch
 
 /**
  * Central repository managing current active track metadata, palette extraction,
- * and card styling from any media notification.
+ * persistent CardStyleConfig edits, and online HD cover art search/selection.
  */
 object MediaNotificationRepository {
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    @Volatile
+    private var appContext: Context? = null
+
+    private var onlineSearchJob: Job? = null
+    private var lastAutoSearchedTrackKey: String? = null
+    private var userManuallySelectedCoverTrackKey: String? = null
 
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
@@ -52,13 +62,28 @@ object MediaNotificationRepository {
     private val _isNotificationAccessEnabled = MutableStateFlow(false)
     val isNotificationAccessEnabled: StateFlow<Boolean> = _isNotificationAccessEnabled.asStateFlow()
 
+    private val _onlineCoverCandidates = MutableStateFlow<List<OnlineCoverCandidate>>(emptyList())
+    val onlineCoverCandidates: StateFlow<List<OnlineCoverCandidate>> = _onlineCoverCandidates.asStateFlow()
+
+    private val _isSearchingCoverArt = MutableStateFlow(false)
+    val isSearchingCoverArt: StateFlow<Boolean> = _isSearchingCoverArt.asStateFlow()
+
+    private val _originalPlayerArt = MutableStateFlow<Bitmap?>(null)
+    val originalPlayerArt: StateFlow<Bitmap?> = _originalPlayerArt.asStateFlow()
+
+    private val _selectedCoverId = MutableStateFlow("player")
+    val selectedCoverId: StateFlow<String> = _selectedCoverId.asStateFlow()
+
     private var sampleTracksList: List<MediaTrackInfo> = emptyList()
 
     fun initialize(context: Context) {
-        checkNotificationAccess(context)
+        val ctx = context.applicationContext
+        appContext = ctx
+        _styleConfig.value = CardStylePreferences.load(ctx)
+        checkNotificationAccess(ctx)
 
         val travisArt = BitmapBlurUtils.decodeSampledResource(
-            context.resources,
+            ctx.resources,
             R.drawable.sample_art_travis,
             maxDimension = 1024
         ) ?: createFallbackArt("Travis Scott", 0xFF9E1B32.toInt(), 0xFF191414.toInt())
@@ -113,6 +138,8 @@ object MediaNotificationRepository {
         )
 
         _currentTrack.value = initialTrack
+        _originalPlayerArt.value = travisArt
+        _selectedCoverId.value = "player"
         extractPaletteForTrack(initialTrack)
     }
 
@@ -123,22 +150,38 @@ object MediaNotificationRepository {
 
     fun updateTrack(trackInfo: MediaTrackInfo) {
         val current = _currentTrack.value
-        val isSameTrack = !current.isSample &&
-            current.packageName == trackInfo.packageName &&
-            current.title == trackInfo.title &&
-            current.artist == trackInfo.artist
+        val newKey = trackKey(trackInfo)
+        val currentKey = trackKey(current)
+        val isSameTrack = !current.isSample && currentKey == newKey
+
+        if (!isSameTrack) {
+            _originalPlayerArt.value = trackInfo.albumArt
+            _selectedCoverId.value = "player"
+            _onlineCoverCandidates.value = emptyList()
+            userManuallySelectedCoverTrackKey = null
+        } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
+            val prevOrig = _originalPlayerArt.value
+            val prevPixels = if (prevOrig != null && !prevOrig.isRecycled) prevOrig.width.toLong() * prevOrig.height.toLong() else 0L
+            val incPixels = trackInfo.albumArt.width.toLong() * trackInfo.albumArt.height.toLong()
+            if (incPixels >= prevPixels) {
+                _originalPlayerArt.value = trackInfo.albumArt
+            }
+        }
 
         val currentArt = current.albumArt
         val incomingArt = trackInfo.albumArt
 
         val resolvedArt = when {
+            isSameTrack && userManuallySelectedCoverTrackKey == newKey && currentArt != null && !currentArt.isRecycled -> {
+                // Respect user's manual cover art choice for the active song
+                currentArt
+            }
             isSameTrack && currentArt != null && !currentArt.isRecycled -> {
                 if (incomingArt == null || incomingArt.isRecycled) {
                     currentArt
                 } else {
                     val currentPixels = currentArt.width.toLong() * currentArt.height.toLong()
                     val incomingPixels = incomingArt.width.toLong() * incomingArt.height.toLong()
-                    // Never downgrade high-res URI/metadata art to a tiny notification/Binder thumbnail
                     if (currentPixels > incomingPixels) currentArt else incomingArt
                 }
             }
@@ -152,6 +195,15 @@ object MediaNotificationRepository {
         }
         _currentTrack.value = finalTrack
         extractPaletteForTrack(finalTrack)
+
+        // If Auto-Search Online HD Cover is enabled, look up HD candidates automatically for new live tracks
+        if (!finalTrack.isSample &&
+            _styleConfig.value.autoSearchOnlineArt &&
+            lastAutoSearchedTrackKey != newKey
+        ) {
+            lastAutoSearchedTrackKey = newKey
+            searchOnlineCovers(autoApplyBest = true)
+        }
     }
 
     fun updateTrackArtworkIfMatching(
@@ -161,11 +213,15 @@ object MediaNotificationRepository {
         albumArt: Bitmap
     ) {
         val current = _currentTrack.value
+        val key = "${packageName}|${title}|${artist}"
         if (!current.isSample &&
             current.packageName == packageName &&
             current.title == title &&
             current.artist == artist
         ) {
+            _originalPlayerArt.value = albumArt
+            if (userManuallySelectedCoverTrackKey == key) return
+
             val existing = current.albumArt
             val existingPixels = if (existing != null && !existing.isRecycled) {
                 existing.width.toLong() * existing.height.toLong()
@@ -190,6 +246,11 @@ object MediaNotificationRepository {
     }
 
     fun selectSampleTrack(track: MediaTrackInfo) {
+        _originalPlayerArt.value = track.albumArt
+        _selectedCoverId.value = "player"
+        _onlineCoverCandidates.value = emptyList()
+        userManuallySelectedCoverTrackKey = null
+        lastAutoSearchedTrackKey = null
         _currentTrack.value = track
         extractPaletteForTrack(track)
     }
@@ -197,7 +258,9 @@ object MediaNotificationRepository {
     fun getSampleTracks(): List<MediaTrackInfo> = sampleTracksList
 
     fun updateStyleConfig(update: (CardStyleConfig) -> CardStyleConfig) {
-        _styleConfig.value = update(_styleConfig.value)
+        val updated = update(_styleConfig.value)
+        _styleConfig.value = updated
+        appContext?.let { CardStylePreferences.save(it, updated) }
     }
 
     fun updateCustomTrackDetails(title: String, artist: String, album: String) {
@@ -210,6 +273,85 @@ object MediaNotificationRepository {
         )
         _currentTrack.value = updated
     }
+
+    fun searchOnlineCovers(
+        customQuery: String? = null,
+        autoApplyBest: Boolean = false
+    ) {
+        val snapshot = _currentTrack.value
+        val trackSnapshotKey = trackKey(snapshot)
+        val searchTerm = (customQuery ?: buildSearchQuery(snapshot)).trim()
+        if (searchTerm.isEmpty()) return
+
+        onlineSearchJob?.cancel()
+        onlineSearchJob = repositoryScope.launch {
+            _isSearchingCoverArt.value = true
+            try {
+                val results = CoverArtSearchService.searchCoverArt(searchTerm, maxResults = 8)
+                _onlineCoverCandidates.value = results
+                if (autoApplyBest &&
+                    results.isNotEmpty() &&
+                    trackKey(_currentTrack.value) == trackSnapshotKey &&
+                    userManuallySelectedCoverTrackKey != trackSnapshotKey
+                ) {
+                    applyOnlineCoverCandidate(results.first(), markAsManual = false)
+                }
+            } finally {
+                _isSearchingCoverArt.value = false
+            }
+        }
+    }
+
+    fun selectOnlineCover(candidate: OnlineCoverCandidate) {
+        repositoryScope.launch {
+            _isSearchingCoverArt.value = true
+            try {
+                applyOnlineCoverCandidate(candidate, markAsManual = true)
+            } finally {
+                _isSearchingCoverArt.value = false
+            }
+        }
+    }
+
+    fun restoreOriginalPlayerCover() {
+        val orig = _originalPlayerArt.value ?: return
+        val current = _currentTrack.value
+        userManuallySelectedCoverTrackKey = null
+        _selectedCoverId.value = "player"
+        val updated = current.copy(albumArt = orig)
+        _currentTrack.value = updated
+        extractPaletteForTrack(updated)
+    }
+
+    private suspend fun applyOnlineCoverCandidate(
+        candidate: OnlineCoverCandidate,
+        markAsManual: Boolean
+    ) {
+        val hdBitmap = CoverArtSearchService.fetchFullResolutionArt(candidate) ?: return
+        val current = _currentTrack.value
+        if (markAsManual) {
+            userManuallySelectedCoverTrackKey = trackKey(current)
+        }
+        _selectedCoverId.value = candidate.id
+        val updated = current.copy(albumArt = hdBitmap)
+        _currentTrack.value = updated
+        extractPaletteForTrack(updated)
+    }
+
+    private fun buildSearchQuery(track: MediaTrackInfo): String {
+        val cleanTitle = track.title
+            .replace("\\s*\\((feat\\.|ft\\.|with).*?\\)".toRegex(RegexOption.IGNORE_CASE), "")
+            .trim()
+        val cleanArtist = track.artist.trim()
+        return if (cleanArtist.isNotEmpty() && !cleanArtist.equals(track.appName, ignoreCase = true)) {
+            "$cleanTitle $cleanArtist"
+        } else {
+            cleanTitle
+        }
+    }
+
+    private fun trackKey(track: MediaTrackInfo): String =
+        "${track.packageName}|${track.title}|${track.artist}"
 
     private fun extractPaletteForTrack(track: MediaTrackInfo) {
         repositoryScope.launch {
