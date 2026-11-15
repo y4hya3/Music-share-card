@@ -102,30 +102,86 @@ object CardShareManager {
         }
 
         // Subtle dark overlay rgba(0, 0, 0, 0.25) for readable contrast
+        val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
+        drawOverlayAndCardOnCanvas(
+            context = context,
+            canvas = canvas,
+            targetWidth = width,
+            targetHeight = height,
+            track = safeTrack,
+            palette = palette,
+            styleConfig = styleConfig
+        )
+
+        bitmap
+    }
+
+    /**
+     * Renders ONLY the contrast scrim and centered floating Share Card onto a transparent bitmap.
+     * Used both by the animated 9:16 live Preview dialog and by CanvasVideoExporter as the MP4 overlay layer.
+     */
+    suspend fun generateTransparentCardOverlayBitmap(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig,
+        targetWidth: Int = 1080,
+        targetHeight: Int = 1920
+    ): Bitmap = withContext(Dispatchers.Default) {
+        val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(AndroidColor.TRANSPARENT)
+        val canvas = Canvas(bitmap)
+        val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1024)
+        val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
+
+        drawOverlayAndCardOnCanvas(
+            context = context,
+            canvas = canvas,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            track = safeTrack,
+            palette = palette,
+            styleConfig = styleConfig
+        )
+        bitmap
+    }
+
+    private fun drawOverlayAndCardOnCanvas(
+        context: Context,
+        canvas: Canvas,
+        targetWidth: Int,
+        targetHeight: Int,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig
+    ) {
+        val width = 1080
+        val height = 1920
+        val saved = canvas.save()
+        if (targetWidth != width || targetHeight != height) {
+            canvas.scale(targetWidth / width.toFloat(), targetHeight / height.toFloat())
+        }
+
         val overlayAlpha = (255f * styleConfig.darkOverlayAlpha.coerceIn(0f, 1f)).roundToInt()
         if (overlayAlpha > 0) {
             canvas.drawColor(AndroidColor.argb(overlayAlpha, 0, 0, 0))
         }
 
-        val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
-
-        // 2. Draw Centered Floating Share Card (without external slider/edit buttons)
         when (styleConfig.cardLayoutType) {
             CardLayoutType.SPOTIFY_INNER_CARD -> {
-                drawFloatingGlassCardLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
+                drawFloatingGlassCardLayout(context, canvas, width, height, track, palette, styleConfig)
             }
             CardLayoutType.FLOATING_ARTWORK -> {
-                drawFloatingArtworkLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
+                drawFloatingArtworkLayout(context, canvas, width, height, track, palette, styleConfig)
             }
             CardLayoutType.MINIMAL_CLEAN -> {
-                drawMinimalLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
+                drawMinimalLayout(context, canvas, width, height, track, palette, styleConfig)
             }
             CardLayoutType.SPOTIFY_LYRICS_CARD -> {
-                drawSpotifyLyricsCardLayout(context, canvas, width, height, safeTrack, palette, styleConfig)
+                drawSpotifyLyricsCardLayout(context, canvas, width, height, track, palette, styleConfig)
             }
         }
-
-        bitmap
+        canvas.restoreToCount(saved)
     }
 
     private fun resolveGradientStopsArgb(
@@ -846,8 +902,25 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
+        if (!activeCanvasVideoUrl.isNullOrBlank()) {
+            val videoFile = exportAnimatedVideoIfActive(
+                context = context,
+                track = track,
+                palette = palette,
+                styleConfig = styleConfig,
+                activeCanvasVideoUrl = activeCanvasVideoUrl,
+                prefix = "${styleConfig.brandMode.wordmark}_canvas"
+            )
+            if (videoFile != null) {
+                val savedVideo = saveVideoFileToGallery(context, track, styleConfig, videoFile)
+                videoFile.delete()
+                if (savedVideo) return@withContext true
+            }
+        }
+
         var bitmap: Bitmap? = null
         try {
             bitmap = generateStoryBitmap(context, track, palette, styleConfig)
@@ -907,6 +980,64 @@ object CardShareManager {
         }
     }
 
+    private suspend fun saveVideoFileToGallery(
+        context: Context,
+        track: MediaTrackInfo,
+        styleConfig: CardStyleConfig,
+        videoFile: File
+    ): Boolean {
+        return try {
+            val safeTitle = track.title.replace("[^A-Za-z0-9_-]".toRegex(), "_").take(32)
+            val fileName = "${styleConfig.brandMode.wordmark}_${safeTitle}_${System.currentTimeMillis()}.mp4"
+            val contentResolver = context.contentResolver
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/EchoSnap")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val videoUri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                if (videoUri != null) {
+                    contentResolver.openOutputStream(videoUri).use { out ->
+                        if (out != null) {
+                            videoFile.inputStream().use { input ->
+                                input.copyTo(out)
+                                out.flush()
+                            }
+                        }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    contentResolver.update(videoUri, values, null, null)
+                }
+            } else {
+                val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+                val echoDir = File(moviesDir, "EchoSnap").apply { mkdirs() }
+                val dest = File(echoDir, fileName)
+                videoFile.copyTo(dest, overwrite = true)
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DATA, dest.absolutePath)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                }
+                contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    context,
+                    "Saved Animated Canvas Video (Movies/EchoSnap)!",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
     fun copyTrackLink(
         context: Context,
         track: MediaTrackInfo,
@@ -919,20 +1050,80 @@ object CardShareManager {
         Toast.makeText(context, "Track copied to clipboard!", Toast.LENGTH_SHORT).show()
     }
 
+    private suspend fun prepareSharePayload(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String?,
+        filePrefix: String
+    ): Pair<Uri, String> {
+        val videoFile = exportAnimatedVideoIfActive(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            activeCanvasVideoUrl = activeCanvasVideoUrl,
+            prefix = filePrefix
+        )
+        if (videoFile != null) {
+            val authority = "${context.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(context, authority, videoFile)
+            return Pair(uri, "video/mp4")
+        }
+        val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
+        val uri = saveBitmapToCache(context, bitmap, "${filePrefix}_${System.currentTimeMillis()}.png")
+        return Pair(uri, "image/png")
+    }
+
+    private suspend fun exportAnimatedVideoIfActive(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String?,
+        prefix: String
+    ): File? {
+        if (activeCanvasVideoUrl.isNullOrBlank()) return null
+        val overlay = generateTransparentCardOverlayBitmap(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            targetWidth = 720,
+            targetHeight = 1280
+        )
+        return try {
+            CanvasVideoExporter.exportAnimatedStoryVideo(
+                context = context,
+                canvasVideoUrl = activeCanvasVideoUrl,
+                overlayBitmap = overlay,
+                blurRadiusPx = styleConfig.backgroundBlurRadius,
+                outputFileName = "${prefix}_${System.currentTimeMillis()}.mp4"
+            )
+        } finally {
+            if (!overlay.isRecycled) {
+                overlay.recycle()
+            }
+        }
+    }
+
     suspend fun shareToWhatsApp(
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_story_${System.currentTimeMillis()}.png")
+            val (uri, mimeType) = prepareSharePayload(
+                context, track, palette, styleConfig, activeCanvasVideoUrl, "echosnap_wa"
+            )
             val brand = styleConfig.brandMode.wordmark
 
             withContext(Dispatchers.Main) {
                 val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
+                    type = mimeType
                     putExtra(Intent.EXTRA_STREAM, uri)
                     putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
                     clipData = ClipData.newRawUri("Share Card", uri)
@@ -941,10 +1132,11 @@ object CardShareManager {
                 }
 
                 try {
+                    context.grantUriPermission("com.whatsapp", uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     context.startActivity(intent)
                 } catch (_: Exception) {
                     val fallback = Intent(Intent.ACTION_SEND).apply {
-                        type = "image/png"
+                        type = mimeType
                         putExtra(Intent.EXTRA_STREAM, uri)
                         putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
                         clipData = ClipData.newRawUri("Share Card", uri)
@@ -968,15 +1160,17 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_ig_story_${System.currentTimeMillis()}.png")
+            val (uri, mimeType) = prepareSharePayload(
+                context, track, palette, styleConfig, activeCanvasVideoUrl, "echosnap_ig_story"
+            )
 
             withContext(Dispatchers.Main) {
                 val storyIntent = Intent("com.instagram.share.ADD_TO_STORY").apply {
-                    setDataAndType(uri, "image/png")
+                    setDataAndType(uri, mimeType)
                     putExtra("interactive_asset_uri", uri)
                     putExtra("top_background_color", String.format("#%06X", (0xFFFFFF and palette.vibrantColor.toArgb())))
                     putExtra("bottom_background_color", String.format("#%06X", (0xFFFFFF and palette.darkMutedColor.toArgb())))
@@ -1004,16 +1198,18 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_snap_story_${System.currentTimeMillis()}.png")
+            val (uri, mimeType) = prepareSharePayload(
+                context, track, palette, styleConfig, activeCanvasVideoUrl, "echosnap_snap_story"
+            )
             val brand = styleConfig.brandMode.wordmark
 
             withContext(Dispatchers.Main) {
                 val snapIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
+                    type = mimeType
                     putExtra(Intent.EXTRA_STREAM, uri)
                     putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
                     clipData = ClipData.newRawUri("Snapchat Story", uri)
@@ -1040,16 +1236,18 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_discord_${System.currentTimeMillis()}.png")
+            val (uri, mimeType) = prepareSharePayload(
+                context, track, palette, styleConfig, activeCanvasVideoUrl, "echosnap_discord"
+            )
             val brand = styleConfig.brandMode.wordmark
 
             withContext(Dispatchers.Main) {
                 val discordIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
+                    type = mimeType
                     putExtra(Intent.EXTRA_STREAM, uri)
                     putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
                     clipData = ClipData.newRawUri("Discord Share Card", uri)
@@ -1063,7 +1261,7 @@ object CardShareManager {
                 } catch (_: Exception) {
                     Toast.makeText(context, "Discord app not found — opening share menu", Toast.LENGTH_SHORT).show()
                     val fallback = Intent(Intent.ACTION_SEND).apply {
-                        type = "image/png"
+                        type = mimeType
                         putExtra(Intent.EXTRA_STREAM, uri)
                         putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")
                         clipData = ClipData.newRawUri("Share Card", uri)
@@ -1087,16 +1285,18 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        activeCanvasVideoUrl: String? = null
     ) = withContext(Dispatchers.IO) {
         try {
-            val bitmap = generateStoryBitmap(context, track, palette, styleConfig)
-            val uri = saveBitmapToCache(context, bitmap, "bitchord_story_${System.currentTimeMillis()}.png")
+            val (uri, mimeType) = prepareSharePayload(
+                context, track, palette, styleConfig, activeCanvasVideoUrl, "echosnap_story"
+            )
             val brand = styleConfig.brandMode.wordmark
 
             withContext(Dispatchers.Main) {
                 val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "image/png"
+                    type = mimeType
                     putExtra(Intent.EXTRA_STREAM, uri)
                     putExtra(Intent.EXTRA_SUBJECT, "Music Story: ${track.title} by ${track.artist}")
                     putExtra(Intent.EXTRA_TEXT, "Listening to ${track.title} by ${track.artist} on $brand")

@@ -294,11 +294,9 @@ class SpotifyLoginActivity : ComponentActivity() {
         val rawDefaultUa = try {
             WebSettings.getDefaultUserAgent(this)
         } catch (_: Exception) {
-            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
         }
-        // Remove "; wv" token so Google/Spotify treat WebView like a standard mobile Chromium browser
-        // while keeping the exact Chromium engine version on this device.
-        browserUserAgent = rawDefaultUa.replace("; wv", "")
+        browserUserAgent = normalizeBrowserUserAgent(rawDefaultUa)
 
         wv.settings.apply {
             javaScriptEnabled = true
@@ -328,7 +326,8 @@ class SpotifyLoginActivity : ComponentActivity() {
         wv.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 progressBar.progress = newProgress
-                if (newProgress >= 70) {
+                val url = view?.url.orEmpty()
+                if (newProgress >= 70 && !isPostLoginCaptureUrl(url)) {
                     loadingOverlay.visibility = View.GONE
                 }
                 if (newProgress >= 100) {
@@ -368,10 +367,18 @@ class SpotifyLoginActivity : ComponentActivity() {
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 errorBanner.visibility = View.GONE
+                view?.evaluateJavascript("try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; } }); } catch(e) {}", null)
                 if (url != null) {
                     when {
+                        url.contains("accounts.spotify.com") && url.contains("/status") -> {
+                            statusTextView.text = "Signed in! Capturing Spotify token..."
+                            loadingOverlay.visibility = View.VISIBLE
+                            tryFetchTokenViaCookies()
+                        }
                         url.contains("open.spotify.com") -> {
-                            statusTextView.text = "Logged in — grabbing Spotify token..."
+                            statusTextView.text = "Signed in! Syncing Spotify token..."
+                            loadingOverlay.visibility = View.VISIBLE
+                            tryFetchTokenViaCookies()
                         }
                         url.contains("accounts.spotify.com") -> {
                             statusTextView.text = "Sign in to your Spotify account"
@@ -384,19 +391,24 @@ class SpotifyLoginActivity : ComponentActivity() {
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
-                loadingOverlay.visibility = View.GONE
-                if (url != null && url.startsWith("https://open.spotify.com")) {
+                if (url != null && (url.contains("open.spotify.com") || url.contains("/status"))) {
+                    loadingOverlay.visibility = View.VISIBLE
                     view?.evaluateJavascript(TOKEN_CAPTURE_JS, null)
+                    tryFetchTokenViaCookies()
+                } else {
+                    loadingOverlay.visibility = View.GONE
                 }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
-                loadingOverlay.visibility = View.GONE
                 CookieManager.getInstance().flush()
-                if (url != null && url.startsWith("https://open.spotify.com")) {
-                    statusTextView.text = "Syncing Spotify session token..."
+                if (url != null && (url.contains("open.spotify.com") || url.contains("/status"))) {
+                    loadingOverlay.visibility = View.VISIBLE
+                    statusTextView.text = "Capturing Spotify session token..."
                     view?.evaluateJavascript(TOKEN_CAPTURE_JS, null)
                     tryFetchTokenViaCookies()
+                } else {
+                    loadingOverlay.visibility = View.GONE
                 }
             }
 
@@ -447,20 +459,41 @@ class SpotifyLoginActivity : ComponentActivity() {
         wv.loadUrl(SPOTIFY_LOGIN_URL)
     }
 
+    private fun isPostLoginCaptureUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return (url.contains("accounts.spotify.com") && url.contains("/status")) ||
+            url.contains("open.spotify.com")
+    }
+
     private fun startCookieAndSessionPoller() {
         cookiePollingJob?.cancel()
         cookiePollingJob = lifecycleScope.launch {
+            var postLoginChecks = 0
+            var navigatedToTokenJson = false
+            var navigatedToSilentWebPlayer = false
             while (isActive && !capturedOnce.get()) {
-                delay(1400)
+                delay(300)
                 val wv = webView ?: continue
                 val currentUrl = wv.url.orEmpty()
-                if (currentUrl.startsWith("https://open.spotify.com")) {
-                    wv.evaluateJavascript(TOKEN_CAPTURE_JS, null)
+                val cookiesOpen = CookieManager.getInstance().getCookie("https://open.spotify.com").orEmpty()
+                val cookiesAccounts = CookieManager.getInstance().getCookie("https://accounts.spotify.com").orEmpty()
+                val hasSessionCookie = cookiesOpen.contains("sp_dc=") || cookiesAccounts.contains("sp_dc=")
+
+                if (hasSessionCookie || isPostLoginCaptureUrl(currentUrl)) {
+                    postLoginChecks++
+                    loadingOverlay.visibility = View.VISIBLE
                     tryFetchTokenViaCookies()
-                } else {
-                    val cookies = CookieManager.getInstance().getCookie("https://open.spotify.com").orEmpty()
-                    if (cookies.contains("sp_dc=")) {
-                        tryFetchTokenViaCookies()
+                    if (currentUrl.startsWith("https://open.spotify.com")) {
+                        wv.evaluateJavascript(TOKEN_CAPTURE_JS, null)
+                    }
+                    if (!navigatedToTokenJson && postLoginChecks >= 5) {
+                        // Direct JSON endpoint fallback (avoids full Web Player UI/DRM)
+                        navigatedToTokenJson = true
+                        wv.loadUrl(SPOTIFY_TOKEN_ENDPOINT)
+                    } else if (!navigatedToSilentWebPlayer && postLoginChecks >= 15) {
+                        // Silent last-resort fallback if direct endpoint requires Web Player TOTP/session script
+                        navigatedToSilentWebPlayer = true
+                        wv.loadUrl("https://open.spotify.com/")
                     }
                 }
             }
@@ -469,13 +502,14 @@ class SpotifyLoginActivity : ComponentActivity() {
 
     private fun tryFetchTokenViaCookies() {
         if (capturedOnce.get()) return
-        val cookieHeader = CookieManager.getInstance().getCookie("https://open.spotify.com").orEmpty()
+        val cm = CookieManager.getInstance()
+        val cookieHeader = cm.getCookie("https://open.spotify.com").orEmpty()
+            .ifBlank { cm.getCookie("https://accounts.spotify.com").orEmpty() }
         if (!cookieHeader.contains("sp_dc=")) return
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val conn = (URL("https://open.spotify.com/get_access_token?reason=transport&productType=web_player")
-                    .openConnection() as HttpURLConnection).apply {
+                val conn = (URL(SPOTIFY_TOKEN_ENDPOINT).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 6000
                     readTimeout = 6000
                     setRequestProperty("Cookie", cookieHeader)
@@ -567,7 +601,24 @@ class SpotifyLoginActivity : ComponentActivity() {
 
     companion object {
         private const val SPOTIFY_LOGIN_URL =
-            "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+            "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Faccounts.spotify.com%2Fen%2Fstatus"
+        private const val SPOTIFY_TOKEN_ENDPOINT =
+            "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"
+
+        fun normalizeBrowserUserAgent(rawUa: String): String {
+            var ua = rawUa.replace("; wv", "").replace(";wv", "")
+            val chromeRegex = "Chrome/(\\d+)\\.\\d+\\.\\d+\\.\\d+".toRegex()
+            val match = chromeRegex.find(ua)
+            val major = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+            if (major == null || major < 126) {
+                ua = if (match != null) {
+                    ua.replaceRange(match.range, "Chrome/131.0.0.0")
+                } else {
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                }
+            }
+            return ua
+        }
 
         fun createIntent(context: Context): Intent =
             Intent(context, SpotifyLoginActivity::class.java).apply {
@@ -587,6 +638,16 @@ private const val TOKEN_CAPTURE_JS = """
         return true;
       }
       return false;
+    }
+    var bodyText = (document.body && document.body.innerText) ? document.body.innerText.trim() : '';
+    if (bodyText.indexOf('"accessToken"') >= 0) {
+      try {
+        var jsonBody = JSON.parse(bodyText);
+        if (jsonBody && jsonBody.accessToken && !jsonBody.isAnonymous &&
+            sendTok(jsonBody.accessToken, jsonBody.accessTokenExpirationTimestampMs)) {
+          return;
+        }
+      } catch (e) {}
     }
     var sessionEl = document.getElementById('session') || document.getElementById('appServerConfig');
     if (sessionEl && sessionEl.textContent) {

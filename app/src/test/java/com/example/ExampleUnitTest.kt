@@ -172,6 +172,20 @@ class ExampleUnitTest {
             listOf("spotify:track:2xLMifQCjDGFmkHkpNLD9h")
         )
         assertTrue(protoReq.isNotEmpty())
+
+        assertEquals(
+            "2xLMifQCjDGFmkHkpNLD9h",
+            AnimatedCanvasSearchService.extractSpotifyTrackId("spotify:track:2xLMifQCjDGFmkHkpNLD9h")
+        )
+        assertEquals(
+            "0VjIjW4GlUZAMYd2vXMi3b",
+            AnimatedCanvasSearchService.extractSpotifyTrackId("https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b?si=abc")
+        )
+        val normalizedUa = com.example.ui.SpotifyLoginActivity.normalizeBrowserUserAgent(
+            "Mozilla/5.0 (Linux; Android 10; M2006C3MG; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/83.0.4103.106 Mobile Safari/537.36"
+        )
+        assertFalse(normalizedUa.contains("; wv"))
+        assertTrue(normalizedUa.contains("Chrome/131.0.0.0"))
     }
 
     @Test

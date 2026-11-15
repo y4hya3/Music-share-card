@@ -406,6 +406,7 @@ object MediaNotificationRepository {
                     spotifyClientId = cfg.spotifyClientId,
                     targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
                     targetArtist = if (isCustomOverride) "" else snapshot.artist,
+                    spotifyTrackId = if (isCustomOverride) "" else snapshot.spotifyTrackId,
                     maxResults = 8
                 )
                 result.refreshedToken?.let { renewed ->
@@ -488,12 +489,15 @@ object MediaNotificationRepository {
         _activeCanvasId.value = candidate.id
         _activeCanvasUrl.value = candidate.videoUrl
 
-        // Also upgrade art / export frame to HD poster or extracted video frame so palette + 9:16 exports stay crisp
-        val hdFrame = AnimatedCanvasSearchService.extractHighResPosterOrFrame(candidate)
-        if (hdFrame != null) {
-            val updated = current.copy(albumArt = hdFrame)
-            _currentTrack.value = updated
-            extractPaletteForTrack(updated)
+        // Like Spotify, keep the song's real album cover inside the card while the Canvas video
+        // animates in the background (only populate artwork if none exists or candidate is still art).
+        if (candidate.videoUrl.isNullOrBlank() || current.albumArt == null) {
+            val hdFrame = AnimatedCanvasSearchService.extractHighResPosterOrFrame(candidate)
+            if (hdFrame != null) {
+                val updated = current.copy(albumArt = hdFrame)
+                _currentTrack.value = updated
+                extractPaletteForTrack(updated)
+            }
         }
     }
 

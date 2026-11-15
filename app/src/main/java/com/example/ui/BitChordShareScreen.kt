@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -63,6 +64,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -83,6 +86,7 @@ import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
 import com.example.service.MusicNotificationListenerService
+import com.example.ui.components.AnimatedCanvasVideoBackground
 import com.example.ui.components.BlurredAlbumBackground
 import com.example.ui.components.EditCardBottomSheet
 import com.example.ui.components.MusicStoryCard
@@ -120,17 +124,23 @@ fun BitChordShareScreen(
     fun triggerSaveToGallery() {
         if (!isProcessingAction) {
             isProcessingAction = true
-            actionStatusText = "Saving to Pictures/EchoSnap..."
             val latestTrack = MediaNotificationRepository.currentTrack.value
             val latestPalette = MediaNotificationRepository.extractedPalette.value
             val latestStyle = MediaNotificationRepository.styleConfig.value
+            val latestCanvas = MediaNotificationRepository.activeCanvasUrl.value
+            actionStatusText = if (!latestCanvas.isNullOrBlank()) {
+                "Exporting animated Canvas video..."
+            } else {
+                "Saving to Pictures/EchoSnap..."
+            }
             coroutineScope.launch {
                 try {
                     CardShareManager.saveCardToGallery(
                         context = context,
                         track = latestTrack,
                         palette = latestPalette,
-                        styleConfig = latestStyle
+                        styleConfig = latestStyle,
+                        activeCanvasVideoUrl = latestCanvas
                     )
                 } catch (e: Exception) {
                     Toast.makeText(context, "Error saving: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -322,40 +332,50 @@ fun BitChordShareScreen(
                                     val t = MediaNotificationRepository.currentTrack.value
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
-                                    runShareAction("Preparing for WhatsApp...") {
-                                        CardShareManager.shareToWhatsApp(context, t, p, s)
+                                    val c = MediaNotificationRepository.activeCanvasUrl.value
+                                    val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for WhatsApp..." else "Preparing for WhatsApp..."
+                                    runShareAction(msg) {
+                                        CardShareManager.shareToWhatsApp(context, t, p, s, c)
                                     }
                                 },
                                 onShareInstagramStory = {
                                     val t = MediaNotificationRepository.currentTrack.value
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
-                                    runShareAction("Preparing Instagram Story...") {
-                                        CardShareManager.shareToInstagramStory(context, t, p, s)
+                                    val c = MediaNotificationRepository.activeCanvasUrl.value
+                                    val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Instagram Story..." else "Preparing Instagram Story..."
+                                    runShareAction(msg) {
+                                        CardShareManager.shareToInstagramStory(context, t, p, s, c)
                                     }
                                 },
                                 onShareSnapchatStory = {
                                     val t = MediaNotificationRepository.currentTrack.value
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
-                                    runShareAction("Preparing Snapchat Story...") {
-                                        CardShareManager.shareToSnapchatStory(context, t, p, s)
+                                    val c = MediaNotificationRepository.activeCanvasUrl.value
+                                    val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Snapchat Story..." else "Preparing Snapchat Story..."
+                                    runShareAction(msg) {
+                                        CardShareManager.shareToSnapchatStory(context, t, p, s, c)
                                     }
                                 },
                                 onShareDiscord = {
                                     val t = MediaNotificationRepository.currentTrack.value
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
-                                    runShareAction("Preparing for Discord...") {
-                                        CardShareManager.shareToDiscord(context, t, p, s)
+                                    val c = MediaNotificationRepository.activeCanvasUrl.value
+                                    val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Discord..." else "Preparing for Discord..."
+                                    runShareAction(msg) {
+                                        CardShareManager.shareToDiscord(context, t, p, s, c)
                                     }
                                 },
                                 onNativeShare = {
                                     val t = MediaNotificationRepository.currentTrack.value
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
-                                    runShareAction("Opening Share Sheet...") {
-                                        CardShareManager.shareStoryCard(context, t, p, s)
+                                    val c = MediaNotificationRepository.activeCanvasUrl.value
+                                    val msg = if (!c.isNullOrBlank()) "Exporting Canvas video..." else "Opening Share Sheet..."
+                                    runShareAction(msg) {
+                                        CardShareManager.shareStoryCard(context, t, p, s, c)
                                     }
                                 },
                                 modifier = Modifier.testTag("bottom_share_actions_bar")
@@ -442,40 +462,50 @@ fun BitChordShareScreen(
                                 val t = MediaNotificationRepository.currentTrack.value
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
-                                runShareAction("Preparing for WhatsApp...") {
-                                    CardShareManager.shareToWhatsApp(context, t, p, s)
+                                val c = MediaNotificationRepository.activeCanvasUrl.value
+                                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for WhatsApp..." else "Preparing for WhatsApp..."
+                                runShareAction(msg) {
+                                    CardShareManager.shareToWhatsApp(context, t, p, s, c)
                                 }
                             },
                             onShareInstagramStory = {
                                 val t = MediaNotificationRepository.currentTrack.value
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
-                                runShareAction("Preparing Instagram Story...") {
-                                    CardShareManager.shareToInstagramStory(context, t, p, s)
+                                val c = MediaNotificationRepository.activeCanvasUrl.value
+                                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Instagram Story..." else "Preparing Instagram Story..."
+                                runShareAction(msg) {
+                                    CardShareManager.shareToInstagramStory(context, t, p, s, c)
                                 }
                             },
                             onShareSnapchatStory = {
                                 val t = MediaNotificationRepository.currentTrack.value
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
-                                runShareAction("Preparing Snapchat Story...") {
-                                    CardShareManager.shareToSnapchatStory(context, t, p, s)
+                                val c = MediaNotificationRepository.activeCanvasUrl.value
+                                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Snapchat Story..." else "Preparing Snapchat Story..."
+                                runShareAction(msg) {
+                                    CardShareManager.shareToSnapchatStory(context, t, p, s, c)
                                 }
                             },
                             onShareDiscord = {
                                 val t = MediaNotificationRepository.currentTrack.value
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
-                                runShareAction("Preparing for Discord...") {
-                                    CardShareManager.shareToDiscord(context, t, p, s)
+                                val c = MediaNotificationRepository.activeCanvasUrl.value
+                                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video for Discord..." else "Preparing for Discord..."
+                                runShareAction(msg) {
+                                    CardShareManager.shareToDiscord(context, t, p, s, c)
                                 }
                             },
                             onNativeShare = {
                                 val t = MediaNotificationRepository.currentTrack.value
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
-                                runShareAction("Opening Share Sheet...") {
-                                    CardShareManager.shareStoryCard(context, t, p, s)
+                                val c = MediaNotificationRepository.activeCanvasUrl.value
+                                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video..." else "Opening Share Sheet..."
+                                runShareAction(msg) {
+                                    CardShareManager.shareStoryCard(context, t, p, s, c)
                                 }
                             },
                             modifier = Modifier.testTag("bottom_share_actions_bar")
@@ -506,6 +536,7 @@ fun BitChordShareScreen(
             track = currentTrack,
             palette = palette,
             styleConfig = styleConfig,
+            activeCanvasVideoUrl = activeCanvasUrl,
             onDismiss = { showPreviewDialog = false },
             onSaveClick = {
                 showPreviewDialog = false
@@ -516,8 +547,10 @@ fun BitChordShareScreen(
                 val t = MediaNotificationRepository.currentTrack.value
                 val p = MediaNotificationRepository.extractedPalette.value
                 val s = MediaNotificationRepository.styleConfig.value
-                runShareAction("Opening Share Sheet...") {
-                    CardShareManager.shareStoryCard(context, t, p, s)
+                val c = MediaNotificationRepository.activeCanvasUrl.value
+                val msg = if (!c.isNullOrBlank()) "Exporting Canvas video..." else "Opening Share Sheet..."
+                runShareAction(msg) {
+                    CardShareManager.shareStoryCard(context, t, p, s, c)
                 }
             }
         )
@@ -529,6 +562,7 @@ private fun CleanExportPreviewDialog(
     track: MediaTrackInfo,
     palette: CardPalette,
     styleConfig: CardStyleConfig,
+    activeCanvasVideoUrl: String?,
     onDismiss: () -> Unit,
     onSaveClick: () -> Unit,
     onShareClick: () -> Unit
@@ -536,9 +570,21 @@ private fun CleanExportPreviewDialog(
     val context = LocalContext.current
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showHud by remember { mutableStateOf(true) }
+    val hasAnimatedCanvas = !activeCanvasVideoUrl.isNullOrBlank()
 
-    LaunchedEffect(track, palette, styleConfig) {
-        val rendered = CardShareManager.generateStoryBitmap(context, track, palette, styleConfig)
+    LaunchedEffect(track, palette, styleConfig, activeCanvasVideoUrl) {
+        val rendered = if (hasAnimatedCanvas) {
+            CardShareManager.generateTransparentCardOverlayBitmap(
+                context = context,
+                track = track,
+                palette = palette,
+                styleConfig = styleConfig,
+                targetWidth = 1080,
+                targetHeight = 1920
+            )
+        } else {
+            CardShareManager.generateStoryBitmap(context, track, palette, styleConfig)
+        }
         val previous = previewBitmap
         previewBitmap = rendered
         if (previous != null && previous !== rendered && !previous.isRecycled) {
@@ -569,7 +615,49 @@ private fun CleanExportPreviewDialog(
             contentAlignment = Alignment.Center
         ) {
             val bmp = previewBitmap
-            if (bmp != null && !bmp.isRecycled) {
+            if (hasAnimatedCanvas && activeCanvasVideoUrl != null) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(vertical = 12.dp, horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val fitByHeight = maxWidth * 16f >= maxHeight * 9f
+                    Box(
+                        modifier = Modifier
+                            .then(if (fitByHeight) Modifier.fillMaxHeight() else Modifier.fillMaxWidth())
+                            .aspectRatio(9f / 16f, matchHeightConstraintsFirst = fitByHeight)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFF0E0E12))
+                    ) {
+                        AnimatedCanvasVideoBackground(
+                            videoUrl = activeCanvasVideoUrl,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && styleConfig.backgroundBlurRadius > 2f) {
+                                        Modifier.blur(
+                                            radius = (styleConfig.backgroundBlurRadius * 0.45f).dp,
+                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        )
+                        if (bmp != null && !bmp.isRecycled) {
+                            val imgBmp = remember(bmp) { bmp.asImageBitmap() }
+                            Image(
+                                bitmap = imgBmp,
+                                contentDescription = "Animated Canvas 9:16 Export Preview",
+                                contentScale = ContentScale.FillBounds,
+                                filterQuality = FilterQuality.High,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                }
+            } else if (bmp != null && !bmp.isRecycled) {
                 val imgBmp = remember(bmp) { bmp.asImageBitmap() }
                 Image(
                     bitmap = imgBmp,
@@ -608,7 +696,11 @@ private fun CleanExportPreviewDialog(
                         shape = RoundedCornerShape(50)
                     ) {
                         Text(
-                            text = "Export Preview (9:16) • Tap image to hide UI",
+                            text = if (hasAnimatedCanvas) {
+                                "Canvas Video Preview (9:16) • Tap to hide UI"
+                            } else {
+                                "Export Preview (9:16) • Tap image to hide UI"
+                            },
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,

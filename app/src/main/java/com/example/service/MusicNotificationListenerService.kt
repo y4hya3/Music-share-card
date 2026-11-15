@@ -363,6 +363,13 @@ class MusicNotificationListenerService : NotificationListenerService() {
 
             val appName = resolveAppLabel(context, controller.packageName)
             val resolvedArtist = artist?.takeIf { it.isNotBlank() } ?: appName
+            val rawMediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+                ?: metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
+                ?: metadata.getString("com.spotify.music.extra.TRACK_URI")
+            val spotifyTrackId = AnimatedCanvasSearchService.extractSpotifyTrackId(
+                rawInput = rawMediaId,
+                packageNameHint = controller.packageName
+            )
 
             val trackInfo = MediaTrackInfo(
                 title = title,
@@ -372,7 +379,8 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 appName = appName,
                 albumArt = safeArt,
                 isPlaying = isPlaying,
-                isSample = false
+                isSample = false,
+                spotifyTrackId = spotifyTrackId
             )
 
             Log.d(

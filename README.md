@@ -42,15 +42,16 @@ EchoSnap is an Android Jetpack Compose application that automatically reads acti
 - **Card Layout Styles:** Floating Glass Card, Floating Glow Art, Minimal Story, or **Spotify-Style Lyrics Card** (with an inline manual multi-line lyrics editor, automatic light/dark ink contrast, and a **Palette Color / Song Cover Art** background toggle).
 - **Card Size Control (`60%–120%`):** Adjust card scale consistently across the live screen, 9:16 Export Preview, Gallery Save, and Social Shares—with synchronous persistence across app restarts.
 - **High-Quality Cover Art & Online Search:** Auto-fetch or manually search 1000×1000 HD covers (iTunes HD & Deezer HD) and choose between online results or the original player cover art.
-- **Spotify Account Login & Smart Animated Canvas:** Built-in **Login to Spotify** flow automatically captures and persists your session Bearer token (with optional OAuth PKCE & manual token fallback), paired with strict artist/title-verified matching for looping Spotify Canvas MP4s and HD music clips.
+- **Spotify Account Login & Smart Animated Canvas:** Built-in **Login to Spotify** captures your session Bearer token cleanly via Spotify's status endpoint (bypassing Web Player browser-check warnings), paired with multi-source track resolution (`MediaMetadata`, active playback, and cross-platform Songlink matching + `client-token` retry on `canvaz-cache`) to unlock looping Spotify Canvas MP4s without `/v1/search` 429 rate-limits.
 - **Enhanced Adaptive Palette Gradients:** `clearFilters()` + HSV-harmonized multi-stop gradients (`Adaptive Harmony`, `Cinematic Aurora`, `Studio Glow`, etc.) that adapt cleanly to every cover including monochrome, ultra-dark, and bright art.
 - **Persistent Customizations:** All branding, size, blur, gradient, layout, Lyrics background mode, Spotify login token, and canvas-search preferences save synchronously and stay active across song changes, player switches, and app restarts.
 - **Track Editor & Sample Presets:** Edit track title/artist manually or preview with built-in demo tracks.
 
 ### 5. Export Preview, Save & Direct Social Sharing
+- **Animated Canvas Video Export (v1.0.1):** When an animated Song Canvas is active, **Preview** loops the live 9:16 Canvas video behind your card, **Save** exports a `720×1280` H.264 MP4 video to `Movies/EchoSnap`, and **Share** sends the looping MP4 video cleanly—just like Spotify Canvas sharing—while keeping your song's album art crisp inside the card.
 - **Copy link:** Copies track info cleanly to the clipboard.
-- **Save:** Exports a high-resolution `1080×1920` PNG directly to `Pictures/EchoSnap` via `MediaStore`.
-- **Preview:** Inspect the exact clutter-free `9:16` export (reflecting your current card size and edits) before saving or sharing.
+- **Save:** Exports a high-resolution `1080×1920` PNG to `Pictures/EchoSnap` (or animated MP4 to `Movies/EchoSnap` when Canvas is active) via `MediaStore`.
+- **Preview:** Inspect the exact clutter-free `9:16` export (reflecting your current card size, edits, and animated Canvas video) before saving or sharing.
 - **Circular Social Logos:** Direct sharing via real circular app logos for **WhatsApp** (standard chat/status share), **Instagram Story** (Stories only), **Snapchat Story** (Stories only), **Discord**, and **Other** (Android share sheet).
 
 ---

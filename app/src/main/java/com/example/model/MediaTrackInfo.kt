@@ -15,5 +15,6 @@ data class MediaTrackInfo(
     val isPlaying: Boolean = true,
     val isSample: Boolean = false,
     val durationMs: Long = 0L,
-    val positionMs: Long = 0L
+    val positionMs: Long = 0L,
+    val spotifyTrackId: String = ""
 )
