@@ -79,6 +79,7 @@ import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
 import com.example.service.AnimatedCanvasCandidate
 import com.example.service.SpotifyAuthManager
+import com.example.ui.SpotifyLoginActivity
 import kotlin.math.roundToInt
 
 /**
@@ -124,7 +125,6 @@ fun EditCardBottomSheet(
     }
     val context = LocalContext.current
     var revealSpotifyToken by remember { mutableStateOf(false) }
-    var showSpotifyLoginDialog by remember { mutableStateOf(false) }
     var showAdvancedSpotifyOptions by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
@@ -569,7 +569,9 @@ fun EditCardBottomSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Surface(
-                                onClick = { showSpotifyLoginDialog = true },
+                                onClick = {
+                                    context.startActivity(SpotifyLoginActivity.createIntent(context))
+                                },
                                 shape = RoundedCornerShape(10.dp),
                                 color = Color(0xFF253A2C),
                                 modifier = Modifier
@@ -606,7 +608,9 @@ fun EditCardBottomSheet(
                         }
                     } else {
                         Button(
-                            onClick = { showSpotifyLoginDialog = true },
+                            onClick = {
+                                context.startActivity(SpotifyLoginActivity.createIntent(context))
+                            },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF1DB954),
                                 contentColor = Color(0xFF0A0C0B)
@@ -1368,21 +1372,6 @@ fun EditCardBottomSheet(
                     .testTag("edit_artist_name_input")
             )
         }
-    }
-
-    if (showSpotifyLoginDialog) {
-        SpotifyWebLoginDialog(
-            onDismiss = { showSpotifyLoginDialog = false },
-            onTokenCaptured = { result ->
-                showSpotifyLoginDialog = false
-                MediaNotificationRepository.applySpotifyLoginResult(result)
-                Toast.makeText(
-                    context,
-                    "Spotify connected (${result.accountLabel})",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        )
     }
 }
 

@@ -51,6 +51,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.SpotifyLoginActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:label="Spotify Login"
+            android:theme="@style/Theme.EchoSnap.WebLogin"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Notification Listener Service for detecting active media notifications -->
         <service
             android:name=".service.MusicNotificationListenerService"
