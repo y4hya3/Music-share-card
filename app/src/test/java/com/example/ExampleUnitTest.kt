@@ -186,6 +186,29 @@ class ExampleUnitTest {
         )
         assertFalse(normalizedUa.contains("; wv"))
         assertTrue(normalizedUa.contains("Chrome/131.0.0.0"))
+
+        assertEquals(
+            "AQB_test_cookie_value_1234567890",
+            com.example.service.SpotifyAuthManager.extractSpDcValue("sp_dc=AQB_test_cookie_value_1234567890; Path=/")
+        )
+        assertTrue(
+            com.example.service.SpotifyAuthManager.looksLikeSpDcCookie(
+                "AQA_very_long_spotify_sp_dc_cookie_value_abcdefghijklmnopqrstuvwxyz123456"
+            )
+        )
+        assertFalse(
+            com.example.service.SpotifyAuthManager.looksLikeSpDcCookie(
+                "BQD_spotify_bearer_access_token_abcdefghijklmnopqrstuvwxyz123456"
+            )
+        )
+
+        val customQueryBreakdown = AnimatedCanvasSearchService.evaluateMatch(
+            candidateTitle = "SICKO MODE",
+            candidateArtist = "Travis Scott",
+            targetTitle = "Travis Scott SICKO MODE",
+            targetArtist = ""
+        )
+        assertTrue(customQueryBreakdown.titleScore >= 40)
     }
 
     @Test

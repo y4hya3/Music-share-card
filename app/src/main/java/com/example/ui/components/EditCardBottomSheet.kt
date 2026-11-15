@@ -517,7 +517,8 @@ fun EditCardBottomSheet(
             Spacer(modifier = Modifier.height(10.dp))
 
             // Primary Spotify Account Login Card
-            val isSpotifyConnected = styleConfig.spotifyAccessToken.isNotBlank()
+            val isSpotifyConnected = styleConfig.spotifyAccessToken.isNotBlank() ||
+                styleConfig.spotifySpDcCookie.isNotBlank()
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = if (isSpotifyConnected) Color(0xFF1A2A20) else Color(0xFF22242D),
@@ -556,7 +557,11 @@ fun EditCardBottomSheet(
                                         modifier = Modifier.testTag("spotify_connected_label")
                                     )
                                     Text(
-                                        text = "Spotify Canvas token active & saved",
+                                        text = if (styleConfig.spotifySpDcCookie.isNotBlank()) {
+                                            "Spotify sp_dc session & Canvas token saved"
+                                        } else {
+                                            "Spotify Canvas token active & saved"
+                                        },
                                         color = Color(0xFF9BE7B3),
                                         fontSize = 11.sp
                                     )
@@ -653,7 +658,7 @@ fun EditCardBottomSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Advanced: Manual Token / PKCE Client ID",
+                                text = "Advanced: sp_dc Cookie / Token / PKCE",
                                 color = Color.White.copy(alpha = 0.82f),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold
@@ -669,14 +674,71 @@ fun EditCardBottomSheet(
 
                     if (showAdvancedSpotifyOptions) {
                         Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = styleConfig.spotifySpDcCookie,
+                                onValueChange = { raw ->
+                                    val cleaned = SpotifyAuthManager.extractSpDcValue(raw)
+                                    onStyleChange(styleConfig.copy(spotifySpDcCookie = cleaned))
+                                },
+                                singleLine = true,
+                                label = { Text("Spotify sp_dc Cookie (recommended)", fontSize = 12.sp) },
+                                placeholder = { Text("Paste sp_dc value (AQA...)", fontSize = 11.sp) },
+                                visualTransformation = if (revealSpotifyToken) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Color(0xFF1DB954),
+                                    unfocusedBorderColor = Color(0xFF444450),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedLabelColor = Color(0xFF1DB954),
+                                    unfocusedLabelColor = Color.White.copy(alpha = 0.6f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("spotify_sp_dc_input")
+                            )
+
+                            Button(
+                                onClick = {
+                                    MediaNotificationRepository.connectWithSpDcCookie(styleConfig.spotifySpDcCookie) { _, msg ->
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF1DB954),
+                                    contentColor = Color(0xFF0A0C0B)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp),
+                                modifier = Modifier.testTag("spotify_apply_sp_dc_button")
+                            ) {
+                                Text("Apply", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
                         OutlinedTextField(
                             value = styleConfig.spotifyAccessToken,
                             onValueChange = { token ->
-                                onStyleChange(styleConfig.copy(spotifyAccessToken = token))
+                                if (SpotifyAuthManager.looksLikeSpDcCookie(token)) {
+                                    val spDc = SpotifyAuthManager.extractSpDcValue(token)
+                                    onStyleChange(styleConfig.copy(spotifySpDcCookie = spDc))
+                                } else {
+                                    onStyleChange(styleConfig.copy(spotifyAccessToken = token))
+                                }
                             },
                             singleLine = true,
                             label = { Text("Spotify Access Token (manual)") },
-                            placeholder = { Text("Paste Bearer / OAuth token", fontSize = 12.sp) },
+                            placeholder = { Text("Paste Bearer token (or sp_dc cookie)", fontSize = 12.sp) },
                             visualTransformation = if (revealSpotifyToken) {
                                 VisualTransformation.None
                             } else {

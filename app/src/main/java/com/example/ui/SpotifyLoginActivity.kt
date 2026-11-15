@@ -500,14 +500,42 @@ class SpotifyLoginActivity : ComponentActivity() {
         }
     }
 
+    private fun extractSpDcFromCookies(): String {
+        val cm = CookieManager.getInstance()
+        val domains = listOf(
+            "https://open.spotify.com",
+            "https://accounts.spotify.com",
+            "https://spotify.com"
+        )
+        for (domain in domains) {
+            val spDc = SpotifyAuthManager.extractSpDcFromCookieHeader(cm.getCookie(domain))
+            if (spDc.isNotBlank()) return spDc
+        }
+        return ""
+    }
+
     private fun tryFetchTokenViaCookies() {
         if (capturedOnce.get()) return
         val cm = CookieManager.getInstance()
+        val spDc = extractSpDcFromCookies()
+        if (spDc.isBlank()) return
+
         val cookieHeader = cm.getCookie("https://open.spotify.com").orEmpty()
             .ifBlank { cm.getCookie("https://accounts.spotify.com").orEmpty() }
-        if (!cookieHeader.contains("sp_dc=")) return
 
         lifecycleScope.launch(Dispatchers.IO) {
+            val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(
+                rawSpDc = spDc,
+                userAgent = browserUserAgent
+            )
+            if (exchanged != null) {
+                withContext(Dispatchers.Main) {
+                    handleCapturedToken(exchanged.accessToken, exchanged.expiresAtMs, spDc)
+                }
+                return@launch
+            }
+
+            if (cookieHeader.isBlank()) return@launch
             try {
                 val conn = (URL(SPOTIFY_TOKEN_ENDPOINT).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 6000
@@ -526,7 +554,7 @@ class SpotifyLoginActivity : ComponentActivity() {
                         val exp = json.optLong("accessTokenExpirationTimestampMs", 0L)
                         if (!isAnon && token.length >= 20) {
                             withContext(Dispatchers.Main) {
-                                handleCapturedToken(token, exp)
+                                handleCapturedToken(token, exp, spDc)
                             }
                         }
                     }
@@ -538,7 +566,11 @@ class SpotifyLoginActivity : ComponentActivity() {
         }
     }
 
-    private fun handleCapturedToken(token: String, expiryMs: Long) {
+    private fun handleCapturedToken(
+        token: String,
+        expiryMs: Long,
+        capturedSpDc: String = extractSpDcFromCookies()
+    ) {
         val clean = token.trim()
         if (clean.length < 20) return
         if (!capturedOnce.compareAndSet(false, true)) return
@@ -548,11 +580,13 @@ class SpotifyLoginActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             val label = SpotifyAuthManager.fetchSpotifyProfileLabel(clean).ifBlank { "Spotify Account" }
+            val finalSpDc = capturedSpDc.ifBlank { extractSpDcFromCookies() }
             MediaNotificationRepository.applySpotifyLoginResult(
                 SpotifyTokenResult(
                     accessToken = clean,
                     expiresAtMs = if (expiryMs > 0L) expiryMs else System.currentTimeMillis() + 3_500_000L,
-                    accountLabel = label
+                    accountLabel = label,
+                    spDcCookie = finalSpDc
                 )
             )
             Toast.makeText(

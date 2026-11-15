@@ -402,6 +402,8 @@ object MediaNotificationRepository {
                 val result = AnimatedCanvasSearchService.searchCanvases(
                     rawQuery = searchTerm,
                     spotifyToken = cfg.spotifyAccessToken,
+                    spotifySpDcCookie = cfg.spotifySpDcCookie,
+                    spotifyTokenExpiryMs = cfg.spotifyTokenExpiryMs,
                     spotifyRefreshToken = cfg.spotifyRefreshToken,
                     spotifyClientId = cfg.spotifyClientId,
                     targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
@@ -413,6 +415,7 @@ object MediaNotificationRepository {
                     updateStyleConfig { current ->
                         current.copy(
                             spotifyAccessToken = renewed.accessToken,
+                            spotifySpDcCookie = renewed.spDcCookie.ifBlank { current.spotifySpDcCookie },
                             spotifyRefreshToken = renewed.refreshToken.ifBlank { current.spotifyRefreshToken },
                             spotifyTokenExpiryMs = renewed.expiresAtMs
                         )
@@ -439,6 +442,7 @@ object MediaNotificationRepository {
         updateStyleConfig { current ->
             current.copy(
                 spotifyAccessToken = result.accessToken,
+                spotifySpDcCookie = result.spDcCookie.ifBlank { current.spotifySpDcCookie },
                 spotifyRefreshToken = result.refreshToken.ifBlank { current.spotifyRefreshToken },
                 spotifyTokenExpiryMs = result.expiresAtMs,
                 spotifyAccountLabel = result.accountLabel.ifBlank { "Spotify Account" }
@@ -448,13 +452,57 @@ object MediaNotificationRepository {
         searchAnimatedCanvases(autoApplyBest = false)
     }
 
+    fun connectWithSpDcCookie(
+        rawSpDc: String,
+        onComplete: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        val spDc = com.example.service.SpotifyAuthManager.extractSpDcValue(rawSpDc)
+        if (spDc.length < 20) {
+            onComplete(false, "Paste a valid Spotify sp_dc cookie value")
+            return
+        }
+        repositoryScope.launch {
+            _isSearchingCanvas.value = true
+            _canvasSearchStatus.value = "Verifying Spotify sp_dc cookie..."
+            try {
+                val tokenResult = com.example.service.SpotifyAuthManager.exchangeSpDcForAccessToken(spDc)
+                if (tokenResult != null) {
+                    val label = com.example.service.SpotifyAuthManager
+                        .fetchSpotifyProfileLabel(tokenResult.accessToken)
+                        .ifBlank { "Spotify (sp_dc)" }
+                    applySpotifyLoginResult(
+                        tokenResult.copy(
+                            accountLabel = label,
+                            spDcCookie = spDc
+                        )
+                    )
+                    onComplete(true, "Connected ($label)")
+                } else {
+                    // Save sp_dc even if immediate HTTP exchange requires interactive WebView challenge
+                    updateStyleConfig { current ->
+                        current.copy(
+                            spotifySpDcCookie = spDc,
+                            spotifyAccountLabel = current.spotifyAccountLabel.ifBlank { "Spotify (sp_dc)" }
+                        )
+                    }
+                    _canvasSearchStatus.value = "sp_dc saved — tap Login to Spotify if token refresh is challenged"
+                    onComplete(false, "sp_dc saved, but Spotify challenged direct exchange — use Login to Spotify")
+                }
+            } finally {
+                _isSearchingCanvas.value = false
+            }
+        }
+    }
+
     fun disconnectSpotifyAccount() {
         com.example.service.SpotifyAuthManager.clearSpotifyWebCookies()
         updateStyleConfig { current ->
             current.copy(
                 spotifyAccessToken = "",
+                spotifySpDcCookie = "",
                 spotifyRefreshToken = "",
                 spotifyTokenExpiryMs = 0L,
+                spotifyClientId = current.spotifyClientId,
                 spotifyAccountLabel = ""
             )
         }

@@ -55,6 +55,7 @@ data class CardStyleConfig(
     val autoSearchOnlineArt: Boolean = false,
     val autoSearchAnimatedCanvas: Boolean = false,
     val spotifyAccessToken: String = "",
+    val spotifySpDcCookie: String = "",
     val spotifyRefreshToken: String = "",
     val spotifyTokenExpiryMs: Long = 0L,
     val spotifyClientId: String = "",

@@ -18,7 +18,8 @@ data class SpotifyTokenResult(
     val accessToken: String,
     val refreshToken: String = "",
     val expiresAtMs: Long = 0L,
-    val accountLabel: String = ""
+    val accountLabel: String = "",
+    val spDcCookie: String = ""
 )
 
 /**
@@ -138,6 +139,138 @@ object SpotifyAuthManager {
         }
     }
 
+    fun extractSpDcFromCookieHeader(cookieHeader: String?): String {
+        val raw = cookieHeader?.trim().orEmpty()
+        if (raw.isEmpty()) return ""
+        val match = "(?:^|;\\s*)sp_dc=([^;\\s]+)".toRegex().find(raw)
+        if (match != null) {
+            return match.groupValues[1].trim().trim('"', '\'')
+        }
+        return ""
+    }
+
+    fun extractSpDcValue(rawInput: String?): String {
+        val trimmed = rawInput?.trim().orEmpty()
+        if (trimmed.isEmpty()) return ""
+        val fromHeader = extractSpDcFromCookieHeader(trimmed)
+        if (fromHeader.isNotEmpty()) return fromHeader
+        return trimmed.removePrefix("sp_dc=").trim().trim('"', '\'').substringBefore(';').trim()
+    }
+
+    fun looksLikeSpDcCookie(rawInput: String?): Boolean {
+        val raw = rawInput?.trim().orEmpty()
+        if (raw.isEmpty()) return false
+        if (raw.contains("sp_dc=", ignoreCase = true)) return true
+        // Spotify sp_dc session cookies begin with AQ... whereas OAuth/Web Bearer tokens begin with BQ...
+        return raw.startsWith("AQ") && raw.length >= 40 && !raw.contains(' ')
+    }
+
+    suspend fun exchangeSpDcForAccessToken(
+        rawSpDc: String,
+        userAgent: String = DEFAULT_BROWSER_UA
+    ): SpotifyTokenResult? = withContext(Dispatchers.IO) {
+        val spDc = extractSpDcValue(rawSpDc)
+        if (spDc.length < 20) return@withContext null
+
+        val endpoints = listOf(
+            "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
+            "https://open.spotify.com/get_access_token?reason=init&productType=web_player"
+        )
+        for (endpoint in endpoints) {
+            val res = fetchTokenJsonWithSpDc(endpoint, spDc, userAgent)
+            if (res != null) return@withContext res
+        }
+
+        // Fallback: Spotify SSR HTML (<script id="session"> or <script id="appServerConfig">)
+        val htmlRes = fetchTokenFromOpenSpotifyHtml(spDc, userAgent)
+        if (htmlRes != null) return@withContext htmlRes
+
+        null
+    }
+
+    private fun fetchTokenJsonWithSpDc(
+        url: String,
+        spDc: String,
+        userAgent: String
+    ): SpotifyTokenResult? {
+        return try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("Cookie", "sp_dc=$spDc")
+                setRequestProperty("User-Agent", userAgent.ifBlank { DEFAULT_BROWSER_UA })
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Referer", "https://open.spotify.com/")
+                setRequestProperty("Origin", "https://open.spotify.com")
+                setRequestProperty("App-Platform", "WebPlayer")
+            }
+            try {
+                if (conn.responseCode !in 200..299) return null
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                parseWebSessionJson(body, spDc)
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fetchTokenFromOpenSpotifyHtml(
+        spDc: String,
+        userAgent: String
+    ): SpotifyTokenResult? {
+        return try {
+            val conn = (URL("https://open.spotify.com/").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 7000
+                readTimeout = 7000
+                setRequestProperty("Cookie", "sp_dc=$spDc")
+                setRequestProperty("User-Agent", userAgent.ifBlank { DEFAULT_BROWSER_UA })
+                setRequestProperty("Accept", "text/html,application/xhtml+xml")
+            }
+            try {
+                if (conn.responseCode !in 200..299) return null
+                val html = conn.inputStream.bufferedReader().use { it.readText() }
+                val sessionRegex = "<script[^>]*id=\"(?:session|appServerConfig)\"[^>]*>([^<]+)</script>".toRegex()
+                for (match in sessionRegex.findAll(html)) {
+                    val rawContent = match.groupValues[1].trim()
+                    parseWebSessionJson(rawContent, spDc)?.let { return it }
+                    // Some Spotify builds base64-encode #appServerConfig
+                    try {
+                        val decoded = String(Base64.decode(rawContent, Base64.DEFAULT), Charsets.UTF_8)
+                        parseWebSessionJson(decoded, spDc)?.let { return it }
+                    } catch (_: Exception) {
+                    }
+                }
+                null
+            } finally {
+                conn.disconnect()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parseWebSessionJson(rawJson: String, spDc: String): SpotifyTokenResult? {
+        return try {
+            val json = JSONObject(rawJson)
+            val isAnon = json.optBoolean("isAnonymous", true)
+            val token = json.optString("accessToken", "").trim()
+            val exp = json.optLong("accessTokenExpirationTimestampMs", 0L)
+            if (!isAnon && token.length >= 20) {
+                SpotifyTokenResult(
+                    accessToken = token,
+                    expiresAtMs = if (exp > 0L) exp else System.currentTimeMillis() + 3_500_000L,
+                    spDcCookie = spDc
+                )
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun clearSpotifyWebCookies() {
         try {
             val cm = CookieManager.getInstance()
@@ -146,6 +279,9 @@ object SpotifyAuthManager {
         } catch (_: Exception) {
         }
     }
+
+    private const val DEFAULT_BROWSER_UA =
+        "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
     private fun exchangeTokenRequest(params: Map<String, String>): SpotifyTokenResult? {
         return try {

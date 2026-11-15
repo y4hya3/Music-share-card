@@ -35,6 +35,7 @@ object CardStylePreferences {
     private const val KEY_LYRICS_BG_MODE = "lyrics_bg_mode"
     private const val KEY_AUTO_SEARCH_CANVAS = "auto_search_canvas"
     private const val KEY_SPOTIFY_ACCESS_TOKEN = "spotify_access_token"
+    private const val KEY_SPOTIFY_SP_DC_COOKIE = "spotify_sp_dc_cookie"
     private const val KEY_SPOTIFY_REFRESH_TOKEN = "spotify_refresh_token"
     private const val KEY_SPOTIFY_TOKEN_EXPIRY_MS = "spotify_token_expiry_ms"
     private const val KEY_SPOTIFY_CLIENT_ID = "spotify_client_id"
@@ -84,6 +85,7 @@ object CardStylePreferences {
             autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt),
             autoSearchAnimatedCanvas = prefs.getBoolean(KEY_AUTO_SEARCH_CANVAS, defaults.autoSearchAnimatedCanvas),
             spotifyAccessToken = prefs.getString(KEY_SPOTIFY_ACCESS_TOKEN, defaults.spotifyAccessToken) ?: "",
+            spotifySpDcCookie = prefs.getString(KEY_SPOTIFY_SP_DC_COOKIE, defaults.spotifySpDcCookie) ?: "",
             spotifyRefreshToken = prefs.getString(KEY_SPOTIFY_REFRESH_TOKEN, defaults.spotifyRefreshToken) ?: "",
             spotifyTokenExpiryMs = prefs.getLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, defaults.spotifyTokenExpiryMs),
             spotifyClientId = prefs.getString(KEY_SPOTIFY_CLIENT_ID, defaults.spotifyClientId) ?: "",
@@ -111,6 +113,7 @@ object CardStylePreferences {
             .putBoolean(KEY_AUTO_SEARCH_ONLINE_ART, config.autoSearchOnlineArt)
             .putBoolean(KEY_AUTO_SEARCH_CANVAS, config.autoSearchAnimatedCanvas)
             .putString(KEY_SPOTIFY_ACCESS_TOKEN, config.spotifyAccessToken)
+            .putString(KEY_SPOTIFY_SP_DC_COOKIE, config.spotifySpDcCookie)
             .putString(KEY_SPOTIFY_REFRESH_TOKEN, config.spotifyRefreshToken)
             .putLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, config.spotifyTokenExpiryMs)
             .putString(KEY_SPOTIFY_CLIENT_ID, config.spotifyClientId)
