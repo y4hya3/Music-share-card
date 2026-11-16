@@ -47,8 +47,8 @@ data class CardStyleConfig(
     val lyricsCardBackgroundMode: LyricsCardBackgroundMode = LyricsCardBackgroundMode.PALETTE_COLOR,
     val useBlurredAlbumBackground: Boolean = true,
     val backgroundBlurRadius: Float = 24f, // 0f (sharp) to 40f (heavily blurred)
-    val useBlurredCardBackground: Boolean = false, // default keeps Glass/Minimal card unchanged
-    val cardBlurRadius: Float = 0f, // 0f (sharp) to 40f (blurred) for card album cover bg
+    val cardBlurRadius: Float = 20f, // 0f (clear glass) .. 20f (default glass) .. 40f (deep frosted blur)
+    val lyricsArtBlurRadius: Float = 0f, // 0f (crisp) to 40f (blurred) when Lyrics Card uses Song Cover Art
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
     val glowIntensity: Float = 0.75f, // soft drop shadow depth
     val cornerRadiusDp: Int = 16, // border-radius: 16px

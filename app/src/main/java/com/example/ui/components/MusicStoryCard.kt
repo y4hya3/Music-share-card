@@ -285,11 +285,36 @@ private fun FloatingGlassShareCard(
     scale: Float,
     modifier: Modifier = Modifier
 ) {
-    val useBlurredCardCover = styleConfig.useBlurredCardBackground && track.albumArt != null
-    val cardBackgroundBrush = remember(palette.vibrantColor, palette.dominantColor, palette.darkMutedColor) {
+    val glassBlur = styleConfig.cardBlurRadius.coerceIn(0f, 40f)
+    val glassDownFactor = (glassBlur / 20f).coerceIn(0f, 1f)
+    val glassUpFactor = ((glassBlur - 20f) / 20f).coerceIn(0f, 1f)
+
+    val topAlpha = if (glassBlur <= 20f) {
+        0.34f + (0.53f * glassDownFactor)
+    } else {
+        0.87f - (0.14f * glassUpFactor)
+    }
+    val bottomAlpha = if (glassBlur <= 20f) {
+        0.44f + (0.48f * glassDownFactor)
+    } else {
+        0.92f - (0.12f * glassUpFactor)
+    }
+    val glassBorderAlpha = if (glassBlur <= 20f) {
+        0.24f - (0.10f * glassDownFactor)
+    } else {
+        0.14f + (0.14f * glassUpFactor)
+    }
+
+    val cardBackgroundBrush = remember(
+        palette.vibrantColor,
+        palette.dominantColor,
+        palette.darkMutedColor,
+        topAlpha,
+        bottomAlpha
+    ) {
         val accentTint = lerp(palette.dominantColor, palette.vibrantColor, 0.18f)
-        val adaptiveTop = lerp(accentTint, Color(0xFF16161C), 0.42f).copy(alpha = 0.87f)
-        val adaptiveBottom = lerp(palette.darkMutedColor, Color(0xFF0C0C10), 0.40f).copy(alpha = 0.92f)
+        val adaptiveTop = lerp(accentTint, Color(0xFF16161C), 0.42f).copy(alpha = topAlpha)
+        val adaptiveBottom = lerp(palette.darkMutedColor, Color(0xFF0C0C10), 0.40f).copy(alpha = bottomAlpha)
         Brush.verticalGradient(colors = listOf(adaptiveTop, adaptiveBottom))
     }
 
@@ -308,25 +333,37 @@ private fun FloatingGlassShareCard(
                 spotColor = Color.Black.copy(alpha = 0.75f)
             )
             .clip(cardShape)
-            .then(
-                if (useBlurredCardCover) {
-                    Modifier.background(Color(0xFF141418))
-                } else {
-                    Modifier.background(cardBackgroundBrush)
-                }
-            )
+            .background(cardBackgroundBrush)
             .border(
                 width = 1.dp,
-                color = Color.White.copy(alpha = 0.14f),
+                color = Color.White.copy(alpha = glassBorderAlpha),
                 shape = cardShape
             )
             .testTag("music_story_card_container")
     ) {
-        if (useBlurredCardCover) {
+        if (glassUpFactor > 0.01f && track.albumArt != null) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
-                blurRadius = styleConfig.cardBlurRadius,
+                blurRadius = 24f + (16f * glassUpFactor),
+                scrimTopAlpha = 0.72f,
+                scrimMidAlpha = 0.78f,
+                scrimBottomAlpha = 0.85f,
+                layerAlpha = 0.42f * glassUpFactor,
                 modifier = Modifier.matchParentSize()
+            )
+        }
+        if (glassUpFactor > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0.08f * glassUpFactor),
+                                Color.White.copy(alpha = 0.02f * glassUpFactor)
+                            )
+                        )
+                    )
             )
         }
         Column(
@@ -512,7 +549,6 @@ private fun MinimalCleanStoryCard(
     modifier: Modifier = Modifier
 ) {
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (28 * scale).dp)
-    val useBlurredCardCover = styleConfig.useBlurredCardBackground && track.albumArt != null
 
     Box(
         modifier = modifier
@@ -523,17 +559,10 @@ private fun MinimalCleanStoryCard(
                 shape = cardShape
             )
             .clip(cardShape)
-            .background(if (useBlurredCardCover) Color(0xFF141418) else Color(0xFF141418).copy(alpha = 0.88f))
+            .background(Color(0xFF141418).copy(alpha = 0.88f))
             .border(1.dp, Color.White.copy(alpha = 0.10f), cardShape)
             .testTag("music_story_card_container")
     ) {
-        if (useBlurredCardCover) {
-            BlurredCardCoverLayer(
-                albumArt = track.albumArt,
-                blurRadius = styleConfig.cardBlurRadius,
-                modifier = Modifier.matchParentSize()
-            )
-        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -664,7 +693,7 @@ private fun SpotifyLyricsShareCard(
         if (useSongArtBg && crispArtImageBitmap != null) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
-                blurRadius = styleConfig.cardBlurRadius,
+                blurRadius = styleConfig.lyricsArtBlurRadius,
                 modifier = Modifier.matchParentSize()
             )
         }
@@ -771,7 +800,11 @@ private fun SpotifyLyricsShareCard(
 private fun BlurredCardCoverLayer(
     albumArt: Bitmap?,
     blurRadius: Float,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    scrimTopAlpha: Float = 0.44f,
+    scrimMidAlpha: Float = 0.56f,
+    scrimBottomAlpha: Float = 0.74f,
+    layerAlpha: Float = 1f
 ) {
     val clampedRadius = blurRadius.coerceIn(0f, 40f)
     val quantizedRadius = ((clampedRadius / 2f).roundToInt() * 2).coerceIn(0, 40)
@@ -787,6 +820,7 @@ private fun BlurredCardCoverLayer(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 filterQuality = FilterQuality.High,
+                alpha = layerAlpha.coerceIn(0f, 1f),
                 modifier = Modifier
                     .fillMaxSize()
                     .then(
@@ -827,6 +861,7 @@ private fun BlurredCardCoverLayer(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 filterQuality = FilterQuality.High,
+                alpha = layerAlpha.coerceIn(0f, 1f),
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -837,9 +872,9 @@ private fun BlurredCardCoverLayer(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color.Black.copy(alpha = 0.44f),
-                            Color.Black.copy(alpha = 0.56f),
-                            Color.Black.copy(alpha = 0.74f)
+                            Color.Black.copy(alpha = (scrimTopAlpha * layerAlpha).coerceIn(0f, 1f)),
+                            Color.Black.copy(alpha = (scrimMidAlpha * layerAlpha).coerceIn(0f, 1f)),
+                            Color.Black.copy(alpha = (scrimBottomAlpha * layerAlpha).coerceIn(0f, 1f))
                         )
                     )
                 )

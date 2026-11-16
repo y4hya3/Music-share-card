@@ -81,8 +81,8 @@ class ExampleRobolectricTest {
   @Test
   fun `card style defaults preserve existing card appearance`() {
     val defaults = CardStyleConfig()
-    assertFalse(defaults.useBlurredCardBackground)
-    assertEquals(0f, defaults.cardBlurRadius, 0.001f)
+    assertEquals(20f, defaults.cardBlurRadius, 0.001f)
+    assertEquals(0f, defaults.lyricsArtBlurRadius, 0.001f)
   }
 
   @Test
@@ -92,22 +92,23 @@ class ExampleRobolectricTest {
       brandMode = CardBrandMode.SPOTIFY,
       backgroundBlurRadius = 18f,
       cardScale = 0.92f,
-      useBlurredCardBackground = true,
-      cardBlurRadius = 22f
+      cardBlurRadius = 8f,
+      lyricsArtBlurRadius = 14f
     )
     CardStylePreferences.save(context, config)
     val loaded = CardStylePreferences.load(context)
     assertEquals(CardBrandMode.SPOTIFY, loaded.brandMode)
     assertEquals(18f, loaded.backgroundBlurRadius, 0.001f)
     assertEquals(0.92f, loaded.cardScale, 0.001f)
-    assertTrue(loaded.useBlurredCardBackground)
-    assertEquals(22f, loaded.cardBlurRadius, 0.001f)
+    assertEquals(8f, loaded.cardBlurRadius, 0.001f)
+    assertEquals(14f, loaded.lyricsArtBlurRadius, 0.001f)
 
-    val updated = config.copy(backgroundBlurRadius = 30f, cardBlurRadius = 10f)
+    val updated = config.copy(backgroundBlurRadius = 30f, cardBlurRadius = 32f, lyricsArtBlurRadius = 24f)
     CardStylePreferences.saveAsync(context, updated)
     val loadedAfterAsync = CardStylePreferences.load(context)
     assertEquals(30f, loadedAfterAsync.backgroundBlurRadius, 0.001f)
-    assertEquals(10f, loadedAfterAsync.cardBlurRadius, 0.001f)
+    assertEquals(32f, loadedAfterAsync.cardBlurRadius, 0.001f)
+    assertEquals(24f, loadedAfterAsync.lyricsArtBlurRadius, 0.001f)
   }
 
   @Test

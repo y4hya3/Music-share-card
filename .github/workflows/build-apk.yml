@@ -56,12 +56,19 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Create temporary debug keystore
+      - name: Prepare deterministic debug keystore
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "./debug.keystore" ]; then
-            echo "Temporary debug keystore already exists."
+          if [ -f "./debug.keystore" ] && [ -s "./debug.keystore" ]; then
+            echo "Debug keystore already exists."
+          elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
+            base64 -d ./debug.keystore.base64 > ./debug.keystore
+            if [ ! -f "./debug.keystore" ] || [ ! -s "./debug.keystore" ]; then
+              echo "::error::Failed to decode ./debug.keystore.base64 into ./debug.keystore."
+              exit 1
+            fi
+            echo "Restored deterministic ./debug.keystore from ./debug.keystore.base64."
           else
             KEYTOOL_BIN="${JAVA_HOME}/bin/keytool"
             if [ ! -x "$KEYTOOL_BIN" ]; then

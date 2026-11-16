@@ -443,8 +443,10 @@ object MediaNotificationRepository {
 
         // If the user typed a completely different search query manually, match against what they typed
         val defaultQuery = "${snapshot.title} ${snapshot.artist}".trim()
+        val cleanBuiltQuery = buildSearchQuery(snapshot)
         val isCustomOverride = trimmedCustom.isNotEmpty() &&
-            !trimmedCustom.equals(defaultQuery, ignoreCase = true)
+            !trimmedCustom.equals(defaultQuery, ignoreCase = true) &&
+            !trimmedCustom.equals(cleanBuiltQuery, ignoreCase = true)
 
         canvasSearchJob?.cancel()
         canvasSearchJob = repositoryScope.launch {

@@ -1182,112 +1182,44 @@ fun EditCardBottomSheet(
                 }
             }
 
-            if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD ||
-                styleConfig.cardLayoutType == CardLayoutType.MINIMAL_CLEAN
-            ) {
+            if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD) {
                 Spacer(modifier = Modifier.height(14.dp))
-                Text(
-                    text = "Card Cover Style",
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.White.copy(alpha = 0.92f)
-                )
-                Text(
-                    text = "Keep default card look or switch to a blurred album cover inside the card",
-                    fontSize = 11.sp,
-                    color = Color.White.copy(alpha = 0.58f),
-                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        onClick = {
-                            onStyleChange(styleConfig.copy(useBlurredCardBackground = false))
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (!styleConfig.useBlurredCardBackground) Color(0xFFFF2B44) else Color(0xFF2C2C34),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("card_bg_mode_default")
-                    ) {
-                        Text(
-                            text = "Default Card",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = if (!styleConfig.useBlurredCardBackground) FontWeight.Bold else FontWeight.Medium,
-                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Surface(
-                        onClick = {
-                            val nextBlur = if (styleConfig.cardBlurRadius <= 0.5f) 16f else styleConfig.cardBlurRadius
-                            onStyleChange(
-                                styleConfig.copy(
-                                    useBlurredCardBackground = true,
-                                    cardBlurRadius = nextBlur
-                                )
-                            )
-                        },
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (styleConfig.useBlurredCardBackground) Color(0xFFFF2B44) else Color(0xFF2C2C34),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("card_bg_mode_blurred_cover")
-                    ) {
-                        Text(
-                            text = "Blurred Album Cover",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = if (styleConfig.useBlurredCardBackground) FontWeight.Bold else FontWeight.Medium,
-                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                if (styleConfig.useBlurredCardBackground) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Card Cover Blur",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color.White.copy(alpha = 0.85f)
-                        )
-                        Text(
-                            text = "${styleConfig.cardBlurRadius.roundToInt()}px",
-                            fontSize = 13.sp,
-                            color = Color.White.copy(alpha = 0.65f)
-                        )
-                    }
-                    Slider(
-                        value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
-                        onValueChange = {
-                            onStyleChange(
-                                styleConfig.copy(
-                                    useBlurredCardBackground = true,
-                                    cardBlurRadius = it.coerceIn(0f, 40f)
-                                )
-                            )
-                        },
-                        valueRange = 0f..40f,
-                        colors = SliderDefaults.colors(
-                            thumbColor = Color(0xFFFF2B44),
-                            activeTrackColor = Color(0xFFFF2B44),
-                            inactiveTrackColor = Color(0xFF40404C)
-                        ),
-                        modifier = Modifier.testTag("sheet_card_blur_slider")
+                    Text(
+                        text = "Floating Glass Blur",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White.copy(alpha = 0.92f)
+                    )
+                    Text(
+                        text = "${styleConfig.cardBlurRadius.roundToInt()}px",
+                        fontSize = 13.sp,
+                        color = Color.White.copy(alpha = 0.65f)
                     )
                 }
+                Text(
+                    text = "Decrease for clearer see-through glass, increase for deeper frosted blur",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.58f),
+                    modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                )
+                Slider(
+                    value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
+                    onValueChange = {
+                        onStyleChange(styleConfig.copy(cardBlurRadius = it.coerceIn(0f, 40f)))
+                    },
+                    valueRange = 0f..40f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFFFF2B44),
+                        activeTrackColor = Color(0xFFFF2B44),
+                        inactiveTrackColor = Color(0xFF40404C)
+                    ),
+                    modifier = Modifier.testTag("sheet_card_blur_slider")
+                )
             }
 
             if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_LYRICS_CARD) {
@@ -1341,21 +1273,21 @@ fun EditCardBottomSheet(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Card Cover Blur",
+                            text = "Song Art Blur",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Medium,
                             color = Color.White.copy(alpha = 0.85f)
                         )
                         Text(
-                            text = "${styleConfig.cardBlurRadius.roundToInt()}px",
+                            text = "${styleConfig.lyricsArtBlurRadius.roundToInt()}px",
                             fontSize = 13.sp,
                             color = Color.White.copy(alpha = 0.65f)
                         )
                     }
                     Slider(
-                        value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
+                        value = styleConfig.lyricsArtBlurRadius.coerceIn(0f, 40f),
                         onValueChange = {
-                            onStyleChange(styleConfig.copy(cardBlurRadius = it.coerceIn(0f, 40f)))
+                            onStyleChange(styleConfig.copy(lyricsArtBlurRadius = it.coerceIn(0f, 40f)))
                         },
                         valueRange = 0f..40f,
                         colors = SliderDefaults.colors(
@@ -1600,18 +1532,12 @@ fun EditCardBottomSheet(
                     OutlinedButton(
                         onClick = {
                             val defaults = CardStyleConfig()
-                            val resetCardBlur = if (styleConfig.useBlurredCardBackground &&
-                                styleConfig.cardLayoutType != CardLayoutType.SPOTIFY_LYRICS_CARD
-                            ) {
-                                16f
-                            } else {
-                                defaults.cardBlurRadius
-                            }
                             onStyleChange(
                                 styleConfig.copy(
                                     cardScale = defaults.cardScale,
                                     backgroundBlurRadius = defaults.backgroundBlurRadius,
-                                    cardBlurRadius = resetCardBlur,
+                                    cardBlurRadius = defaults.cardBlurRadius,
+                                    lyricsArtBlurRadius = defaults.lyricsArtBlurRadius,
                                     glowIntensity = defaults.glowIntensity,
                                     darkOverlayAlpha = defaults.darkOverlayAlpha,
                                     cornerRadiusDp = defaults.cornerRadiusDp
