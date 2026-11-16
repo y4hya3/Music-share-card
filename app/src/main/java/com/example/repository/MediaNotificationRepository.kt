@@ -470,6 +470,17 @@ object MediaNotificationRepository {
                     } else {
                         null
                     },
+                    webViewSearchFallback = if (ctx != null) {
+                        { query ->
+                            com.example.service.SpotifyAuthManager.searchTrackIdsViaWebView(
+                                context = ctx,
+                                query = query,
+                                rawSpDc = _styleConfig.value.spotifySpDcCookie
+                            )
+                        }
+                    } else {
+                        null
+                    },
                     maxResults = 8
                 )
                 result.refreshedToken?.let { renewed ->

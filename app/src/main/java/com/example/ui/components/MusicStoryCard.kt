@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
+import android.graphics.Paint as AndroidPaint
 import android.os.Build
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,14 +31,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -289,20 +294,25 @@ private fun FloatingGlassShareCard(
     val glassDownFactor = (glassBlur / 20f).coerceIn(0f, 1f)
     val glassUpFactor = ((glassBlur - 20f) / 20f).coerceIn(0f, 1f)
 
+    // 0px = crisp clear see-through dark glass; 20px = preserved signature default; 40px = deeper frosted blur & frosted sides
     val topAlpha = if (glassBlur <= 20f) {
-        0.34f + (0.53f * glassDownFactor)
+        0.20f + (0.67f * glassDownFactor)
     } else {
-        0.87f - (0.14f * glassUpFactor)
+        0.87f - (0.31f * glassUpFactor)
     }
     val bottomAlpha = if (glassBlur <= 20f) {
-        0.44f + (0.48f * glassDownFactor)
+        0.30f + (0.62f * glassDownFactor)
     } else {
-        0.92f - (0.12f * glassUpFactor)
+        0.92f - (0.28f * glassUpFactor)
     }
     val glassBorderAlpha = if (glassBlur <= 20f) {
-        0.24f - (0.10f * glassDownFactor)
+        0.30f - (0.16f * glassDownFactor)
     } else {
-        0.14f + (0.14f * glassUpFactor)
+        0.14f + (0.24f * glassUpFactor)
+    }
+    val glassBorderWidth = (1.0f + (1.2f * glassUpFactor)).dp
+    val sideFrostGlowColor = remember(palette.lightVibrantColor) {
+        lerp(Color.White, palette.lightVibrantColor, 0.32f)
     }
 
     val cardBackgroundBrush = remember(
@@ -321,6 +331,7 @@ private fun FloatingGlassShareCard(
     val shadowElevation = (24 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale).dp
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (32 * scale).dp)
     val innerPadding = (16 * scale).dp
+    val cornerDpPx = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6).dp
 
     Box(
         modifier = modifier
@@ -332,10 +343,35 @@ private fun FloatingGlassShareCard(
                 ambientColor = Color.Black.copy(alpha = 0.65f),
                 spotColor = Color.Black.copy(alpha = 0.75f)
             )
+            .drawBehind {
+                // Soft outer frosted blur diffusion around all four sides of the card when glassBlur > 20px
+                if (glassUpFactor > 0.01f) {
+                    val cornerPx = cornerDpPx.toPx()
+                    val haloBlurPx = ((10f + 24f * glassUpFactor) * density).coerceAtLeast(1f)
+                    val spreadPx = (4f * glassUpFactor * density)
+                    drawIntoCanvas { canvas ->
+                        val haloPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+                            style = AndroidPaint.Style.STROKE
+                            strokeWidth = (5f + 9f * glassUpFactor) * density
+                            color = sideFrostGlowColor.copy(alpha = 0.36f * glassUpFactor).toArgb()
+                            maskFilter = BlurMaskFilter(haloBlurPx, BlurMaskFilter.Blur.NORMAL)
+                        }
+                        canvas.nativeCanvas.drawRoundRect(
+                            -spreadPx,
+                            -spreadPx,
+                            size.width + spreadPx,
+                            size.height + spreadPx,
+                            cornerPx,
+                            cornerPx,
+                            haloPaint
+                        )
+                    }
+                }
+            }
             .clip(cardShape)
             .background(cardBackgroundBrush)
             .border(
-                width = 1.dp,
+                width = glassBorderWidth,
                 color = Color.White.copy(alpha = glassBorderAlpha),
                 shape = cardShape
             )
@@ -344,26 +380,56 @@ private fun FloatingGlassShareCard(
         if (glassUpFactor > 0.01f && track.albumArt != null) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
-                blurRadius = 24f + (16f * glassUpFactor),
-                scrimTopAlpha = 0.72f,
-                scrimMidAlpha = 0.78f,
-                scrimBottomAlpha = 0.85f,
-                layerAlpha = 0.42f * glassUpFactor,
+                blurRadius = 26f + (14f * glassUpFactor),
+                scrimTopAlpha = 0.62f,
+                scrimMidAlpha = 0.70f,
+                scrimBottomAlpha = 0.78f,
+                layerAlpha = 0.56f * glassUpFactor,
                 modifier = Modifier.matchParentSize()
             )
         }
         if (glassUpFactor > 0.01f) {
+            // Side-edge frosted glass haze along left, right, top & bottom sides of the card
             Box(
                 modifier = Modifier
                     .matchParentSize()
                     .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.White.copy(alpha = 0.08f * glassUpFactor),
-                                Color.White.copy(alpha = 0.02f * glassUpFactor)
-                            )
+                        Brush.horizontalGradient(
+                            0.0f to sideFrostGlowColor.copy(alpha = 0.28f * glassUpFactor),
+                            0.18f to sideFrostGlowColor.copy(alpha = 0.05f * glassUpFactor),
+                            0.82f to sideFrostGlowColor.copy(alpha = 0.05f * glassUpFactor),
+                            1.0f to sideFrostGlowColor.copy(alpha = 0.28f * glassUpFactor)
                         )
                     )
+                    .background(
+                        Brush.verticalGradient(
+                            0.0f to Color.White.copy(alpha = 0.20f * glassUpFactor),
+                            0.15f to Color.White.copy(alpha = 0.02f * glassUpFactor),
+                            0.85f to Color.White.copy(alpha = 0.02f * glassUpFactor),
+                            1.0f to Color.White.copy(alpha = 0.18f * glassUpFactor)
+                        )
+                    )
+                    .drawBehind {
+                        val cornerPx = cornerDpPx.toPx()
+                        val innerBlurPx = ((7f + 14f * glassUpFactor) * density).coerceAtLeast(1f)
+                        drawIntoCanvas { canvas ->
+                            val innerRimPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+                                style = AndroidPaint.Style.STROKE
+                                strokeWidth = (7f + 11f * glassUpFactor) * density
+                                color = Color.White.copy(alpha = 0.28f * glassUpFactor).toArgb()
+                                maskFilter = BlurMaskFilter(innerBlurPx, BlurMaskFilter.Blur.NORMAL)
+                            }
+                            canvas.nativeCanvas.drawRoundRect(
+                                0f,
+                                0f,
+                                size.width,
+                                size.height,
+                                cornerPx,
+                                cornerPx,
+                                innerRimPaint
+                            )
+                        }
+                    }
             )
         }
         Column(

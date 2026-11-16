@@ -11,10 +11,13 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -33,6 +36,19 @@ data class SpotifyTokenResult(
     val spDcCookie: String = ""
 )
 
+data class WebViewSpotifyTrack(
+    val id: String,
+    val title: String,
+    val artist: String,
+    val coverUrl: String? = null
+)
+
+data class WebViewSpotifySearchResult(
+    val tracks: List<WebViewSpotifyTrack> = emptyList(),
+    val capturedPathfinderHash: String? = null,
+    val capturedClientToken: String? = null
+)
+
 /**
  * Manages Spotify account authentication and automatic Bearer token capture/refresh:
  * 1. In-app Spotify Web Account Login (captures Web Player / Canvas-capable Bearer tokens automatically).
@@ -45,6 +61,12 @@ object SpotifyAuthManager {
     private const val KEY_VERIFIER = "pkce_verifier"
     private const val KEY_STATE = "pkce_state"
     private const val KEY_CLIENT_ID = "pkce_client_id"
+
+    @Volatile
+    var latestCapturedClientToken: String? = null
+
+    @Volatile
+    var latestCapturedSearchHash: String? = null
 
     fun buildPkceAuthorizeIntent(context: Context, clientId: String): Intent? {
         val cleanId = clientId.trim()
@@ -307,7 +329,14 @@ object SpotifyAuthManager {
                             ): WebResourceResponse? {
                                 val reqUrl = request?.url?.toString().orEmpty()
                                 if (reqUrl.contains(".spotify.com/")) {
-                                    val auth = request?.requestHeaders?.entries
+                                    val headers = request?.requestHeaders
+                                    val ct = headers?.entries
+                                        ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
+                                        ?.value
+                                    if (!ct.isNullOrBlank()) {
+                                        latestCapturedClientToken = ct.trim()
+                                    }
+                                    val auth = headers?.entries
                                         ?.firstOrNull { it.key.equals("Authorization", ignoreCase = true) }
                                         ?.value
                                     if (!auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
@@ -345,6 +374,280 @@ object SpotifyAuthManager {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Off-screen WebView Spotify search fallback for non-Spotify music players.
+     * Loads https://open.spotify.com/search/<query> with the saved sp_dc session cookie,
+     * captures Spotify's live Pathfinder tracksV2 JSON, DOM track links, sha256Hash, and
+     * client-token — bypassing globally 429-throttled REST /v1/search completely.
+     */
+    suspend fun searchTrackIdsViaWebView(
+        context: Context,
+        query: String,
+        rawSpDc: String
+    ): WebViewSpotifySearchResult? {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isEmpty()) return null
+        val spDc = extractSpDcValue(rawSpDc)
+
+        return withTimeoutOrNull(9_500L) {
+            withContext(Dispatchers.Main) {
+                suspendCancellableCoroutine<WebViewSpotifySearchResult?> { cont ->
+                    var wv: WebView? = null
+                    var finished = false
+                    var capturedHash: String? = null
+                    var capturedClientToken: String? = null
+                    val mainHandler = Handler(Looper.getMainLooper())
+                    var pollRunnable: Runnable? = null
+
+                    fun complete(result: WebViewSpotifySearchResult?) {
+                        if (finished) return
+                        finished = true
+                        pollRunnable?.let { mainHandler.removeCallbacks(it) }
+                        pollRunnable = null
+                        try {
+                            wv?.stopLoading()
+                            wv?.destroy()
+                        } catch (_: Exception) {
+                        }
+                        wv = null
+                        if (cont.isActive) cont.resume(result)
+                    }
+
+                    try {
+                        val cm = CookieManager.getInstance()
+                        cm.setAcceptCookie(true)
+                        if (spDc.length >= 20) {
+                            cm.setCookie(
+                                "https://open.spotify.com",
+                                "sp_dc=$spDc; Domain=.spotify.com; Path=/; Secure"
+                            )
+                            cm.flush()
+                        }
+
+                        val webView = WebView(context.applicationContext)
+                        wv = webView
+                        cm.setAcceptThirdPartyCookies(webView, true)
+                        webView.settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            loadsImagesAutomatically = false
+                            userAgentString = DESKTOP_BROWSER_UA
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        }
+                        webView.addJavascriptInterface(
+                            object {
+                                @JavascriptInterface
+                                fun onPathfinderMeta(hash: String?, clientToken: String?) {
+                                    val cleanHash = hash?.trim().orEmpty()
+                                    if (cleanHash.length == 64 && cleanHash.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
+                                        capturedHash = cleanHash
+                                        latestCapturedSearchHash = cleanHash
+                                    }
+                                    val cleanCt = clientToken?.trim().orEmpty()
+                                    if (cleanCt.length >= 20) {
+                                        capturedClientToken = cleanCt
+                                        latestCapturedClientToken = cleanCt
+                                    }
+                                }
+
+                                @JavascriptInterface
+                                fun onSearchJson(rawJson: String?) {
+                                    if (rawJson.isNullOrBlank()) return
+                                    val parsed = parseWebViewPathfinderTracks(rawJson)
+                                    if (parsed.isNotEmpty()) {
+                                        webView.post {
+                                            complete(
+                                                WebViewSpotifySearchResult(
+                                                    tracks = parsed,
+                                                    capturedPathfinderHash = capturedHash ?: latestCapturedSearchHash,
+                                                    capturedClientToken = capturedClientToken ?: latestCapturedClientToken
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+
+                                @JavascriptInterface
+                                fun onDomTracksJson(rawJsonArray: String?) {
+                                    if (rawJsonArray.isNullOrBlank()) return
+                                    val parsed = parseWebViewDomTracks(rawJsonArray)
+                                    if (parsed.isNotEmpty()) {
+                                        webView.post {
+                                            complete(
+                                                WebViewSpotifySearchResult(
+                                                    tracks = parsed,
+                                                    capturedPathfinderHash = capturedHash ?: latestCapturedSearchHash,
+                                                    capturedClientToken = capturedClientToken ?: latestCapturedClientToken
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            "EchoSnapSearchBridge"
+                        )
+
+                        webView.webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                view?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
+                            }
+
+                            override fun onPageCommitVisible(view: WebView?, url: String?) {
+                                view?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                view?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
+                            }
+
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): WebResourceResponse? {
+                                val reqUrl = request?.url?.toString().orEmpty()
+                                if (reqUrl.contains("spotify.com/")) {
+                                    val ct = request?.requestHeaders?.entries
+                                        ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
+                                        ?.value
+                                    if (!ct.isNullOrBlank()) {
+                                        capturedClientToken = ct.trim()
+                                        latestCapturedClientToken = ct.trim()
+                                    }
+                                    if (reqUrl.contains("pathfinder") && reqUrl.contains("searchDesktop")) {
+                                        val hashMatch = "sha256Hash(?:%22|\")%3A(?:%22|\")([a-f0-9]{64})".toRegex(RegexOption.IGNORE_CASE)
+                                            .find(reqUrl)?.groupValues?.getOrNull(1)
+                                        if (!hashMatch.isNullOrBlank()) {
+                                            capturedHash = hashMatch
+                                            latestCapturedSearchHash = hashMatch
+                                        }
+                                    }
+                                }
+                                return super.shouldInterceptRequest(view, request)
+                            }
+                        }
+
+                        val ticker = object : Runnable {
+                            override fun run() {
+                                if (finished) return
+                                try {
+                                    wv?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
+                                } catch (_: Exception) {
+                                }
+                                mainHandler.postDelayed(this, 650L)
+                            }
+                        }
+                        pollRunnable = ticker
+                        mainHandler.postDelayed(ticker, 900L)
+
+                        cont.invokeOnCancellation {
+                            pollRunnable?.let { mainHandler.removeCallbacks(it) }
+                            pollRunnable = null
+                            webView.post {
+                                try {
+                                    webView.stopLoading()
+                                    webView.destroy()
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                        webView.resumeTimers()
+                        val encodedSearchPath = URLEncoder.encode(cleanQuery, "UTF-8").replace("+", "%20")
+                        val searchUrl = "https://open.spotify.com/search/$encodedSearchPath"
+                        webView.loadUrl(searchUrl)
+                    } catch (_: Exception) {
+                        complete(null)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun parseWebViewPathfinderTracks(rawJson: String): List<WebViewSpotifyTrack> {
+        return try {
+            val root = JSONObject(rawJson)
+            val items = root.optJSONObject("data")
+                ?.optJSONObject("searchV2")
+                ?.optJSONObject("tracksV2")
+                ?.optJSONArray("items")
+                ?: root.optJSONObject("data")
+                    ?.optJSONObject("searchDesktop")
+                    ?.optJSONObject("tracks")
+                    ?.optJSONArray("items")
+                ?: return emptyList()
+
+            val out = mutableListOf<WebViewSpotifyTrack>()
+            for (i in 0 until items.length()) {
+                val itemObj = items.optJSONObject(i)?.optJSONObject("item") ?: continue
+                val data = itemObj.optJSONObject("data")
+                    ?: itemObj.optJSONObject("itemUnion")?.optJSONObject("data")
+                    ?: continue
+                val uri = data.optString("uri", "").trim()
+                val id = data.optString("id", "").ifBlank {
+                    AnimatedCanvasSearchService.extractSpotifyTrackId(uri)
+                }
+                val title = data.optString("name", "").trim()
+                if (id.isEmpty() || title.isEmpty()) continue
+
+                val artistItems = data.optJSONObject("artists")?.optJSONArray("items")
+                val artistNames = buildList {
+                    if (artistItems != null) {
+                        for (a in 0 until artistItems.length()) {
+                            val aName = artistItems.optJSONObject(a)
+                                ?.optJSONObject("profile")
+                                ?.optString("name", "")
+                                .orEmpty()
+                            if (aName.isNotBlank()) add(aName)
+                        }
+                    }
+                }.joinToString(", ")
+
+                val coverSources = data.optJSONObject("albumOfTrack")
+                    ?.optJSONObject("coverArt")
+                    ?.optJSONArray("sources")
+                var bestCover: String? = null
+                var bestWidth = -1
+                if (coverSources != null) {
+                    for (s in 0 until coverSources.length()) {
+                        val src = coverSources.optJSONObject(s) ?: continue
+                        val w = src.optInt("width", 0)
+                        val url = src.optString("url", "").trim()
+                        if (url.isNotEmpty() && w >= bestWidth) {
+                            bestWidth = w
+                            bestCover = url
+                        }
+                    }
+                }
+                out.add(WebViewSpotifyTrack(id = id, title = title, artist = artistNames, coverUrl = bestCover))
+                if (out.size >= 8) break
+            }
+            out
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun parseWebViewDomTracks(rawJsonArray: String): List<WebViewSpotifyTrack> {
+        return try {
+            val arr = JSONArray(rawJsonArray)
+            val out = mutableListOf<WebViewSpotifyTrack>()
+            val seen = hashSetOf<String>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id", "").trim()
+                val title = obj.optString("title", "").trim()
+                val artist = obj.optString("artist", "").trim()
+                if (id.length == 22 && title.isNotEmpty() && seen.add(id)) {
+                    out.add(WebViewSpotifyTrack(id = id, title = title, artist = artist))
+                }
+                if (out.size >= 8) break
+            }
+            out
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -578,6 +881,89 @@ object SpotifyAuthManager {
           return resp;
         });
       };
+    }
+  } catch (e) {}
+})();
+"""
+
+    private const val WEB_SEARCH_HOOK_JS = """
+(function() {
+  try {
+    var bridge = window.EchoSnapSearchBridge;
+    if (!bridge) return;
+    if (!window.__echoSnapSearchHookedFetch && window.fetch) {
+      window.__echoSnapSearchHookedFetch = true;
+      var origFetch = window.fetch;
+      window.fetch = function() {
+        var args = arguments;
+        try {
+          var reqUrl = (args[0] && args[0].url) ? String(args[0].url) : String(args[0] || '');
+          var init = args[1] || {};
+          var h = init.headers;
+          var ct = '';
+          if (h) {
+            ct = (typeof h.get === 'function') ? (h.get('client-token') || '') : (h['client-token'] || h['Client-Token'] || '');
+          }
+          var hashMatch = null;
+          var urlOrBody = reqUrl + ' ' + (typeof init.body === 'string' ? init.body : '');
+          if (urlOrBody.indexOf('searchDesktop') >= 0) {
+            var m = /"sha256Hash"\s*:\s*"([a-f0-9]{64})"/i.exec(urlOrBody) || /sha256Hash(?:%22|")%3A(?:%22|")([a-f0-9]{64})/i.exec(urlOrBody);
+            if (m && m[1]) hashMatch = m[1];
+          }
+          if (hashMatch || ct) {
+            bridge.onPathfinderMeta(hashMatch || '', String(ct || ''));
+          }
+        } catch (e) {}
+        return origFetch.apply(this, args).then(function(resp) {
+          try {
+            var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');
+            if (u.indexOf('pathfinder') >= 0 && (u.indexOf('searchDesktop') >= 0 || u.indexOf('query') >= 0)) {
+              resp.clone().text().then(function(txt) {
+                if (txt && (txt.indexOf('tracksV2') >= 0 || txt.indexOf('searchDesktop') >= 0)) {
+                  bridge.onSearchJson(txt);
+                }
+              }).catch(function() {});
+            }
+          } catch (e) {}
+          return resp;
+        });
+      };
+    }
+
+    var links = document.querySelectorAll('a[href*="/track/"]');
+    if (links && links.length > 0) {
+      var seen = {};
+      var collected = [];
+      for (var i = 0; i < links.length; i++) {
+        var a = links[i];
+        var href = String(a.getAttribute('href') || '');
+        var idM = /\/track\/([A-Za-z0-9]{22})/.exec(href);
+        if (!idM || !idM[1]) continue;
+        var tid = idM[1];
+        if (seen[tid]) continue;
+        seen[tid] = true;
+        var title = (a.innerText || a.textContent || '').trim();
+        var row = a.closest('[data-testid="tracklist-row"]') || a.closest('[role="row"]') || a.parentElement;
+        var artist = '';
+        if (row) {
+          var artistLinks = row.querySelectorAll('a[href*="/artist/"]');
+          if (artistLinks && artistLinks.length > 0) {
+            var names = [];
+            for (var k = 0; k < artistLinks.length; k++) {
+              var an = (artistLinks[k].innerText || '').trim();
+              if (an) names.push(an);
+            }
+            artist = names.join(', ');
+          }
+        }
+        if (title) {
+          collected.push({ id: tid, title: title, artist: artist });
+        }
+        if (collected.length >= 8) break;
+      }
+      if (collected.length > 0) {
+        bridge.onDomTracksJson(JSON.stringify(collected));
+      }
     }
   } catch (e) {}
 })();

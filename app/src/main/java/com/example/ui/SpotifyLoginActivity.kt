@@ -445,7 +445,14 @@ class SpotifyLoginActivity : ComponentActivity() {
             ): WebResourceResponse? {
                 val reqUrl = request?.url?.toString().orEmpty()
                 if (reqUrl.contains(".spotify.com/")) {
-                    val auth = request?.requestHeaders?.entries
+                    val headers = request?.requestHeaders
+                    val ct = headers?.entries
+                        ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
+                        ?.value
+                    if (!ct.isNullOrBlank()) {
+                        SpotifyAuthManager.latestCapturedClientToken = ct.trim()
+                    }
+                    val auth = headers?.entries
                         ?.firstOrNull { it.key.equals("Authorization", ignoreCase = true) }
                         ?.value
                     if (!auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {

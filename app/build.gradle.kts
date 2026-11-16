@@ -139,3 +139,38 @@ dependencies {
   // "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
+
+abstract class SyncDistApksTask : DefaultTask() {
+  @get:InputFile
+  abstract val sourceApk: RegularFileProperty
+
+  @get:OutputFile
+  abstract val rootApk: RegularFileProperty
+
+  @get:OutputFile
+  abstract val publicApk: RegularFileProperty
+
+  @TaskAction
+  fun sync() {
+    val src = sourceApk.get().asFile
+    if (src.exists() && src.length() > 0L) {
+      val rootDst = rootApk.get().asFile
+      rootDst.parentFile?.mkdirs()
+      src.copyTo(rootDst, overwrite = true)
+
+      val pubDst = publicApk.get().asFile
+      pubDst.parentFile?.mkdirs()
+      src.copyTo(pubDst, overwrite = true)
+    }
+  }
+}
+
+val syncDistApks = tasks.register<SyncDistApksTask>("syncDistApks") {
+  sourceApk.set(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+  rootApk.set(rootProject.layout.projectDirectory.file("BitChord.apk"))
+  publicApk.set(rootProject.layout.projectDirectory.file("public/BitChord.apk"))
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+  finalizedBy(syncDistApks)
+}
