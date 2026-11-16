@@ -16,6 +16,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.text.Normalizer
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 
 data class AnimatedCanvasCandidate(
@@ -49,20 +50,29 @@ data class MatchScoreBreakdown(
  *
  * Anti-mismatch accuracy safeguards:
  * 1. Strips noisy suffixes ("- Topic", "VEVO", "(Official Video)", "[Lyrics]", "(feat. ...)") and accents.
- * 2. Evaluates Title Score and Artist Score separately and strictly rejects candidates whose artist
- *    doesn't match when targetArtist is known (preventing unrelated songs with similar words).
- * 3. Uses Spotify Web API + Canvas protobuf (`EntityCanvazRequest`) when a Spotify token is connected
- *    and automatically refreshes expired PKCE tokens if refresh credentials exist.
+ * 2. Evaluates Title Score and Artist Score separately and rejects unrelated candidates while supporting
+ *    all music players (YouTube Music, Apple Music, SoundCloud, Samsung Music, Spotify, local players).
+ * 3. Uses Pathfinder + Cross-platform (Deezer/iTunes -> Songlink) + Spotify Canvas protobuf
+ *    (`EntityCanvazRequest`) with bounded in-memory caching to avoid /v1/search 429 rate limits.
  */
 object AnimatedCanvasSearchService {
 
     private const val TAG = "AnimatedCanvasSearch"
     private val GENERIC_APP_ARTISTS = setOf(
-        "spotify", "youtube music", "youtube", "apple music", "echosnap", "bitchord", "soundcloud", "music"
+        "spotify", "youtube music", "youtube", "apple music", "echosnap", "bitchord",
+        "soundcloud", "music", "music player", "samsung music", "tidal", "deezer",
+        "amazon music", "audiomack", "anghami", "unknown", "unknown artist", "<unknown>",
+        "various", "various artists"
     )
 
     @Volatile
     private var spotifySearchCooldownUntilMs: Long = 0L
+
+    @Volatile
+    private var cachedClientToken: Pair<String, Long>? = null
+
+    private val odesliTrackCache = ConcurrentHashMap<String, SpotifyTrackMatch>()
+    private val queryTrackCache = ConcurrentHashMap<String, Pair<Long, List<SpotifyTrackMatch>>>()
 
     suspend fun searchCanvases(
         rawQuery: String,
@@ -85,10 +95,27 @@ object AnimatedCanvasSearchService {
             )
         }
 
-        val cleanTitle = normalizeQueryText(targetTitle).ifEmpty { cleaned }
-        val cleanArtist = normalizeArtistText(targetArtist)
-        val hasRealTargetArtist = cleanArtist.isNotEmpty() &&
+        var cleanTitle = normalizeQueryText(targetTitle).ifEmpty { cleaned }
+        var cleanArtist = normalizeArtistText(targetArtist)
+        var hasRealTargetArtist = cleanArtist.isNotEmpty() &&
             cleanArtist.lowercase(Locale.US) !in GENERIC_APP_ARTISTS
+
+        // Many non-Spotify players (YouTube, SoundCloud, local players) embed "Artist - Title" inside title
+        if (cleanTitle.contains(" - ")) {
+            val parts = cleanTitle.split(" - ", limit = 2).map { it.trim() }
+            if (parts.size == 2 && parts[0].isNotEmpty() && parts[1].isNotEmpty()) {
+                if (!hasRealTargetArtist) {
+                    cleanArtist = normalizeArtistText(parts[0])
+                    cleanTitle = normalizeQueryText(parts[1]).ifEmpty { cleanTitle }
+                    hasRealTargetArtist = cleanArtist.isNotEmpty() &&
+                        cleanArtist.lowercase(Locale.US) !in GENERIC_APP_ARTISTS
+                } else if (parts[0].equals(cleanArtist, ignoreCase = true) ||
+                    cleanArtist.contains(parts[0], ignoreCase = true)
+                ) {
+                    cleanTitle = normalizeQueryText(parts[1]).ifEmpty { cleanTitle }
+                }
+            }
+        }
 
         var rawTokenNormalized = normalizeSpotifyToken(spotifyToken)
         var effectiveSpDc = SpotifyAuthManager.extractSpDcValue(spotifySpDcCookie)
@@ -305,9 +332,11 @@ object AnimatedCanvasSearchService {
     fun normalizeArtistText(input: String): String {
         val noDiacritics = stripDiacritics(input)
         return noDiacritics
+            .replace("\\r?\\n.*".toRegex(), "")
             .replace("\\s*-\\s*Topic$".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("VEVO$".toRegex(RegexOption.IGNORE_CASE), "")
-            .replace("\\s*(feat\\.|ft\\.|featuring|with|&|,|•|/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("\\s*Official$".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("\\s*(feat\\.|ft\\.|featuring|with|&|,|•|·|—|–|\\||/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
     }
@@ -449,52 +478,60 @@ object AnimatedCanvasSearchService {
                 )
             }
 
+            val cacheKey = "${cleanTitle.lowercase(Locale.US)}|${cleanArtist.lowercase(Locale.US)}"
+            val cachedTracks = queryTrackCache[cacheKey]?.let { (ts, list) ->
+                if (System.currentTimeMillis() - ts < 15 * 60_000L) list else null
+            }
+            cachedTracks?.forEach { m -> collectedTracks.putIfAbsent(m.id, m) }
+
             // 2. Active/recent user playback + Spotify Pathfinder + Cross-platform iTunes/Deezer -> Songlink (zero /v1/search 429)
-            coroutineScope {
-                val currentlyPlayingDeferred = async {
-                    fetchMatchingCurrentlyPlayingTrack(cleanTitle, cleanArtist, bearerToken)
-                }
-                val recentlyPlayedDeferred = async {
-                    fetchMatchingRecentlyPlayedTracks(cleanTitle, cleanArtist, bearerToken)
-                }
-                val pathfinderDeferred = async {
-                    searchTracksViaPathfinder(cleanQuery, cleanTitle, cleanArtist, bearerToken)
-                }
-                val odesliDeferred = async {
-                    resolveSpotifyTracksViaSonglink(cleanQuery, cleanTitle, cleanArtist)
-                }
-
-                val cpResult = currentlyPlayingDeferred.await()
-                if (cpResult.authError) tokenAuthFailed = true
-                cpResult.match?.let { m ->
-                    val existing = collectedTracks[m.id]
-                    if (existing == null || m.matchScore > existing.matchScore) {
-                        collectedTracks[m.id] = m
+            if (collectedTracks.isEmpty()) {
+                coroutineScope {
+                    val currentlyPlayingDeferred = async {
+                        fetchMatchingCurrentlyPlayingTrack(cleanTitle, cleanArtist, bearerToken)
                     }
-                }
-
-                recentlyPlayedDeferred.await().forEach { m ->
-                    val existing = collectedTracks[m.id]
-                    if (existing == null || m.matchScore > existing.matchScore) {
-                        collectedTracks[m.id] = m
+                    val recentlyPlayedDeferred = async {
+                        fetchMatchingRecentlyPlayedTracks(cleanTitle, cleanArtist, bearerToken)
                     }
-                }
-
-                pathfinderDeferred.await().forEach { m ->
-                    val existing = collectedTracks[m.id]
-                    if (existing == null) {
-                        collectedTracks[m.id] = m
-                    } else if (existing.coverUrl == null && m.coverUrl != null) {
-                        collectedTracks[m.id] = existing.copy(coverUrl = m.coverUrl)
+                    val pathfinderDeferred = async {
+                        searchTracksViaPathfinder(cleanQuery, cleanTitle, cleanArtist, bearerToken)
                     }
-                }
+                    val odesliDeferred = async {
+                        resolveSpotifyTracksViaSonglink(cleanQuery, cleanTitle, cleanArtist)
+                    }
 
-                odesliDeferred.await().forEach { m ->
-                    val existing = collectedTracks[m.id]
-                    if (existing == null) {
-                        collectedTracks[m.id] = m
-                    } else if (existing.coverUrl == null && m.coverUrl != null) {
-                        collectedTracks[m.id] = existing.copy(coverUrl = m.coverUrl)
+                    val cpResult = currentlyPlayingDeferred.await()
+                    if (cpResult.authError) tokenAuthFailed = true
+                    cpResult.match?.let { m ->
+                        val existing = collectedTracks[m.id]
+                        if (existing == null || m.matchScore > existing.matchScore) {
+                            collectedTracks[m.id] = m
+                        }
+                    }
+
+                    recentlyPlayedDeferred.await().forEach { m ->
+                        val existing = collectedTracks[m.id]
+                        if (existing == null || m.matchScore > existing.matchScore) {
+                            collectedTracks[m.id] = m
+                        }
+                    }
+
+                    pathfinderDeferred.await().forEach { m ->
+                        val existing = collectedTracks[m.id]
+                        if (existing == null) {
+                            collectedTracks[m.id] = m
+                        } else if (existing.coverUrl == null && m.coverUrl != null) {
+                            collectedTracks[m.id] = existing.copy(coverUrl = m.coverUrl)
+                        }
+                    }
+
+                    odesliDeferred.await().forEach { m ->
+                        val existing = collectedTracks[m.id]
+                        if (existing == null) {
+                            collectedTracks[m.id] = m
+                        } else if (existing.coverUrl == null && m.coverUrl != null) {
+                            collectedTracks[m.id] = existing.copy(coverUrl = m.coverUrl)
+                        }
                     }
                 }
             }
@@ -518,7 +555,9 @@ object AnimatedCanvasSearchService {
                 val encoded = URLEncoder.encode(structuredQuery, "UTF-8")
                 val searchUrl = "https://api.spotify.com/v1/search?q=$encoded&type=track&limit=6"
 
-                val (statusCode, body) = httpGetWithAuth(searchUrl, bearerToken)
+                val resp = httpGetWithAuthDetailed(searchUrl, bearerToken)
+                val statusCode = resp.statusCode
+                val body = resp.body
                 if (statusCode == 401 || statusCode == 403) {
                     return SpotifyQueryOutcome(
                         candidates = emptyList(),
@@ -526,18 +565,20 @@ object AnimatedCanvasSearchService {
                         note = "Spotify session expired ($statusCode) — reconnect or update sp_dc"
                     )
                 } else if (statusCode == 429) {
-                    spotifySearchCooldownUntilMs = System.currentTimeMillis() + 60_000L
+                    val cooldownMs = ((resp.retryAfterSec ?: 15L) * 1000L).coerceIn(5_000L, 30_000L)
+                    spotifySearchCooldownUntilMs = System.currentTimeMillis() + cooldownMs
                     searchRateLimited = true
                 } else if (statusCode in 200..299 && !body.isNullOrBlank()) {
                     var parsed = parseSpotifyTracks(body, cleanTitle, cleanArtist)
                     if (parsed.isEmpty() && structuredQuery != cleanQuery) {
                         val broadUrl = "https://api.spotify.com/v1/search?q=${URLEncoder.encode(cleanQuery, "UTF-8")}&type=track&limit=6"
-                        val (broadCode, broadBody) = httpGetWithAuth(broadUrl, bearerToken)
-                        if (broadCode == 429) {
-                            spotifySearchCooldownUntilMs = System.currentTimeMillis() + 60_000L
+                        val broadResp = httpGetWithAuthDetailed(broadUrl, bearerToken)
+                        if (broadResp.statusCode == 429) {
+                            val cooldownMs = ((broadResp.retryAfterSec ?: 15L) * 1000L).coerceIn(5_000L, 30_000L)
+                            spotifySearchCooldownUntilMs = System.currentTimeMillis() + cooldownMs
                             searchRateLimited = true
-                        } else if (broadCode in 200..299 && !broadBody.isNullOrBlank()) {
-                            parsed = parseSpotifyTracks(broadBody, cleanTitle, cleanArtist)
+                        } else if (broadResp.statusCode in 200..299 && !broadResp.body.isNullOrBlank()) {
+                            parsed = parseSpotifyTracks(broadResp.body, cleanTitle, cleanArtist)
                         }
                     }
                     parsed.forEach { m -> collectedTracks.putIfAbsent(m.id, m) }
@@ -548,8 +589,9 @@ object AnimatedCanvasSearchService {
 
             val tracks = collectedTracks.values.toList()
             if (tracks.isEmpty()) {
+                val remainSec = ((spotifySearchCooldownUntilMs - System.currentTimeMillis()) / 1000L).coerceAtLeast(1L)
                 val msg = if (searchRateLimited) {
-                    "Spotify /search cooldown (play track in Spotify app or check sp_dc)"
+                    "Spotify search busy (${remainSec}s) — tap Canvas to retry"
                 } else {
                     "Spotify connected (no exact track match)"
                 }
@@ -559,6 +601,11 @@ object AnimatedCanvasSearchService {
                     note = msg
                 )
             }
+
+            if (queryTrackCache.size > 48) {
+                queryTrackCache.clear()
+            }
+            queryTrackCache[cacheKey] = System.currentTimeMillis() to tracks
 
             val canvasOutcome = fetchSpotifyCanvases(tracks.map { it.uri }, bearerToken)
             if (canvasOutcome.statusCode == 401) {
@@ -768,10 +815,17 @@ object AnimatedCanvasSearchService {
                 setRequestProperty("client-token", clientToken)
                 setRequestProperty("app-platform", "WebPlayer")
                 setRequestProperty("spotify-app-version", "1.2.46.25.g7f189073")
+                setRequestProperty("User-Agent", SpotifyAuthManager.DESKTOP_BROWSER_UA)
+                setRequestProperty("Origin", "https://open.spotify.com")
+                setRequestProperty("Referer", "https://open.spotify.com/")
                 setRequestProperty("Accept", "application/json")
             }
             try {
-                if (conn.responseCode !in 200..299) return emptyList()
+                val code = conn.responseCode
+                if (code == 401 || code == 403) {
+                    cachedClientToken = null
+                }
+                if (code !in 200..299) return emptyList()
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
                 val items = JSONObject(body)
                     .optJSONObject("data")
@@ -848,8 +902,8 @@ object AnimatedCanvasSearchService {
     }
 
     /**
-     * Resolves verified Spotify Track IDs via iTunes + Deezer -> Songlink/Odesli,
-     * sequentially querying top matches to avoid triggering Odesli rate limits.
+     * Resolves verified Spotify Track IDs via Deezer + iTunes -> Songlink/Odesli,
+     * with title-only fallback if a non-Spotify player sent a noisy/channel artist string.
      */
     private suspend fun resolveSpotifyTracksViaSonglink(
         cleanQuery: String,
@@ -866,22 +920,48 @@ object AnimatedCanvasSearchService {
         val itunesUrlsDeferred = async { findVerifiedTrackUrlsFromItunes(encoded, targetTitle, targetArtist) }
         val deezerUrlsDeferred = async { findVerifiedTrackUrlsFromDeezer(encoded, targetTitle, targetArtist) }
 
+        var itunesUrls = itunesUrlsDeferred.await()
+        var deezerUrls = deezerUrlsDeferred.await()
+
+        // If strict artist+title yielded nothing (e.g. YouTube channel/album noise in artist), retry with cleanTitle alone
+        if (itunesUrls.isEmpty() && deezerUrls.isEmpty() && targetTitle.length >= 3 && searchTerm != targetTitle) {
+            val titleOnlyEncoded = URLEncoder.encode(targetTitle, "UTF-8")
+            val retryItunes = async {
+                findVerifiedTrackUrlsFromItunes(titleOnlyEncoded, targetTitle, targetArtist).ifEmpty {
+                    findVerifiedTrackUrlsFromItunes(titleOnlyEncoded, targetTitle, "")
+                }
+            }
+            val retryDeezer = async {
+                findVerifiedTrackUrlsFromDeezer(titleOnlyEncoded, targetTitle, targetArtist).ifEmpty {
+                    findVerifiedTrackUrlsFromDeezer(titleOnlyEncoded, targetTitle, "")
+                }
+            }
+            itunesUrls = retryItunes.await()
+            deezerUrls = retryDeezer.await()
+        }
+
+        // Interleave Deezer & iTunes (Deezer maps cleanly to Spotify via ISRC in Odesli)
         val seedUrls = buildList {
-            itunesUrlsDeferred.await().firstOrNull()?.let { add(it) }
-            deezerUrlsDeferred.await().firstOrNull()?.let { add(it) }
+            deezerUrls.getOrNull(0)?.let { add(it) }
+            itunesUrls.getOrNull(0)?.let { add(it) }
+            deezerUrls.getOrNull(1)?.let { add(it) }
+            itunesUrls.getOrNull(1)?.let { add(it) }
         }.distinctBy { it.second }
 
         if (seedUrls.isEmpty()) return@coroutineScope emptyList()
 
         val resolved = mutableListOf<SpotifyTrackMatch>()
+        var attempts = 0
         for (seed in seedUrls) {
+            if (attempts >= 3 && resolved.isNotEmpty()) break
+            attempts++
             val match = queryOdesliForSpotifyTrack(seed, targetTitle, targetArtist)
-            if (match != null) {
+            if (match != null && resolved.none { it.id == match.id }) {
                 resolved.add(match)
-                break
+                if (resolved.size >= 2) break
             }
         }
-        resolved.distinctBy { it.id }
+        resolved
     }
 
     private fun findVerifiedTrackUrlsFromItunes(
@@ -891,7 +971,7 @@ object AnimatedCanvasSearchService {
     ): List<Pair<Int, String>> {
         return try {
             val (code, body) = httpGetWithAuth(
-                "https://itunes.apple.com/search?term=$encodedTerm&entity=song&limit=6",
+                "https://itunes.apple.com/search?term=$encodedTerm&entity=song&limit=8",
                 bearerToken = null
             )
             if (code !in 200..299 || body.isNullOrBlank()) return emptyList()
@@ -921,7 +1001,7 @@ object AnimatedCanvasSearchService {
     ): List<Pair<Int, String>> {
         return try {
             val (code, body) = httpGetWithAuth(
-                "https://api.deezer.com/search/track?q=$encodedTerm&limit=6",
+                "https://api.deezer.com/search/track?q=$encodedTerm&limit=8",
                 bearerToken = null
             )
             if (code !in 200..299 || body.isNullOrBlank()) return emptyList()
@@ -949,12 +1029,22 @@ object AnimatedCanvasSearchService {
         targetTitle: String,
         targetArtist: String
     ): SpotifyTrackMatch? {
+        odesliTrackCache[scoredUrl.second]?.let { cached ->
+            return cached.copy(matchScore = scoredUrl.first + 10)
+        }
         return try {
             val encodedUrl = URLEncoder.encode(scoredUrl.second, "UTF-8")
-            val (code, body) = httpGetWithAuth(
-                "https://api.song.link/v1-alpha.1/links?url=$encodedUrl&userCountry=US",
-                bearerToken = null
-            )
+            val endpoint = "https://api.song.link/v1-alpha.1/links?url=$encodedUrl&userCountry=US"
+            var (code, body) = httpGetWithAuth(endpoint, bearerToken = null)
+            if (code == 429) {
+                try {
+                    Thread.sleep(650L)
+                } catch (_: InterruptedException) {
+                }
+                val retry = httpGetWithAuth(endpoint, bearerToken = null)
+                code = retry.first
+                body = retry.second
+            }
             if (code !in 200..299 || body.isNullOrBlank()) return null
             val root = JSONObject(body)
             val spotifyNode = root.optJSONObject("linksByPlatform")?.optJSONObject("spotify") ?: return null
@@ -970,7 +1060,7 @@ object AnimatedCanvasSearchService {
             val artist = entity?.optString("artistName", "")?.ifBlank { targetArtist } ?: targetArtist
             val thumb = entity?.optString("thumbnailUrl", "")?.ifBlank { null }
 
-            SpotifyTrackMatch(
+            val match = SpotifyTrackMatch(
                 id = spId,
                 uri = "spotify:track:$spId",
                 title = title,
@@ -978,6 +1068,11 @@ object AnimatedCanvasSearchService {
                 coverUrl = thumb,
                 matchScore = scoredUrl.first + 10
             )
+            if (odesliTrackCache.size > 64) {
+                odesliTrackCache.clear()
+            }
+            odesliTrackCache[scoredUrl.second] = match
+            match
         } catch (_: Exception) {
             null
         }
@@ -1121,6 +1216,10 @@ object AnimatedCanvasSearchService {
     }
 
     private fun fetchSpotifyClientToken(): String? {
+        val now = System.currentTimeMillis()
+        cachedClientToken?.let { (tok, exp) ->
+            if (tok.isNotBlank() && now < exp) return tok
+        }
         return try {
             val payload = """
                 {
@@ -1143,12 +1242,21 @@ object AnimatedCanvasSearchService {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", SpotifyAuthManager.DESKTOP_BROWSER_UA)
+                setRequestProperty("Origin", "https://open.spotify.com")
+                setRequestProperty("Referer", "https://open.spotify.com/")
             }
             try {
                 conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
                 if (conn.responseCode in 200..299) {
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
-                    JSONObject(body).optJSONObject("granted_token")?.optString("token", "")?.ifBlank { null }
+                    val granted = JSONObject(body).optJSONObject("granted_token")
+                    val token = granted?.optString("token", "")?.ifBlank { null }
+                    if (token != null) {
+                        val ttlSec = granted.optLong("refresh_after_seconds", 1200L).coerceIn(120L, 3600L)
+                        cachedClientToken = token to (System.currentTimeMillis() + ttlSec * 1000L)
+                    }
+                    token
                 } else {
                     null
                 }
@@ -1364,7 +1472,18 @@ object AnimatedCanvasSearchService {
         }
     }
 
+    private data class HttpGetResponse(
+        val statusCode: Int,
+        val body: String?,
+        val retryAfterSec: Long? = null
+    )
+
     private fun httpGetWithAuth(urlString: String, bearerToken: String?): Pair<Int, String?> {
+        val res = httpGetWithAuthDetailed(urlString, bearerToken)
+        return Pair(res.statusCode, res.body)
+    }
+
+    private fun httpGetWithAuthDetailed(urlString: String, bearerToken: String?): HttpGetResponse {
         var currentUrl = urlString
         var redirects = 0
         val isSonglink = urlString.contains("song.link", ignoreCase = true)
@@ -1373,7 +1492,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = if (isSonglink) 9000 else 6000
                 readTimeout = if (isSonglink) 11000 else 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.0 Android")
+                setRequestProperty("User-Agent", "EchoSnap/1.1.0 Android")
                 setRequestProperty("Accept", "application/json")
                 if (!bearerToken.isNullOrBlank()) {
                     setRequestProperty("Authorization", "Bearer $bearerToken")
@@ -1382,22 +1501,23 @@ object AnimatedCanvasSearchService {
             try {
                 val code = conn.responseCode
                 if (code in 300..399) {
-                    val loc = conn.getHeaderField("Location") ?: return Pair(code, null)
+                    val loc = conn.getHeaderField("Location") ?: return HttpGetResponse(code, null)
                     currentUrl = URL(URL(currentUrl), loc).toString()
                     redirects++
                     continue
                 }
+                val retryAfterSec = conn.getHeaderField("Retry-After")?.trim()?.toLongOrNull()
                 val body = if (code in 200..299) {
                     conn.inputStream.bufferedReader().use { it.readText() }
                 } else {
                     conn.errorStream?.bufferedReader()?.use { it.readText() }
                 }
-                return Pair(code, body)
+                return HttpGetResponse(code, body, retryAfterSec)
             } finally {
                 conn.disconnect()
             }
         }
-        return Pair(0, null)
+        return HttpGetResponse(0, null)
     }
 
     private fun downloadBitmap(urlString: String, maxDimension: Int): Bitmap? {
@@ -1408,7 +1528,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.0 Android")
+                setRequestProperty("User-Agent", "EchoSnap/1.1.0 Android")
             }
             try {
                 val code = conn.responseCode

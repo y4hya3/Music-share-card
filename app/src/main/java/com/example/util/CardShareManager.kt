@@ -71,47 +71,53 @@ object CardShareManager {
         // Normalize album art to software ARGB_8888 so Canvas never throws on HARDWARE bitmaps
         val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1024)
 
-        // 1. Draw Background: Full-screen blurred album cover (`object-fit: cover`) OR palette gradient
-        if (styleConfig.useBlurredAlbumBackground && safeAlbumArt != null) {
-            val exportBlurMaxDim = if (styleConfig.backgroundBlurRadius <= 10f) 480 else 360
-            val blurredBg = BitmapBlurUtils.blurBitmap(
-                source = safeAlbumArt,
-                radiusPx = styleConfig.backgroundBlurRadius,
-                maxDimension = exportBlurMaxDim
-            )
-            drawCenterCroppedBitmap(
-                canvas = canvas,
-                bitmap = blurredBg,
-                destRect = RectF(0f, 0f, width.toFloat(), height.toFloat()),
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-            )
-            if (blurredBg !== safeAlbumArt && !blurredBg.isRecycled) {
-                blurredBg.recycle()
-            }
-        } else {
-            val gradientStops = resolveGradientStopsArgb(palette, styleConfig)
-            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
-                shader = LinearGradient(
-                    0f, 0f, width.toFloat(), height.toFloat(),
-                    gradientStops,
-                    floatArrayOf(0f, 0.52f, 1f),
-                    Shader.TileMode.CLAMP
+        try {
+            // 1. Draw Background: Full-screen blurred album cover (`object-fit: cover`) OR palette gradient
+            if (styleConfig.useBlurredAlbumBackground && safeAlbumArt != null) {
+                val exportBlurMaxDim = if (styleConfig.backgroundBlurRadius <= 10f) 480 else 360
+                val blurredBg = BitmapBlurUtils.blurBitmap(
+                    source = safeAlbumArt,
+                    radiusPx = styleConfig.backgroundBlurRadius,
+                    maxDimension = exportBlurMaxDim
                 )
+                drawCenterCroppedBitmap(
+                    canvas = canvas,
+                    bitmap = blurredBg,
+                    destRect = RectF(0f, 0f, width.toFloat(), height.toFloat()),
+                    paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+                )
+                if (blurredBg !== safeAlbumArt && !blurredBg.isRecycled) {
+                    blurredBg.recycle()
+                }
+            } else {
+                val gradientStops = resolveGradientStopsArgb(palette, styleConfig)
+                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
+                    shader = LinearGradient(
+                        0f, 0f, width.toFloat(), height.toFloat(),
+                        gradientStops,
+                        floatArrayOf(0f, 0.52f, 1f),
+                        Shader.TileMode.CLAMP
+                    )
+                }
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
             }
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-        }
 
-        // Subtle dark overlay rgba(0, 0, 0, 0.25) for readable contrast
-        val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
-        drawOverlayAndCardOnCanvas(
-            context = context,
-            canvas = canvas,
-            targetWidth = width,
-            targetHeight = height,
-            track = safeTrack,
-            palette = palette,
-            styleConfig = styleConfig
-        )
+            // Subtle dark overlay rgba(0, 0, 0, 0.25) for readable contrast
+            val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
+            drawOverlayAndCardOnCanvas(
+                context = context,
+                canvas = canvas,
+                targetWidth = width,
+                targetHeight = height,
+                track = safeTrack,
+                palette = palette,
+                styleConfig = styleConfig
+            )
+        } finally {
+            if (safeAlbumArt != null && safeAlbumArt !== track.albumArt && !safeAlbumArt.isRecycled) {
+                safeAlbumArt.recycle()
+            }
+        }
 
         bitmap
     }
@@ -132,17 +138,23 @@ object CardShareManager {
         bitmap.eraseColor(AndroidColor.TRANSPARENT)
         val canvas = Canvas(bitmap)
         val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1024)
-        val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
+        try {
+            val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
 
-        drawOverlayAndCardOnCanvas(
-            context = context,
-            canvas = canvas,
-            targetWidth = targetWidth,
-            targetHeight = targetHeight,
-            track = safeTrack,
-            palette = palette,
-            styleConfig = styleConfig
-        )
+            drawOverlayAndCardOnCanvas(
+                context = context,
+                canvas = canvas,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+                track = safeTrack,
+                palette = palette,
+                styleConfig = styleConfig
+            )
+        } finally {
+            if (safeAlbumArt != null && safeAlbumArt !== track.albumArt && !safeAlbumArt.isRecycled) {
+                safeAlbumArt.recycle()
+            }
+        }
         bitmap
     }
 
@@ -248,17 +260,28 @@ object CardShareManager {
             shadowPaint
         )
 
-        val accentTint = lerpArgb(palette.dominantColor.toArgb(), palette.vibrantColor.toArgb(), 0.18f)
-        val topCardColor = withAlpha(lerpArgb(accentTint, 0xFF16161C.toInt(), 0.42f), 0.87f)
-        val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0C0C10.toInt(), 0.40f), 0.92f)
-        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                cardLeft, cardTop, cardLeft, cardBottom,
-                topCardColor, bottomCardColor,
-                Shader.TileMode.CLAMP
+        val albumArt = track.albumArt
+        if (styleConfig.useBlurredCardBackground && albumArt != null) {
+            drawBlurredCardCoverBackground(
+                canvas = canvas,
+                cardRect = cardRect,
+                cornerRadius = cornerRadius,
+                albumArt = albumArt,
+                blurRadius = styleConfig.cardBlurRadius
             )
+        } else {
+            val accentTint = lerpArgb(palette.dominantColor.toArgb(), palette.vibrantColor.toArgb(), 0.18f)
+            val topCardColor = withAlpha(lerpArgb(accentTint, 0xFF16161C.toInt(), 0.42f), 0.87f)
+            val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0C0C10.toInt(), 0.40f), 0.92f)
+            val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    cardLeft, cardTop, cardLeft, cardBottom,
+                    topCardColor, bottomCardColor,
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
         }
-        canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
 
         val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -277,7 +300,6 @@ object CardShareManager {
             addRoundRect(artRect, artCorner, artCorner, Path.Direction.CW)
         }
         canvas.clipPath(clipPath)
-        val albumArt = track.albumArt
         if (albumArt != null) {
             drawCenterCroppedBitmap(
                 canvas = canvas,
@@ -422,10 +444,21 @@ object CardShareManager {
         val cardTop = (h - cardH) / 2f
         val cardRect = RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH)
 
-        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.argb(224, 20, 20, 24)
+        val albumArtForBg = track.albumArt
+        if (styleConfig.useBlurredCardBackground && albumArtForBg != null) {
+            drawBlurredCardCoverBackground(
+                canvas = canvas,
+                cardRect = cardRect,
+                cornerRadius = cornerRadius,
+                albumArt = albumArtForBg,
+                blurRadius = styleConfig.cardBlurRadius
+            )
+        } else {
+            val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.argb(224, 20, 20, 24)
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
         }
-        canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
 
         val artLeft = cardLeft + innerPad
         val artTop = cardTop + innerPad
@@ -564,31 +597,13 @@ object CardShareManager {
 
         val albumArt = track.albumArt
         if (useSongArtBg && albumArt != null) {
-            canvas.save()
-            val cardClip = Path().apply {
-                addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
-            }
-            canvas.clipPath(cardClip)
-            drawCenterCroppedBitmap(
+            drawBlurredCardCoverBackground(
                 canvas = canvas,
-                bitmap = albumArt,
-                destRect = cardRect,
-                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+                cardRect = cardRect,
+                cornerRadius = cornerRadius,
+                albumArt = albumArt,
+                blurRadius = styleConfig.cardBlurRadius
             )
-            val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = LinearGradient(
-                    cardLeft, cardTop, cardLeft, cardBottom,
-                    intArrayOf(
-                        AndroidColor.argb(112, 0, 0, 0),
-                        AndroidColor.argb(143, 0, 0, 0),
-                        AndroidColor.argb(188, 0, 0, 0)
-                    ),
-                    floatArrayOf(0f, 0.5f, 1f),
-                    Shader.TileMode.CLAMP
-                )
-            }
-            canvas.drawRect(cardRect, scrimPaint)
-            canvas.restore()
 
             val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.STROKE
@@ -857,6 +872,56 @@ object CardShareManager {
 
         val srcRect = Rect(left, top, right, bottom)
         canvas.drawBitmap(bitmap, srcRect, destRect, paint)
+    }
+
+    private fun drawBlurredCardCoverBackground(
+        canvas: Canvas,
+        cardRect: RectF,
+        cornerRadius: Float,
+        albumArt: Bitmap,
+        blurRadius: Float
+    ) {
+        val clamped = blurRadius.coerceIn(0f, 40f)
+        val drawBmp = if (clamped > 0.5f) {
+            val maxDim = if (clamped <= 10f) 420 else 300
+            BitmapBlurUtils.blurBitmap(
+                source = albumArt,
+                radiusPx = clamped,
+                maxDimension = maxDim
+            )
+        } else {
+            albumArt
+        }
+
+        canvas.save()
+        val cardClip = Path().apply {
+            addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
+        }
+        canvas.clipPath(cardClip)
+        drawCenterCroppedBitmap(
+            canvas = canvas,
+            bitmap = drawBmp,
+            destRect = cardRect,
+            paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+        )
+        val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                cardRect.left, cardRect.top, cardRect.left, cardRect.bottom,
+                intArrayOf(
+                    AndroidColor.argb(112, 0, 0, 0),
+                    AndroidColor.argb(143, 0, 0, 0),
+                    AndroidColor.argb(188, 0, 0, 0)
+                ),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(cardRect, scrimPaint)
+        canvas.restore()
+
+        if (drawBmp !== albumArt && !drawBmp.isRecycled) {
+            drawBmp.recycle()
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1320,6 +1385,11 @@ object CardShareManager {
         val cacheDir = File(context.cacheDir, "cards")
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
+        } else {
+            cacheDir.listFiles()
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop(4)
+                ?.forEach { it.delete() }
         }
         val file = File(cacheDir, fileName)
         try {

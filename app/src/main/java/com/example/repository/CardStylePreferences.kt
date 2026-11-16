@@ -25,6 +25,8 @@ object CardStylePreferences {
     private const val KEY_CARD_LAYOUT_TYPE = "card_layout_type"
     private const val KEY_USE_BLURRED_BG = "use_blurred_bg"
     private const val KEY_BLUR_RADIUS = "blur_radius"
+    private const val KEY_USE_BLURRED_CARD_BG = "use_blurred_card_bg"
+    private const val KEY_CARD_BLUR_RADIUS = "card_blur_radius"
     private const val KEY_DARK_OVERLAY_ALPHA = "dark_overlay_alpha"
     private const val KEY_GLOW_INTENSITY = "glow_intensity"
     private const val KEY_CORNER_RADIUS_DP = "corner_radius_dp"
@@ -77,6 +79,8 @@ object CardStylePreferences {
             lyricsCardBackgroundMode = lyricsBgMode,
             useBlurredAlbumBackground = prefs.getBoolean(KEY_USE_BLURRED_BG, defaults.useBlurredAlbumBackground),
             backgroundBlurRadius = prefs.getFloat(KEY_BLUR_RADIUS, defaults.backgroundBlurRadius).coerceIn(0f, 40f),
+            useBlurredCardBackground = prefs.getBoolean(KEY_USE_BLURRED_CARD_BG, defaults.useBlurredCardBackground),
+            cardBlurRadius = prefs.getFloat(KEY_CARD_BLUR_RADIUS, defaults.cardBlurRadius).coerceIn(0f, 40f),
             darkOverlayAlpha = prefs.getFloat(KEY_DARK_OVERLAY_ALPHA, defaults.darkOverlayAlpha).coerceIn(0f, 0.7f),
             glowIntensity = prefs.getFloat(KEY_GLOW_INTENSITY, defaults.glowIntensity).coerceIn(0f, 1f),
             cornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS_DP, defaults.cornerRadiusDp).coerceIn(0, 32),
@@ -95,8 +99,16 @@ object CardStylePreferences {
     }
 
     fun save(context: Context, config: CardStyleConfig) {
-        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit()
+        buildEditor(context, config).commit()
+    }
+
+    fun saveAsync(context: Context, config: CardStyleConfig) {
+        buildEditor(context, config).apply()
+    }
+
+    private fun buildEditor(context: Context, config: CardStyleConfig) =
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
             .putString(KEY_BRAND_MODE, config.brandMode.name)
             .putString(KEY_LOGO_COLOR_MODE, config.logoColorMode.name)
             .putInt(KEY_CUSTOM_LOGO_COLOR, config.customLogoColor.toArgb())
@@ -105,6 +117,8 @@ object CardStylePreferences {
             .putString(KEY_LYRICS_BG_MODE, config.lyricsCardBackgroundMode.name)
             .putBoolean(KEY_USE_BLURRED_BG, config.useBlurredAlbumBackground)
             .putFloat(KEY_BLUR_RADIUS, config.backgroundBlurRadius.coerceIn(0f, 40f))
+            .putBoolean(KEY_USE_BLURRED_CARD_BG, config.useBlurredCardBackground)
+            .putFloat(KEY_CARD_BLUR_RADIUS, config.cardBlurRadius.coerceIn(0f, 40f))
             .putFloat(KEY_DARK_OVERLAY_ALPHA, config.darkOverlayAlpha.coerceIn(0f, 0.7f))
             .putFloat(KEY_GLOW_INTENSITY, config.glowIntensity.coerceIn(0f, 1f))
             .putInt(KEY_CORNER_RADIUS_DP, config.cornerRadiusDp.coerceIn(0, 32))
@@ -119,8 +133,6 @@ object CardStylePreferences {
             .putString(KEY_SPOTIFY_CLIENT_ID, config.spotifyClientId)
             .putString(KEY_SPOTIFY_ACCOUNT_LABEL, config.spotifyAccountLabel)
             .putString(KEY_CUSTOM_LYRICS, config.customLyrics)
-            .commit()
-    }
 
     private inline fun <reified T : Enum<T>> enumValueOrDefault(raw: String?, default: T): T {
         if (raw.isNullOrBlank()) return default

@@ -64,8 +64,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.BlurredEdgeTreatment
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -182,7 +180,7 @@ fun BitChordShareScreen(
             MusicNotificationListenerService.openNotificationAccessSettings(context)
             return
         }
-        val synced = MediaNotificationRepository.refreshFromActiveMedia(context)
+        val synced = MediaNotificationRepository.refreshFromActiveMedia(context, force = true)
         if (synced) {
             val syncedTrack = MediaNotificationRepository.currentTrack.value
             Toast.makeText(context, "Synced: ${syncedTrack.title}", Toast.LENGTH_SHORT).show()
@@ -206,10 +204,6 @@ fun BitChordShareScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        MediaNotificationRepository.refreshFromActiveMedia(context)
-    }
-
     LaunchedEffect(isAccessGranted) {
         if (isAccessGranted) {
             MediaNotificationRepository.refreshFromActiveMedia(context)
@@ -226,7 +220,8 @@ fun BitChordShareScreen(
             track = currentTrack,
             palette = palette,
             styleConfig = styleConfig,
-            activeCanvasVideoUrl = activeCanvasUrl,
+            activeCanvasVideoUrl = if (showPreviewDialog) null else activeCanvasUrl,
+            isCanvasPaused = showPreviewDialog,
             modifier = Modifier
                 .fillMaxSize()
                 .testTag("fullscreen_blurred_background")
@@ -630,20 +625,19 @@ private fun CleanExportPreviewDialog(
                             .clip(RoundedCornerShape(20.dp))
                             .background(Color(0xFF0E0E12))
                     ) {
+                        // Fallback blurred album/gradient layer prevents black frame while video buffers
+                        BlurredAlbumBackground(
+                            track = track,
+                            palette = palette,
+                            styleConfig = styleConfig,
+                            activeCanvasVideoUrl = null,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        // Render TextureView inside Dialog without Modifier.blur (RenderEffect on Dialog
+                        // TextureView can black out external SurfaceTexture frames on Android 12+ GPUs)
                         AnimatedCanvasVideoBackground(
                             videoUrl = activeCanvasVideoUrl,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .then(
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && styleConfig.backgroundBlurRadius > 2f) {
-                                        Modifier.blur(
-                                            radius = (styleConfig.backgroundBlurRadius * 0.45f).dp,
-                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
-                                        )
-                                    } else {
-                                        Modifier
-                                    }
-                                )
+                            modifier = Modifier.fillMaxSize()
                         )
                         if (bmp != null && !bmp.isRecycled) {
                             val imgBmp = remember(bmp) { bmp.asImageBitmap() }

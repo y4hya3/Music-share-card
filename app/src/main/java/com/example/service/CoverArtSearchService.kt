@@ -58,8 +58,15 @@ object CoverArtSearchService {
 
     suspend fun fetchFullResolutionArt(candidate: OnlineCoverCandidate): Bitmap? = withContext(Dispatchers.IO) {
         val full = downloadBitmap(candidate.fullResUrl, maxDimension = 1024)
-        full?.let { BitmapBlurUtils.trimLetterboxBarsIfPresent(it) }
-            ?: candidate.thumbnailBitmap
+        if (full != null) {
+            val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(full)
+            if (trimmed !== full && !full.isRecycled) {
+                full.recycle()
+            }
+            trimmed
+        } else {
+            candidate.thumbnailBitmap
+        }
     }
 
     private fun queryItunes(query: String, limit: Int): List<OnlineCoverCandidate> {

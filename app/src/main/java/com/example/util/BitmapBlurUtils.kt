@@ -133,9 +133,6 @@ object BitmapBlurUtils {
         if (aspect in 0.96f..1.04f) return source
 
         return try {
-            val pixels = IntArray(w * h)
-            source.getPixels(pixels, 0, w, 0, 0, w, h)
-
             fun isNearBlack(pixel: Int): Boolean {
                 val r = (pixel shr 16) and 0xFF
                 val g = (pixel shr 8) and 0xFF
@@ -143,23 +140,26 @@ object BitmapBlurUtils {
                 return r <= 12 && g <= 12 && b <= 12
             }
 
+            val rowBuffer = IntArray(w)
+            val rowStep = max(1, w / 32)
             fun isRowBlack(y: Int): Boolean {
-                val rowOffset = y * w
-                val step = max(1, w / 32)
+                source.getPixels(rowBuffer, 0, w, 0, y, w, 1)
                 var x = 2
                 while (x < w - 2) {
-                    if (!isNearBlack(pixels[rowOffset + x])) return false
-                    x += step
+                    if (!isNearBlack(rowBuffer[x])) return false
+                    x += rowStep
                 }
                 return true
             }
 
+            val colBuffer = IntArray(h)
+            val colStep = max(1, h / 32)
             fun isColBlack(x: Int): Boolean {
-                val step = max(1, h / 32)
+                source.getPixels(colBuffer, 0, 1, x, 0, 1, h)
                 var y = 2
                 while (y < h - 2) {
-                    if (!isNearBlack(pixels[y * w + x])) return false
-                    y += step
+                    if (!isNearBlack(colBuffer[y])) return false
+                    y += colStep
                 }
                 return true
             }
@@ -228,7 +228,11 @@ object BitmapBlurUtils {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val decoded = BitmapFactory.decodeResource(resources, resId, opts)
-            toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            val safe = toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            if (decoded != null && safe !== decoded && !decoded.isRecycled) {
+                decoded.recycle()
+            }
+            safe
         } catch (_: Exception) {
             null
         }
@@ -248,7 +252,11 @@ object BitmapBlurUtils {
             val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, opts)
             }
-            toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            val safe = toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            if (decoded != null && safe !== decoded && !decoded.isRecycled) {
+                decoded.recycle()
+            }
+            safe
         } catch (_: Exception) {
             null
         }
@@ -278,7 +286,11 @@ object BitmapBlurUtils {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-            toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            val safe = toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            if (decoded != null && safe !== decoded && !decoded.isRecycled) {
+                decoded.recycle()
+            }
+            safe
         } catch (_: Exception) {
             null
         }
@@ -322,11 +334,15 @@ object BitmapBlurUtils {
         val targetH = (safeSource.height * scale).roundToInt().coerceAtLeast(1)
 
         val scaled = createProgressiveScaledBitmap(safeSource, targetW, targetH)
+        if (safeSource !== source && safeSource !== scaled && !safeSource.isRecycled) {
+            safeSource.recycle()
+        }
+
         val mutable = if (scaled.config == Bitmap.Config.ARGB_8888 && scaled.isMutable) {
             scaled
         } else {
             val copy = scaled.copy(Bitmap.Config.ARGB_8888, true)
-            if (scaled !== safeSource && scaled !== copy && !scaled.isRecycled) {
+            if (scaled !== source && scaled !== copy && !scaled.isRecycled) {
                 scaled.recycle()
             }
             copy
@@ -373,10 +389,11 @@ object BitmapBlurUtils {
         yi = 0
         yw = 0
 
-        val stack = Array(div) { IntArray(3) }
+        val stackR = IntArray(div)
+        val stackG = IntArray(div)
+        val stackB = IntArray(div)
         var stackpointer: Int
         var stackstart: Int
-        var sir: IntArray
         var rbs: Int
         val r1 = radius + 1
         var routsum: Int
@@ -400,22 +417,25 @@ object BitmapBlurUtils {
             i = -radius
             while (i <= radius) {
                 p = pix[yi + min(wm, max(i, 0))]
-                sir = stack[i + radius]
-                sir[0] = (p and 0xff0000) shr 16
-                sir[1] = (p and 0x00ff00) shr 8
-                sir[2] = p and 0x0000ff
+                val stackIdx = i + radius
+                val sr = (p and 0xff0000) shr 16
+                val sg = (p and 0x00ff00) shr 8
+                val sb = p and 0x0000ff
+                stackR[stackIdx] = sr
+                stackG[stackIdx] = sg
+                stackB[stackIdx] = sb
                 rbs = r1 - abs(i)
-                rsum += sir[0] * rbs
-                gsum += sir[1] * rbs
-                bsum += sir[2] * rbs
+                rsum += sr * rbs
+                gsum += sg * rbs
+                bsum += sb * rbs
                 if (i > 0) {
-                    rinsum += sir[0]
-                    ginsum += sir[1]
-                    binsum += sir[2]
+                    rinsum += sr
+                    ginsum += sg
+                    binsum += sb
                 } else {
-                    routsum += sir[0]
-                    goutsum += sir[1]
-                    boutsum += sir[2]
+                    routsum += sr
+                    goutsum += sg
+                    boutsum += sb
                 }
                 i++
             }
@@ -431,40 +451,39 @@ object BitmapBlurUtils {
                 gsum -= goutsum
                 bsum -= boutsum
 
-                stackstart = stackpointer - radius + div
-                sir = stack[stackstart % div]
-
-                routsum -= sir[0]
-                goutsum -= sir[1]
-                boutsum -= sir[2]
+                stackstart = (stackpointer - radius + div) % div
+                routsum -= stackR[stackstart]
+                goutsum -= stackG[stackstart]
+                boutsum -= stackB[stackstart]
 
                 if (y == 0) {
                     vmin[x] = min(x + radius + 1, wm)
                 }
                 p = pix[yw + vmin[x]]
 
-                sir[0] = (p and 0xff0000) shr 16
-                sir[1] = (p and 0x00ff00) shr 8
-                sir[2] = p and 0x0000ff
+                val pr = (p and 0xff0000) shr 16
+                val pg = (p and 0x00ff00) shr 8
+                val pb = p and 0x0000ff
+                stackR[stackstart] = pr
+                stackG[stackstart] = pg
+                stackB[stackstart] = pb
 
-                rinsum += sir[0]
-                ginsum += sir[1]
-                binsum += sir[2]
+                rinsum += pr
+                ginsum += pg
+                binsum += pb
 
                 rsum += rinsum
                 gsum += ginsum
                 bsum += binsum
 
                 stackpointer = (stackpointer + 1) % div
-                sir = stack[stackpointer % div]
+                routsum += stackR[stackpointer]
+                goutsum += stackG[stackpointer]
+                boutsum += stackB[stackpointer]
 
-                routsum += sir[0]
-                goutsum += sir[1]
-                boutsum += sir[2]
-
-                rinsum -= sir[0]
-                ginsum -= sir[1]
-                binsum -= sir[2]
+                rinsum -= stackR[stackpointer]
+                ginsum -= stackG[stackpointer]
+                binsum -= stackB[stackpointer]
 
                 yi++
                 x++
@@ -488,22 +507,25 @@ object BitmapBlurUtils {
             i = -radius
             while (i <= radius) {
                 yi = max(0, yp) + x
-                sir = stack[i + radius]
-                sir[0] = r[yi]
-                sir[1] = g[yi]
-                sir[2] = b[yi]
+                val stackIdx = i + radius
+                val sr = r[yi]
+                val sg = g[yi]
+                val sb = b[yi]
+                stackR[stackIdx] = sr
+                stackG[stackIdx] = sg
+                stackB[stackIdx] = sb
                 rbs = r1 - abs(i)
-                rsum += r[yi] * rbs
-                gsum += g[yi] * rbs
-                bsum += b[yi] * rbs
+                rsum += sr * rbs
+                gsum += sg * rbs
+                bsum += sb * rbs
                 if (i > 0) {
-                    rinsum += sir[0]
-                    ginsum += sir[1]
-                    binsum += sir[2]
+                    rinsum += sr
+                    ginsum += sg
+                    binsum += sb
                 } else {
-                    routsum += sir[0]
-                    goutsum += sir[1]
-                    boutsum += sir[2]
+                    routsum += sr
+                    goutsum += sg
+                    boutsum += sb
                 }
                 if (i < hm) {
                     yp += w
@@ -523,40 +545,39 @@ object BitmapBlurUtils {
                 gsum -= goutsum
                 bsum -= boutsum
 
-                stackstart = stackpointer - radius + div
-                sir = stack[stackstart % div]
-
-                routsum -= sir[0]
-                goutsum -= sir[1]
-                boutsum -= sir[2]
+                stackstart = (stackpointer - radius + div) % div
+                routsum -= stackR[stackstart]
+                goutsum -= stackG[stackstart]
+                boutsum -= stackB[stackstart]
 
                 if (x == 0) {
                     vmin[y] = min(y + r1, hm) * w
                 }
                 p = x + vmin[y]
 
-                sir[0] = r[p]
-                sir[1] = g[p]
-                sir[2] = b[p]
+                val pr = r[p]
+                val pg = g[p]
+                val pb = b[p]
+                stackR[stackstart] = pr
+                stackG[stackstart] = pg
+                stackB[stackstart] = pb
 
-                rinsum += sir[0]
-                ginsum += sir[1]
-                binsum += sir[2]
+                rinsum += pr
+                ginsum += pg
+                binsum += pb
 
                 rsum += rinsum
                 gsum += ginsum
                 bsum += binsum
 
                 stackpointer = (stackpointer + 1) % div
-                sir = stack[stackpointer]
+                routsum += stackR[stackpointer]
+                goutsum += stackG[stackpointer]
+                boutsum += stackB[stackpointer]
 
-                routsum += sir[0]
-                goutsum += sir[1]
-                boutsum += sir[2]
-
-                rinsum -= sir[0]
-                ginsum -= sir[1]
-                binsum -= sir[2]
+                rinsum -= stackR[stackpointer]
+                ginsum -= stackG[stackpointer]
+                binsum -= stackB[stackpointer]
 
                 yi += w
                 y++

@@ -21,10 +21,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Central repository managing current active track metadata, palette extraction,
@@ -39,6 +41,10 @@ object MediaNotificationRepository {
 
     private var onlineSearchJob: Job? = null
     private var canvasSearchJob: Job? = null
+    private var paletteJob: Job? = null
+    private var prefsSaveJob: Job? = null
+    @Volatile
+    private var lastMediaRefreshMs: Long = 0L
     private var lastAutoSearchedTrackKey: String? = null
     private var lastAutoCanvasTrackKey: String? = null
     private var userManuallySelectedCoverTrackKey: String? = null
@@ -102,65 +108,84 @@ object MediaNotificationRepository {
         _styleConfig.value = CardStylePreferences.load(ctx)
         checkNotificationAccess(ctx)
 
-        val travisArt = BitmapBlurUtils.decodeSampledResource(
-            ctx.resources,
-            R.drawable.sample_art_travis,
-            maxDimension = 1024
-        ) ?: createFallbackArt("Travis Scott", 0xFF9E1B32.toInt(), 0xFF191414.toInt())
-
-        val theWeekndArt = createFallbackArt("The Weeknd", 0xFFE50914.toInt(), 0xFF0D0D1A.toInt())
-        val daftPunkArt = createFallbackArt("Daft Punk", 0xFFFFD700.toInt(), 0xFF1A1A2E.toInt())
-        val billieArt = createFallbackArt("Billie Eilish", 0xFF00C9FF.toInt(), 0xFF0B192C.toInt())
-
         val initialTrack = MediaTrackInfo(
             title = "SICKO MODE",
             artist = "Travis Scott",
             album = "ASTROWORLD",
             appName = "EchoSnap",
             packageName = "",
-            albumArt = travisArt,
+            albumArt = null,
             isPlaying = true,
             isSample = true
         )
 
-        sampleTracksList = listOf(
-            initialTrack,
-            MediaTrackInfo(
-                title = "Blinding Lights",
-                artist = "The Weeknd",
-                album = "After Hours",
-                appName = "EchoSnap",
-                packageName = "",
-                albumArt = theWeekndArt,
-                isPlaying = true,
-                isSample = true
-            ),
-            MediaTrackInfo(
-                title = "Get Lucky (feat. Pharrell)",
-                artist = "Daft Punk",
-                album = "Random Access Memories",
-                appName = "EchoSnap",
-                packageName = "",
-                albumArt = daftPunkArt,
-                isPlaying = true,
-                isSample = true
-            ),
-            MediaTrackInfo(
-                title = "BIRDS OF A FEATHER",
-                artist = "Billie Eilish",
-                album = "HIT ME HARD AND SOFT",
-                appName = "EchoSnap",
-                packageName = "",
-                albumArt = billieArt,
-                isPlaying = true,
-                isSample = true
-            )
+        val weekndStub = MediaTrackInfo(
+            title = "Blinding Lights",
+            artist = "The Weeknd",
+            album = "After Hours",
+            appName = "EchoSnap",
+            packageName = "",
+            albumArt = null,
+            isPlaying = true,
+            isSample = true
+        )
+        val daftStub = MediaTrackInfo(
+            title = "Get Lucky (feat. Pharrell)",
+            artist = "Daft Punk",
+            album = "Random Access Memories",
+            appName = "EchoSnap",
+            packageName = "",
+            albumArt = null,
+            isPlaying = true,
+            isSample = true
+        )
+        val billieStub = MediaTrackInfo(
+            title = "BIRDS OF A FEATHER",
+            artist = "Billie Eilish",
+            album = "HIT ME HARD AND SOFT",
+            appName = "EchoSnap",
+            packageName = "",
+            albumArt = null,
+            isPlaying = true,
+            isSample = true
         )
 
+        sampleTracksList = listOf(initialTrack, weekndStub, daftStub, billieStub)
         _currentTrack.value = initialTrack
-        _originalPlayerArt.value = travisArt
         _selectedCoverId.value = "player"
-        extractPaletteForTrack(initialTrack)
+
+        // Decode bundled sample artwork & build fallback cards off the main thread so cold launch stays instant
+        repositoryScope.launch(Dispatchers.Default) {
+            val travisArt = BitmapBlurUtils.decodeSampledResource(
+                ctx.resources,
+                R.drawable.sample_art_travis,
+                maxDimension = 1024
+            ) ?: createFallbackArt("Travis Scott", 0xFF9E1B32.toInt(), 0xFF191414.toInt())
+
+            val theWeekndArt = createFallbackArt("The Weeknd", 0xFFE50914.toInt(), 0xFF0D0D1A.toInt())
+            val daftPunkArt = createFallbackArt("Daft Punk", 0xFFFFD700.toInt(), 0xFF1A1A2E.toInt())
+            val billieArt = createFallbackArt("Billie Eilish", 0xFF00C9FF.toInt(), 0xFF0B192C.toInt())
+
+            val hydratedInitial = initialTrack.copy(albumArt = travisArt)
+            val hydratedSamples = listOf(
+                hydratedInitial,
+                weekndStub.copy(albumArt = theWeekndArt),
+                daftStub.copy(albumArt = daftPunkArt),
+                billieStub.copy(albumArt = billieArt)
+            )
+            val palette = PaletteColorExtractor.extractColors(travisArt)
+
+            withContext(Dispatchers.Main) {
+                sampleTracksList = hydratedSamples
+                val active = _currentTrack.value
+                if (active.isSample && active.albumArt == null) {
+                    val matchedSample = hydratedSamples.firstOrNull { it.title == active.title } ?: hydratedInitial
+                    _currentTrack.value = matchedSample
+                    _originalPlayerArt.value = matchedSample.albumArt
+                    _extractedPalette.value = palette
+                }
+            }
+        }
     }
 
     fun checkNotificationAccess(context: Context) {
@@ -218,8 +243,11 @@ object MediaNotificationRepository {
         } else {
             trackInfo
         }
+        val artChanged = finalTrack.albumArt !== current.albumArt
         _currentTrack.value = finalTrack
-        extractPaletteForTrack(finalTrack)
+        if (!isSameTrack || artChanged) {
+            extractPaletteForTrack(finalTrack)
+        }
 
         // If Auto-Search Online HD Cover is enabled, look up HD candidates automatically for new live tracks
         if (!finalTrack.isSample &&
@@ -271,11 +299,16 @@ object MediaNotificationRepository {
         }
     }
 
-    fun refreshFromActiveMedia(context: Context): Boolean {
+    fun refreshFromActiveMedia(context: Context, force: Boolean = false): Boolean {
         checkNotificationAccess(context)
         if (!_isNotificationAccessEnabled.value) {
             return false
         }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!force && now - lastMediaRefreshMs < 350L && !_currentTrack.value.isSample) {
+            return true
+        }
+        lastMediaRefreshMs = now
         return MusicNotificationListenerService.syncNow(context)
     }
 
@@ -297,10 +330,30 @@ object MediaNotificationRepository {
 
     fun getSampleTracks(): List<MediaTrackInfo> = sampleTracksList
 
-    fun updateStyleConfig(update: (CardStyleConfig) -> CardStyleConfig) {
+    fun updateStyleConfig(
+        saveImmediately: Boolean = false,
+        update: (CardStyleConfig) -> CardStyleConfig
+    ) {
         val updated = update(_styleConfig.value)
+        if (updated == _styleConfig.value) return
         _styleConfig.value = updated
-        appContext?.let { CardStylePreferences.save(it, updated) }
+        val ctx = appContext ?: return
+        prefsSaveJob?.cancel()
+        prefsSaveJob = repositoryScope.launch(Dispatchers.IO) {
+            if (!saveImmediately) {
+                delay(200)
+            }
+            CardStylePreferences.save(ctx, _styleConfig.value)
+        }
+    }
+
+    fun flushStylePreferences() {
+        val ctx = appContext ?: return
+        prefsSaveJob?.cancel()
+        val snapshot = _styleConfig.value
+        repositoryScope.launch(Dispatchers.IO) {
+            CardStylePreferences.save(ctx, snapshot)
+        }
     }
 
     fun updateCustomTrackDetails(title: String, artist: String, album: String) {
@@ -418,7 +471,7 @@ object MediaNotificationRepository {
                     maxResults = 8
                 )
                 result.refreshedToken?.let { renewed ->
-                    updateStyleConfig { current ->
+                    updateStyleConfig(saveImmediately = true) { current ->
                         current.copy(
                             spotifyAccessToken = renewed.accessToken,
                             spotifySpDcCookie = renewed.spDcCookie.ifBlank { current.spotifySpDcCookie },
@@ -445,7 +498,7 @@ object MediaNotificationRepository {
     }
 
     fun applySpotifyLoginResult(result: com.example.service.SpotifyTokenResult) {
-        updateStyleConfig { current ->
+        updateStyleConfig(saveImmediately = true) { current ->
             current.copy(
                 spotifyAccessToken = result.accessToken,
                 spotifySpDcCookie = result.spDcCookie.ifBlank { current.spotifySpDcCookie },
@@ -490,7 +543,7 @@ object MediaNotificationRepository {
                     )
                     onComplete(true, "Connected ($label)")
                 } else {
-                    updateStyleConfig { current ->
+                    updateStyleConfig(saveImmediately = true) { current ->
                         current.copy(
                             spotifySpDcCookie = spDc,
                             spotifyAccountLabel = current.spotifyAccountLabel.ifBlank { "Spotify (sp_dc)" }
@@ -507,7 +560,7 @@ object MediaNotificationRepository {
 
     fun disconnectSpotifyAccount() {
         com.example.service.SpotifyAuthManager.clearSpotifyWebCookies()
-        updateStyleConfig { current ->
+        updateStyleConfig(saveImmediately = true) { current ->
             current.copy(
                 spotifyAccessToken = "",
                 spotifySpDcCookie = "",
@@ -561,10 +614,9 @@ object MediaNotificationRepository {
     }
 
     private fun buildSearchQuery(track: MediaTrackInfo): String {
-        val cleanTitle = track.title
-            .replace("\\s*\\((feat\\.|ft\\.|with).*?\\)".toRegex(RegexOption.IGNORE_CASE), "")
-            .trim()
-        val cleanArtist = track.artist.trim()
+        val cleanTitle = AnimatedCanvasSearchService.normalizeQueryText(track.title)
+            .ifBlank { track.title.trim() }
+        val cleanArtist = AnimatedCanvasSearchService.normalizeArtistText(track.artist)
         return if (cleanArtist.isNotEmpty() && !cleanArtist.equals(track.appName, ignoreCase = true)) {
             "$cleanTitle $cleanArtist"
         } else {
@@ -576,8 +628,15 @@ object MediaNotificationRepository {
         "${track.packageName}|${track.title}|${track.artist}"
 
     private fun extractPaletteForTrack(track: MediaTrackInfo) {
-        repositoryScope.launch {
-            val palette = PaletteColorExtractor.extractColors(track.albumArt)
+        val art = track.albumArt
+        if (art == null) {
+            paletteJob?.cancel()
+            _extractedPalette.value = CardPalette.Default
+            return
+        }
+        paletteJob?.cancel()
+        paletteJob = repositoryScope.launch {
+            val palette = PaletteColorExtractor.extractColors(art)
             _extractedPalette.value = palette
         }
     }

@@ -116,6 +116,11 @@ class MainActivity : ComponentActivity() {
         MediaNotificationRepository.refreshFromActiveMedia(this)
     }
 
+    override fun onPause() {
+        MediaNotificationRepository.flushStylePreferences()
+        super.onPause()
+    }
+
     private fun handleSpotifyRedirectIfPresent(intent: Intent?) {
         val data = intent?.data ?: return
         if (data.scheme == "echosnap" && data.host == "spotify-callback") {

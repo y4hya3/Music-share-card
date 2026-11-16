@@ -59,7 +59,7 @@ object SpotifyAuthManager {
             .putString(KEY_VERIFIER, verifier)
             .putString(KEY_STATE, state)
             .putString(KEY_CLIENT_ID, cleanId)
-            .commit()
+            .apply()
 
         val uri = Uri.Builder()
             .scheme("https")

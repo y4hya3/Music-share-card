@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,6 +39,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
@@ -1180,6 +1182,114 @@ fun EditCardBottomSheet(
                 }
             }
 
+            if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD ||
+                styleConfig.cardLayoutType == CardLayoutType.MINIMAL_CLEAN
+            ) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                    text = "Card Cover Style",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.92f)
+                )
+                Text(
+                    text = "Keep default card look or switch to a blurred album cover inside the card",
+                    fontSize = 11.sp,
+                    color = Color.White.copy(alpha = 0.58f),
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            onStyleChange(styleConfig.copy(useBlurredCardBackground = false))
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (!styleConfig.useBlurredCardBackground) Color(0xFFFF2B44) else Color(0xFF2C2C34),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("card_bg_mode_default")
+                    ) {
+                        Text(
+                            text = "Default Card",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = if (!styleConfig.useBlurredCardBackground) FontWeight.Bold else FontWeight.Medium,
+                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Surface(
+                        onClick = {
+                            val nextBlur = if (styleConfig.cardBlurRadius <= 0.5f) 16f else styleConfig.cardBlurRadius
+                            onStyleChange(
+                                styleConfig.copy(
+                                    useBlurredCardBackground = true,
+                                    cardBlurRadius = nextBlur
+                                )
+                            )
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (styleConfig.useBlurredCardBackground) Color(0xFFFF2B44) else Color(0xFF2C2C34),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("card_bg_mode_blurred_cover")
+                    ) {
+                        Text(
+                            text = "Blurred Album Cover",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = if (styleConfig.useBlurredCardBackground) FontWeight.Bold else FontWeight.Medium,
+                            modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                if (styleConfig.useBlurredCardBackground) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Card Cover Blur",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                        Text(
+                            text = "${styleConfig.cardBlurRadius.roundToInt()}px",
+                            fontSize = 13.sp,
+                            color = Color.White.copy(alpha = 0.65f)
+                        )
+                    }
+                    Slider(
+                        value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
+                        onValueChange = {
+                            onStyleChange(
+                                styleConfig.copy(
+                                    useBlurredCardBackground = true,
+                                    cardBlurRadius = it.coerceIn(0f, 40f)
+                                )
+                            )
+                        },
+                        valueRange = 0f..40f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF2B44),
+                            activeTrackColor = Color(0xFFFF2B44),
+                            inactiveTrackColor = Color(0xFF40404C)
+                        ),
+                        modifier = Modifier.testTag("sheet_card_blur_slider")
+                    )
+                }
+            }
+
             if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_LYRICS_CARD) {
                 Spacer(modifier = Modifier.height(14.dp))
                 Text(
@@ -1221,6 +1331,40 @@ fun EditCardBottomSheet(
                             )
                         }
                     }
+                }
+
+                if (styleConfig.lyricsCardBackgroundMode == LyricsCardBackgroundMode.SONG_ART) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Card Cover Blur",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                        Text(
+                            text = "${styleConfig.cardBlurRadius.roundToInt()}px",
+                            fontSize = 13.sp,
+                            color = Color.White.copy(alpha = 0.65f)
+                        )
+                    }
+                    Slider(
+                        value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
+                        onValueChange = {
+                            onStyleChange(styleConfig.copy(cardBlurRadius = it.coerceIn(0f, 40f)))
+                        },
+                        valueRange = 0f..40f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF2B44),
+                            activeTrackColor = Color(0xFFFF2B44),
+                            inactiveTrackColor = Color(0xFF40404C)
+                        ),
+                        modifier = Modifier.testTag("sheet_lyrics_card_blur_slider")
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -1433,6 +1577,79 @@ fun EditCardBottomSheet(
                     .fillMaxWidth()
                     .testTag("edit_artist_name_input")
             )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // 10. RESET ADJUSTABLE VALUES (SIZE, CARD BLUR, BACKGROUND BLUR, SHADOW DEPTH)
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFF24242D),
+                border = androidx.compose.foundation.BorderStroke(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.08f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "Resets adjusted slider values (Card Size, Card Blur, Background Blur & Shadow Depth) back to defaults while keeping your layout, branding & Spotify login.",
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.62f)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = {
+                            val defaults = CardStyleConfig()
+                            val resetCardBlur = if (styleConfig.useBlurredCardBackground &&
+                                styleConfig.cardLayoutType != CardLayoutType.SPOTIFY_LYRICS_CARD
+                            ) {
+                                16f
+                            } else {
+                                defaults.cardBlurRadius
+                            }
+                            onStyleChange(
+                                styleConfig.copy(
+                                    cardScale = defaults.cardScale,
+                                    backgroundBlurRadius = defaults.backgroundBlurRadius,
+                                    cardBlurRadius = resetCardBlur,
+                                    glowIntensity = defaults.glowIntensity,
+                                    darkOverlayAlpha = defaults.darkOverlayAlpha,
+                                    cornerRadiusDp = defaults.cornerRadiusDp
+                                )
+                            )
+                            Toast.makeText(
+                                context,
+                                "Reset size, card blur & background blur to defaults",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            width = 1.dp,
+                            color = Color(0xFFFF2B44).copy(alpha = 0.65f)
+                        ),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Color(0xFFFF8A96)
+                        ),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("reset_edit_values_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Reset values",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Reset Values",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -72,19 +72,15 @@ fun BlurredAlbumBackground(
     palette: CardPalette,
     styleConfig: CardStyleConfig,
     modifier: Modifier = Modifier,
-    activeCanvasVideoUrl: String? = null
+    activeCanvasVideoUrl: String? = null,
+    isCanvasPaused: Boolean = false
 ) {
     val blurRadius = styleConfig.backgroundBlurRadius.coerceIn(0f, 40f)
-    val quantizedRadius = blurRadius.roundToInt()
+    val quantizedRadius = ((blurRadius / 2f).roundToInt() * 2).coerceIn(0, 40)
     val albumArt = track.albumArt
 
     val sharpOrGpuBgBitmap = remember(albumArt) {
-        if (albumArt != null) {
-            val targetMax = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) 540 else 720
-            BitmapBlurUtils.toSafeSoftwareBitmap(albumArt, maxDimension = targetMax)
-        } else {
-            null
-        }
+        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 720) }
     }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -122,7 +118,7 @@ fun BlurredAlbumBackground(
                     if (quantizedRadius <= 0) {
                         value = sharpOrGpuBgBitmap
                     } else {
-                        delay(16)
+                        delay(28)
                         val blurMaxDim = if (quantizedRadius <= 10) 380 else 260
                         value = withContext(Dispatchers.Default) {
                             BitmapBlurUtils.blurBitmap(
@@ -164,6 +160,7 @@ fun BlurredAlbumBackground(
         if (!activeCanvasVideoUrl.isNullOrBlank()) {
             AnimatedCanvasVideoBackground(
                 videoUrl = activeCanvasVideoUrl,
+                isPlaybackPaused = isCanvasPaused,
                 modifier = Modifier
                     .fillMaxSize()
                     .then(
@@ -288,6 +285,7 @@ private fun FloatingGlassShareCard(
     scale: Float,
     modifier: Modifier = Modifier
 ) {
+    val useBlurredCardCover = styleConfig.useBlurredCardBackground && track.albumArt != null
     val cardBackgroundBrush = remember(palette.vibrantColor, palette.dominantColor, palette.darkMutedColor) {
         val accentTint = lerp(palette.dominantColor, palette.vibrantColor, 0.18f)
         val adaptiveTop = lerp(accentTint, Color(0xFF16161C), 0.42f).copy(alpha = 0.87f)
@@ -310,7 +308,13 @@ private fun FloatingGlassShareCard(
                 spotColor = Color.Black.copy(alpha = 0.75f)
             )
             .clip(cardShape)
-            .background(cardBackgroundBrush)
+            .then(
+                if (useBlurredCardCover) {
+                    Modifier.background(Color(0xFF141418))
+                } else {
+                    Modifier.background(cardBackgroundBrush)
+                }
+            )
             .border(
                 width = 1.dp,
                 color = Color.White.copy(alpha = 0.14f),
@@ -318,6 +322,13 @@ private fun FloatingGlassShareCard(
             )
             .testTag("music_story_card_container")
     ) {
+        if (useBlurredCardCover) {
+            BlurredCardCoverLayer(
+                albumArt = track.albumArt,
+                blurRadius = styleConfig.cardBlurRadius,
+                modifier = Modifier.matchParentSize()
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -501,8 +512,9 @@ private fun MinimalCleanStoryCard(
     modifier: Modifier = Modifier
 ) {
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (28 * scale).dp)
+    val useBlurredCardCover = styleConfig.useBlurredCardBackground && track.albumArt != null
 
-    Column(
+    Box(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
             .fillMaxWidth((0.84f * scale).coerceIn(0.49f, 0.98f))
@@ -511,12 +523,23 @@ private fun MinimalCleanStoryCard(
                 shape = cardShape
             )
             .clip(cardShape)
-            .background(Color(0xFF141418).copy(alpha = 0.88f))
+            .background(if (useBlurredCardCover) Color(0xFF141418) else Color(0xFF141418).copy(alpha = 0.88f))
             .border(1.dp, Color.White.copy(alpha = 0.10f), cardShape)
-            .padding((14 * scale).dp)
             .testTag("music_story_card_container")
     ) {
-        Box(
+        if (useBlurredCardCover) {
+            BlurredCardCoverLayer(
+                albumArt = track.albumArt,
+                blurRadius = styleConfig.cardBlurRadius,
+                modifier = Modifier.matchParentSize()
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding((14 * scale).dp)
+        ) {
+            Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
@@ -568,14 +591,15 @@ private fun MinimalCleanStoryCard(
 
         Spacer(modifier = Modifier.height((14 * scale).dp))
 
-        BitChordBranding(
-            brandMode = styleConfig.brandMode,
-            badgeColor = badgeColor,
-            logoColorMode = styleConfig.logoColorMode,
-            badgeSize = (18 * scale).dp,
-            textSize = (13 * scale).sp,
-            showWordmark = styleConfig.showLogoWordmark
-        )
+            BitChordBranding(
+                brandMode = styleConfig.brandMode,
+                badgeColor = badgeColor,
+                logoColorMode = styleConfig.logoColorMode,
+                badgeSize = (18 * scale).dp,
+                textSize = (13 * scale).sp,
+                showWordmark = styleConfig.showLogoWordmark
+            )
+        }
     }
 }
 
@@ -638,25 +662,10 @@ private fun SpotifyLyricsShareCard(
             .testTag("music_story_card_container")
     ) {
         if (useSongArtBg && crispArtImageBitmap != null) {
-            Image(
-                bitmap = crispArtImageBitmap,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.High,
+            BlurredCardCoverLayer(
+                albumArt = track.albumArt,
+                blurRadius = styleConfig.cardBlurRadius,
                 modifier = Modifier.matchParentSize()
-            )
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color.Black.copy(alpha = 0.44f),
-                                Color.Black.copy(alpha = 0.56f),
-                                Color.Black.copy(alpha = 0.74f)
-                            )
-                        )
-                    )
             )
         }
 
@@ -755,6 +764,86 @@ private fun SpotifyLyricsShareCard(
                 showWordmark = styleConfig.showLogoWordmark
             )
         }
+    }
+}
+
+@Composable
+private fun BlurredCardCoverLayer(
+    albumArt: Bitmap?,
+    blurRadius: Float,
+    modifier: Modifier = Modifier
+) {
+    val clampedRadius = blurRadius.coerceIn(0f, 40f)
+    val quantizedRadius = ((clampedRadius / 2f).roundToInt() * 2).coerceIn(0, 40)
+    val safeBitmap = remember(albumArt) {
+        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 720) }
+    } ?: return
+
+    Box(modifier = modifier) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val imageBitmap = remember(safeBitmap) { safeBitmap.asImageBitmap() }
+            Image(
+                bitmap = imageBitmap,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.High,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (clampedRadius > 0.5f) {
+                            Modifier.blur(
+                                radius = (clampedRadius * 0.72f).dp,
+                                edgeTreatment = BlurredEdgeTreatment.Rectangle
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
+            )
+        } else {
+            val blurredBitmap by produceState<Bitmap?>(
+                initialValue = safeBitmap,
+                key1 = safeBitmap,
+                key2 = quantizedRadius
+            ) {
+                if (quantizedRadius <= 0) {
+                    value = safeBitmap
+                } else {
+                    delay(28)
+                    val blurMaxDim = if (quantizedRadius <= 10) 340 else 240
+                    value = withContext(Dispatchers.Default) {
+                        BitmapBlurUtils.blurBitmap(
+                            source = safeBitmap,
+                            radiusPx = quantizedRadius.toFloat(),
+                            maxDimension = blurMaxDim
+                        )
+                    }
+                }
+            }
+            val activeBitmap = blurredBitmap ?: safeBitmap
+            val imageBitmap = remember(activeBitmap) { activeBitmap.asImageBitmap() }
+            Image(
+                bitmap = imageBitmap,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.High,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.44f),
+                            Color.Black.copy(alpha = 0.56f),
+                            Color.Black.copy(alpha = 0.74f)
+                        )
+                    )
+                )
+        )
     }
 }
 

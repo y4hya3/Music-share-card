@@ -61,7 +61,13 @@ object CanvasVideoExporter {
     ): File? = withContext(Dispatchers.IO) {
         val sourceFile = downloadVideoToCache(context, canvasVideoUrl) ?: return@withContext null
 
-        val outDir = File(context.cacheDir, "cards").apply { mkdirs() }
+        val outDir = File(context.cacheDir, "cards").apply {
+            mkdirs()
+            listFiles()
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop(4)
+                ?.forEach { it.delete() }
+        }
         val outFile = File(outDir, outputFileName)
         if (outFile.exists()) outFile.delete()
 
@@ -78,6 +84,17 @@ object CanvasVideoExporter {
             outFile.delete()
             null
         }
+    }
+
+    fun getCachedVideoFileIfReady(context: Context, videoUrl: String): File? {
+        val cacheDir = File(context.cacheDir, "canvas_video_cache")
+        val cacheKey = videoUrl.hashCode().toUInt().toString(16)
+        val cached = File(cacheDir, "canvas_$cacheKey.mp4")
+        return if (cached.exists() && cached.length() > 10_240L) cached else null
+    }
+
+    suspend fun prefetchVideoToCache(context: Context, videoUrl: String): File? = withContext(Dispatchers.IO) {
+        downloadVideoToCache(context, videoUrl)
     }
 
     private fun downloadVideoToCache(context: Context, videoUrl: String): File? {
@@ -102,7 +119,7 @@ object CanvasVideoExporter {
                 connectTimeout = 8000
                 readTimeout = 15000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.0.1 Android")
+                setRequestProperty("User-Agent", "EchoSnap/1.1.0 Android")
             }
             try {
                 val code = conn.responseCode
@@ -157,6 +174,7 @@ object CanvasVideoExporter {
         var decoderSurface: Surface? = null
         var surfaceTexture: SurfaceTexture? = null
         var frameThread: HandlerThread? = null
+        var renderer: StoryVideoGlRenderer? = null
 
         return try {
             extractor = MediaExtractor().apply {
@@ -239,7 +257,7 @@ object CanvasVideoExporter {
             if (eglSurface == EGL14.EGL_NO_SURFACE) return false
             if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) return false
 
-            val renderer = StoryVideoGlRenderer(
+            renderer = StoryVideoGlRenderer(
                 videoWidth = max(1, effectiveW),
                 videoHeight = max(1, effectiveH),
                 outWidth = OUT_WIDTH,
@@ -314,7 +332,12 @@ object CanvasVideoExporter {
                 }
             }
 
+            val transcodeDeadlineMs = System.currentTimeMillis() + 45_000L
             while (!outputDone) {
+                if (System.currentTimeMillis() > transcodeDeadlineMs) {
+                    Log.w(TAG, "Video export timed out after 45s; aborting cleanly")
+                    break
+                }
                 if (!inputDone) {
                     val inIndex = decoder.dequeueInputBuffer(10_000L)
                     if (inIndex >= 0) {
@@ -436,6 +459,10 @@ object CanvasVideoExporter {
             }
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
                 try {
+                    if (eglSurface != EGL14.EGL_NO_SURFACE && eglContext != EGL14.EGL_NO_CONTEXT) {
+                        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+                        renderer?.release()
+                    }
                     EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                     if (eglSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, eglSurface)
                     if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
@@ -601,6 +628,15 @@ object CanvasVideoExporter {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
             GLES20.glFinish()
+        }
+
+        fun release() {
+            try {
+                GLES20.glDeleteTextures(2, intArrayOf(videoTextureId, overlayTextureId), 0)
+                GLES20.glDeleteProgram(oesProgram)
+                GLES20.glDeleteProgram(overlayProgram)
+            } catch (_: Exception) {
+            }
         }
 
         private fun createProgram(vertSrc: String, fragSrc: String): Int {

@@ -91,6 +91,10 @@ object PaletteColorExtractor {
         } catch (e: Exception) {
             e.printStackTrace()
             CardPalette.Default
+        } finally {
+            if (safeBitmap !== bitmap && !safeBitmap.isRecycled) {
+                safeBitmap.recycle()
+            }
         }
     }
 
