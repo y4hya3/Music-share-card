@@ -66,6 +66,7 @@ class SpotifyLoginActivity : ComponentActivity() {
     private lateinit var errorMessageView: TextView
 
     private val capturedOnce = AtomicBoolean(false)
+    private val cookieExchangeInFlight = AtomicBoolean(false)
     private var cookiePollingJob: Job? = null
     private var browserUserAgent: String = ""
 
@@ -368,6 +369,7 @@ class SpotifyLoginActivity : ComponentActivity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 errorBanner.visibility = View.GONE
                 view?.evaluateJavascript("try { Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; } }); } catch(e) {}", null)
+                view?.evaluateJavascript(TOKEN_CAPTURE_JS, null)
                 if (url != null) {
                     when {
                         url.contains("accounts.spotify.com") && url.contains("/status") -> {
@@ -381,6 +383,7 @@ class SpotifyLoginActivity : ComponentActivity() {
                             tryFetchTokenViaCookies()
                         }
                         url.contains("accounts.spotify.com") -> {
+                            loadingOverlay.visibility = View.GONE
                             statusTextView.text = "Sign in to your Spotify account"
                         }
                         else -> {
@@ -391,7 +394,7 @@ class SpotifyLoginActivity : ComponentActivity() {
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
-                if (url != null && (url.contains("open.spotify.com") || url.contains("/status"))) {
+                if (isPostLoginCaptureUrl(url)) {
                     loadingOverlay.visibility = View.VISIBLE
                     view?.evaluateJavascript(TOKEN_CAPTURE_JS, null)
                     tryFetchTokenViaCookies()
@@ -402,7 +405,7 @@ class SpotifyLoginActivity : ComponentActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 CookieManager.getInstance().flush()
-                if (url != null && (url.contains("open.spotify.com") || url.contains("/status"))) {
+                if (isPostLoginCaptureUrl(url)) {
                     loadingOverlay.visibility = View.VISIBLE
                     statusTextView.text = "Capturing Spotify session token..."
                     view?.evaluateJavascript(TOKEN_CAPTURE_JS, null)
@@ -469,10 +472,9 @@ class SpotifyLoginActivity : ComponentActivity() {
         cookiePollingJob?.cancel()
         cookiePollingJob = lifecycleScope.launch {
             var postLoginChecks = 0
-            var navigatedToTokenJson = false
             var navigatedToSilentWebPlayer = false
             while (isActive && !capturedOnce.get()) {
-                delay(300)
+                delay(350)
                 val wv = webView ?: continue
                 val currentUrl = wv.url.orEmpty()
                 val cookiesOpen = CookieManager.getInstance().getCookie("https://open.spotify.com").orEmpty()
@@ -486,14 +488,18 @@ class SpotifyLoginActivity : ComponentActivity() {
                     if (currentUrl.startsWith("https://open.spotify.com")) {
                         wv.evaluateJavascript(TOKEN_CAPTURE_JS, null)
                     }
-                    if (!navigatedToTokenJson && postLoginChecks >= 5) {
-                        // Direct JSON endpoint fallback (avoids full Web Player UI/DRM)
-                        navigatedToTokenJson = true
-                        wv.loadUrl(SPOTIFY_TOKEN_ENDPOINT)
-                    } else if (!navigatedToSilentWebPlayer && postLoginChecks >= 15) {
-                        // Silent last-resort fallback if direct endpoint requires Web Player TOTP/session script
+                    // After ~1.8s, if TOTP HTTP exchange hasn't already completed, load open.spotify.com
+                    // with a Desktop Chrome UA behind the overlay so Spotify's own bundle mints /api/token
+                    if (!navigatedToSilentWebPlayer && postLoginChecks >= 5) {
                         navigatedToSilentWebPlayer = true
+                        wv.settings.userAgentString = SpotifyAuthManager.DESKTOP_BROWSER_UA
                         wv.loadUrl("https://open.spotify.com/")
+                    } else if (postLoginChecks >= 36 && hasSessionCookie) {
+                        // Never hang indefinitely on the spinner: save captured sp_dc & finish cleanly
+                        val spDc = extractSpDcFromCookies()
+                        if (spDc.isNotBlank()) {
+                            handleCapturedSpDcOnly(spDc)
+                        }
                     }
                 }
             }
@@ -516,54 +522,44 @@ class SpotifyLoginActivity : ComponentActivity() {
 
     private fun tryFetchTokenViaCookies() {
         if (capturedOnce.get()) return
-        val cm = CookieManager.getInstance()
         val spDc = extractSpDcFromCookies()
         if (spDc.isBlank()) return
-
-        val cookieHeader = cm.getCookie("https://open.spotify.com").orEmpty()
-            .ifBlank { cm.getCookie("https://accounts.spotify.com").orEmpty() }
+        if (!cookieExchangeInFlight.compareAndSet(false, true)) return
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(
-                rawSpDc = spDc,
-                userAgent = browserUserAgent
-            )
-            if (exchanged != null) {
-                withContext(Dispatchers.Main) {
-                    handleCapturedToken(exchanged.accessToken, exchanged.expiresAtMs, spDc)
-                }
-                return@launch
-            }
-
-            if (cookieHeader.isBlank()) return@launch
             try {
-                val conn = (URL(SPOTIFY_TOKEN_ENDPOINT).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 6000
-                    readTimeout = 6000
-                    setRequestProperty("Cookie", cookieHeader)
-                    setRequestProperty("User-Agent", browserUserAgent.ifBlank { "Mozilla/5.0" })
-                    setRequestProperty("Accept", "application/json")
-                    setRequestProperty("Referer", "https://open.spotify.com/")
-                }
-                try {
-                    if (conn.responseCode in 200..299) {
-                        val body = conn.inputStream.bufferedReader().use { it.readText() }
-                        val json = JSONObject(body)
-                        val isAnon = json.optBoolean("isAnonymous", true)
-                        val token = json.optString("accessToken", "").trim()
-                        val exp = json.optLong("accessTokenExpirationTimestampMs", 0L)
-                        if (!isAnon && token.length >= 20) {
-                            withContext(Dispatchers.Main) {
-                                handleCapturedToken(token, exp, spDc)
-                            }
-                        }
+                val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(
+                    rawSpDc = spDc,
+                    userAgent = browserUserAgent
+                )
+                if (exchanged != null) {
+                    withContext(Dispatchers.Main) {
+                        handleCapturedToken(exchanged.accessToken, exchanged.expiresAtMs, spDc)
                     }
-                } finally {
-                    conn.disconnect()
                 }
-            } catch (_: Exception) {
+            } finally {
+                cookieExchangeInFlight.set(false)
             }
         }
+    }
+
+    private fun handleCapturedSpDcOnly(spDc: String) {
+        if (!capturedOnce.compareAndSet(false, true)) return
+        cookiePollingJob?.cancel()
+        MediaNotificationRepository.applySpotifyLoginResult(
+            SpotifyTokenResult(
+                accessToken = "",
+                expiresAtMs = 0L,
+                accountLabel = "Spotify (sp_dc)",
+                spDcCookie = spDc
+            )
+        )
+        Toast.makeText(
+            this@SpotifyLoginActivity,
+            "Spotify sp_dc session saved!",
+            Toast.LENGTH_SHORT
+        ).show()
+        finish()
     }
 
     private fun handleCapturedToken(
@@ -693,14 +689,36 @@ private const val TOKEN_CAPTURE_JS = """
         }
       } catch (e) {}
     }
-    fetch('https://open.spotify.com/get_access_token?reason=transport&productType=web_player', { credentials: 'include' })
-      .then(function(r) { return r.ok ? r.json() : null; })
-      .then(function(data) {
-        if (data && data.accessToken && !data.isAnonymous) {
-          sendTok(data.accessToken, data.accessTokenExpirationTimestampMs);
-        }
-      })
-      .catch(function() {});
+    if (!window.__echoSnapHookedFetch && window.fetch) {
+      window.__echoSnapHookedFetch = true;
+      var origFetch = window.fetch;
+      window.fetch = function() {
+        var args = arguments;
+        try {
+          var init = args[1];
+          if (init && init.headers) {
+            var h = init.headers;
+            var auth = (typeof h.get === 'function') ? h.get('Authorization') : (h['Authorization'] || h['authorization']);
+            if (auth && String(auth).indexOf('Bearer ') === 0) {
+              sendTok(String(auth).substring(7), 0);
+            }
+          }
+        } catch (e) {}
+        return origFetch.apply(this, args).then(function(resp) {
+          try {
+            var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');
+            if (u.indexOf('/api/token') >= 0 || u.indexOf('get_access_token') >= 0) {
+              resp.clone().json().then(function(data) {
+                if (data && data.accessToken && !data.isAnonymous) {
+                  sendTok(data.accessToken, data.accessTokenExpirationTimestampMs);
+                }
+              }).catch(function() {});
+            }
+          } catch (e) {}
+          return resp;
+        });
+      };
+    }
   } catch (e) {}
 })();
 """

@@ -74,6 +74,7 @@ object AnimatedCanvasSearchService {
         targetTitle: String = "",
         targetArtist: String = "",
         spotifyTrackId: String = "",
+        spDcWebFallback: (suspend (String) -> SpotifyTokenResult?)? = null,
         maxResults: Int = 8
     ): AnimatedCanvasSearchResult = withContext(Dispatchers.IO) {
         val cleaned = normalizeQueryText(rawQuery)
@@ -116,6 +117,7 @@ object AnimatedCanvasSearchService {
                         (activeToken.isEmpty() || (spotifyTokenExpiryMs > 0L && now >= spotifyTokenExpiryMs - 60_000L))
                     if (tokenNeedsSpDcRefresh) {
                         val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(effectiveSpDc)
+                            ?: spDcWebFallback?.invoke(effectiveSpDc)
                         if (exchanged != null) {
                             refreshedToken = exchanged
                             activeToken = exchanged.accessToken
@@ -136,6 +138,7 @@ object AnimatedCanvasSearchService {
 
                     if (!outcome.tokenAccepted && effectiveSpDc.isNotEmpty()) {
                         val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(effectiveSpDc)
+                            ?: spDcWebFallback?.invoke(effectiveSpDc)
                         if (exchanged != null) {
                             refreshedToken = exchanged
                             activeToken = exchanged.accessToken

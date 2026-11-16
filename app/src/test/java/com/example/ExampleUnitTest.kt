@@ -209,6 +209,13 @@ class ExampleUnitTest {
             targetArtist = ""
         )
         assertTrue(customQueryBreakdown.titleScore >= 40)
+
+        // RFC 6238 SHA-1 TOTP standard vector at T=59s -> 94287082 -> last 6 digits 287082
+        val rfcKey = "12345678901234567890".toByteArray(Charsets.US_ASCII)
+        assertEquals("287082", com.example.service.SpotifyAuthManager.computeTotpCode(rfcKey, 59L))
+
+        val derived = com.example.service.SpotifyAuthManager.deriveSpotifyTotpKeyBytes(intArrayOf(9, 10))
+        assertEquals("00", String(derived, Charsets.UTF_8))
     }
 
     @Test

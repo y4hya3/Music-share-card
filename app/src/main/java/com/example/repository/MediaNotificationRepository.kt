@@ -399,6 +399,7 @@ object MediaNotificationRepository {
             _canvasSearchStatus.value = "Smart searching animated canvases..."
             try {
                 val cfg = _styleConfig.value
+                val ctx = appContext
                 val result = AnimatedCanvasSearchService.searchCanvases(
                     rawQuery = searchTerm,
                     spotifyToken = cfg.spotifyAccessToken,
@@ -409,6 +410,11 @@ object MediaNotificationRepository {
                     targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
                     targetArtist = if (isCustomOverride) "" else snapshot.artist,
                     spotifyTrackId = if (isCustomOverride) "" else snapshot.spotifyTrackId,
+                    spDcWebFallback = if (ctx != null) {
+                        { spDc -> com.example.service.SpotifyAuthManager.exchangeSpDcViaWebView(ctx, spDc) }
+                    } else {
+                        null
+                    },
                     maxResults = 8
                 )
                 result.refreshedToken?.let { renewed ->
@@ -465,7 +471,13 @@ object MediaNotificationRepository {
             _isSearchingCanvas.value = true
             _canvasSearchStatus.value = "Verifying Spotify sp_dc cookie..."
             try {
-                val tokenResult = com.example.service.SpotifyAuthManager.exchangeSpDcForAccessToken(spDc)
+                var tokenResult = com.example.service.SpotifyAuthManager.exchangeSpDcForAccessToken(spDc)
+                if (tokenResult == null) {
+                    val ctx = appContext
+                    if (ctx != null) {
+                        tokenResult = com.example.service.SpotifyAuthManager.exchangeSpDcViaWebView(ctx, spDc)
+                    }
+                }
                 if (tokenResult != null) {
                     val label = com.example.service.SpotifyAuthManager
                         .fetchSpotifyProfileLabel(tokenResult.accessToken)
@@ -478,15 +490,14 @@ object MediaNotificationRepository {
                     )
                     onComplete(true, "Connected ($label)")
                 } else {
-                    // Save sp_dc even if immediate HTTP exchange requires interactive WebView challenge
                     updateStyleConfig { current ->
                         current.copy(
                             spotifySpDcCookie = spDc,
                             spotifyAccountLabel = current.spotifyAccountLabel.ifBlank { "Spotify (sp_dc)" }
                         )
                     }
-                    _canvasSearchStatus.value = "sp_dc saved — tap Login to Spotify if token refresh is challenged"
-                    onComplete(false, "sp_dc saved, but Spotify challenged direct exchange — use Login to Spotify")
+                    _canvasSearchStatus.value = "sp_dc invalid or expired — sign in with Login to Spotify"
+                    onComplete(false, "Could not verify sp_dc cookie — check value or tap Login to Spotify")
                 }
             } finally {
                 _isSearchingCanvas.value = false
