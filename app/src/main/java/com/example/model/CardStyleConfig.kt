@@ -46,13 +46,21 @@ data class CardStyleConfig(
     val cardLayoutType: CardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
     val lyricsCardBackgroundMode: LyricsCardBackgroundMode = LyricsCardBackgroundMode.PALETTE_COLOR,
     val useBlurredAlbumBackground: Boolean = true,
+    val useTransparentBackground: Boolean = false,
     val backgroundBlurRadius: Float = 24f, // 0f (sharp) to 40f (heavily blurred)
     val cardBlurRadius: Float = 20f, // 0f (clear glass) .. 20f (default glass) .. 40f (deep frosted blur)
+    val cardOpacity: Float = 1.0f, // 0.0f..1.0f frosted card surface/glass opacity (keeps photo & text opaque)
     val lyricsArtBlurRadius: Float = 0f, // 0f (crisp) to 40f (blurred) when Lyrics Card uses Song Cover Art
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
     val glowIntensity: Float = 0.75f, // soft drop shadow depth
     val cornerRadiusDp: Int = 16, // border-radius: 16px
     val cardScale: Float = 1.0f, // 0.60f..1.20f unified card size multiplier
+    val isFitToScreenPreview: Boolean = false, // false = Full-Screen, true = Fit-to-Screen scaled preview
+    val enableWaveform: Boolean = false, // Dynamic Island 4-bar waveform on Glass Card
+    val waveformColor: Color = Color.White,
+    val waveformBeatSync: Boolean = false, // true = interact with playing music beats; false = default speed multiplier
+    val waveformSpeedMultiplier: Float = 1.0f, // 0.4f..2.5f wave animation speed in default mode
+    val lyricsWordSelectionMode: Boolean = false, // false = whole lines, true = word-by-word interactive picker
     val showLogoWordmark: Boolean = true,
     val autoSearchOnlineArt: Boolean = false,
     val autoSearchAnimatedCanvas: Boolean = false,
@@ -89,7 +97,7 @@ data class CardStyleConfig(
             track.title.contains("BIRDS OF A FEATHER", ignoreCase = true) ->
                 "Birds of a feather, we should stick together\nI know I said I'd never think I wasn't better alone"
             else ->
-                "Add your favorite lyric lines\nin Edit → Manual Lyrics"
+                "Add or auto-search lyric lines\nin Edit → Manual Lyrics"
         }
     }
 }

@@ -240,10 +240,55 @@ object SpotifyAuthManager {
             if (res != null) return@withContext res
         }
 
-        val htmlRes = fetchTokenFromOpenSpotifyHtml(spDc, DESKTOP_BROWSER_UA)
+        val htmlRes = fetchTokenFromOpenSpotifyHtml(spDc, DESKTOP_BROWSER_UA, allowAnonymous = false)
         if (htmlRes != null) return@withContext htmlRes
 
         null
+    }
+
+    /**
+     * Obtains a short-lived anonymous Web Player Bearer token directly from open.spotify.com
+     * without an account cookie so Pathfinder GraphQL search & public track lookups work even
+     * when the user hasn't signed in to Spotify.
+     */
+    suspend fun fetchAnonymousWebToken(): SpotifyTokenResult? = withContext(Dispatchers.IO) {
+        try {
+            val totpPair = fetchLatestTotpSecret()
+            if (totpPair != null) {
+                val (ver, cipherInts) = totpPair
+                val keyBytes = deriveSpotifyTotpKeyBytes(cipherInts)
+                val serverSec = fetchSpotifyServerTimeSec() ?: (System.currentTimeMillis() / 1000L)
+                val clientSec = System.currentTimeMillis() / 1000L
+                val totpServer = computeTotpCode(keyBytes, serverSec)
+                val totpClient = computeTotpCode(keyBytes, clientSec)
+                val urls = listOf(
+                    "https://open.spotify.com/api/token?reason=init&productType=web-player&totp=$totpClient&totpServer=$totpServer&totpVer=$ver",
+                    "https://open.spotify.com/get_access_token?reason=transport&productType=web_player&totp=$totpClient&totpServer=$totpServer&totpVer=$ver"
+                )
+                for (u in urls) {
+                    val conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        setRequestProperty("User-Agent", DESKTOP_BROWSER_UA)
+                        setRequestProperty("Accept", "application/json")
+                        setRequestProperty("Origin", "https://open.spotify.com")
+                        setRequestProperty("Referer", "https://open.spotify.com/")
+                        setRequestProperty("App-Platform", "WebPlayer")
+                    }
+                    try {
+                        if (conn.responseCode in 200..299) {
+                            val body = conn.inputStream.bufferedReader().use { it.readText() }
+                            parseWebSessionJson(body, spDc = "", allowAnonymous = true)?.let { return@withContext it }
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                }
+            }
+            fetchTokenFromOpenSpotifyHtml(spDc = "", userAgent = DESKTOP_BROWSER_UA, allowAnonymous = true)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -392,7 +437,7 @@ object SpotifyAuthManager {
         if (cleanQuery.isEmpty()) return null
         val spDc = extractSpDcValue(rawSpDc)
 
-        return withTimeoutOrNull(9_500L) {
+        return withTimeoutOrNull(14_500L) {
             withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<WebViewSpotifySearchResult?> { cont ->
                     var wv: WebView? = null
@@ -568,6 +613,8 @@ object SpotifyAuthManager {
 
     private fun parseWebViewPathfinderTracks(rawJson: String): List<WebViewSpotifyTrack> {
         return try {
+            val out = mutableListOf<WebViewSpotifyTrack>()
+            val seenIds = hashSetOf<String>()
             val root = JSONObject(rawJson)
             val items = root.optJSONObject("data")
                 ?.optJSONObject("searchV2")
@@ -577,56 +624,103 @@ object SpotifyAuthManager {
                     ?.optJSONObject("searchDesktop")
                     ?.optJSONObject("tracks")
                     ?.optJSONArray("items")
-                ?: return emptyList()
 
-            val out = mutableListOf<WebViewSpotifyTrack>()
-            for (i in 0 until items.length()) {
-                val itemObj = items.optJSONObject(i)?.optJSONObject("item") ?: continue
-                val data = itemObj.optJSONObject("data")
-                    ?: itemObj.optJSONObject("itemUnion")?.optJSONObject("data")
-                    ?: continue
-                val uri = data.optString("uri", "").trim()
-                val id = data.optString("id", "").ifBlank {
-                    AnimatedCanvasSearchService.extractSpotifyTrackId(uri)
-                }
-                val title = data.optString("name", "").trim()
-                if (id.isEmpty() || title.isEmpty()) continue
-
-                val artistItems = data.optJSONObject("artists")?.optJSONArray("items")
-                val artistNames = buildList {
-                    if (artistItems != null) {
-                        for (a in 0 until artistItems.length()) {
-                            val aName = artistItems.optJSONObject(a)
-                                ?.optJSONObject("profile")
-                                ?.optString("name", "")
-                                .orEmpty()
-                            if (aName.isNotBlank()) add(aName)
-                        }
+            if (items != null) {
+                for (i in 0 until items.length()) {
+                    val itemObj = items.optJSONObject(i)?.optJSONObject("item") ?: continue
+                    val data = itemObj.optJSONObject("data")
+                        ?: itemObj.optJSONObject("itemUnion")?.optJSONObject("data")
+                        ?: continue
+                    val track = parseTrackObject(data) ?: continue
+                    if (seenIds.add(track.id)) {
+                        out.add(track)
                     }
-                }.joinToString(", ")
-
-                val coverSources = data.optJSONObject("albumOfTrack")
-                    ?.optJSONObject("coverArt")
-                    ?.optJSONArray("sources")
-                var bestCover: String? = null
-                var bestWidth = -1
-                if (coverSources != null) {
-                    for (s in 0 until coverSources.length()) {
-                        val src = coverSources.optJSONObject(s) ?: continue
-                        val w = src.optInt("width", 0)
-                        val url = src.optString("url", "").trim()
-                        if (url.isNotEmpty() && w >= bestWidth) {
-                            bestWidth = w
-                            bestCover = url
-                        }
-                    }
+                    if (out.size >= 8) break
                 }
-                out.add(WebViewSpotifyTrack(id = id, title = title, artist = artistNames, coverUrl = bestCover))
-                if (out.size >= 8) break
+            }
+            if (out.isEmpty()) {
+                extractTracksRecursivelyFromJson(root, out, seenIds)
             }
             out
         } catch (_: Exception) {
             emptyList()
+        }
+    }
+
+    private fun parseTrackObject(data: JSONObject): WebViewSpotifyTrack? {
+        val uri = data.optString("uri", "").trim()
+        val id = data.optString("id", "").ifBlank {
+            AnimatedCanvasSearchService.extractSpotifyTrackId(uri)
+        }
+        val title = data.optString("name", "").trim()
+        if (id.length != 22 || title.isEmpty()) return null
+        if (uri.isNotEmpty() && !uri.startsWith("spotify:track:")) return null
+
+        val artistItems = data.optJSONObject("artists")?.optJSONArray("items")
+        val artistsFallback = data.optJSONArray("artists")
+        val artistNames = buildList {
+            if (artistItems != null) {
+                for (a in 0 until artistItems.length()) {
+                    val aObj = artistItems.optJSONObject(a) ?: continue
+                    val aName = aObj.optJSONObject("profile")?.optString("name", "")
+                        ?.ifBlank { aObj.optString("name", "") }
+                        .orEmpty()
+                    if (aName.isNotBlank()) add(aName)
+                }
+            } else if (artistsFallback != null) {
+                for (a in 0 until artistsFallback.length()) {
+                    val aName = artistsFallback.optJSONObject(a)?.optString("name", "").orEmpty()
+                    if (aName.isNotBlank()) add(aName)
+                }
+            }
+        }.joinToString(", ")
+
+        val coverSources = data.optJSONObject("albumOfTrack")
+            ?.optJSONObject("coverArt")
+            ?.optJSONArray("sources")
+        var bestCover: String? = null
+        var bestWidth = -1
+        if (coverSources != null) {
+            for (s in 0 until coverSources.length()) {
+                val src = coverSources.optJSONObject(s) ?: continue
+                val w = src.optInt("width", 0)
+                val url = src.optString("url", "").trim()
+                if (url.isNotEmpty() && w >= bestWidth) {
+                    bestWidth = w
+                    bestCover = url
+                }
+            }
+        }
+        return WebViewSpotifyTrack(id = id, title = title, artist = artistNames, coverUrl = bestCover)
+    }
+
+    internal fun extractTracksRecursivelyFromJson(
+        node: Any?,
+        out: MutableList<WebViewSpotifyTrack>,
+        seenIds: MutableSet<String>,
+        depth: Int = 0
+    ) {
+        if (node == null || depth > 14 || out.size >= 10) return
+        when (node) {
+            is JSONObject -> {
+                val uri = node.optString("uri", "")
+                if (uri.startsWith("spotify:track:")) {
+                    parseTrackObject(node)?.let { t ->
+                        if (seenIds.add(t.id)) out.add(t)
+                    }
+                }
+                val keys = node.keys()
+                while (keys.hasNext() && out.size < 10) {
+                    val k = keys.next()
+                    extractTracksRecursivelyFromJson(node.opt(k), out, seenIds, depth + 1)
+                }
+            }
+            is JSONArray -> {
+                for (i in 0 until node.length()) {
+                    if (out.size >= 10) break
+                    extractTracksRecursivelyFromJson(node.opt(i), out, seenIds, depth + 1)
+                }
+            }
         }
     }
 
@@ -767,13 +861,16 @@ object SpotifyAuthManager {
 
     private fun fetchTokenFromOpenSpotifyHtml(
         spDc: String,
-        userAgent: String
+        userAgent: String,
+        allowAnonymous: Boolean = false
     ): SpotifyTokenResult? {
         return try {
             val conn = (URL("https://open.spotify.com/").openConnection() as HttpURLConnection).apply {
                 connectTimeout = 7000
                 readTimeout = 7000
-                setRequestProperty("Cookie", "sp_dc=$spDc")
+                if (spDc.isNotBlank()) {
+                    setRequestProperty("Cookie", "sp_dc=$spDc")
+                }
                 setRequestProperty("User-Agent", userAgent.ifBlank { DESKTOP_BROWSER_UA })
                 setRequestProperty("Accept", "text/html,application/xhtml+xml")
             }
@@ -783,11 +880,11 @@ object SpotifyAuthManager {
                 val sessionRegex = "<script[^>]*id=\"(?:session|appServerConfig)\"[^>]*>([^<]+)</script>".toRegex()
                 for (match in sessionRegex.findAll(html)) {
                     val rawContent = match.groupValues[1].trim()
-                    parseWebSessionJson(rawContent, spDc)?.let { return it }
+                    parseWebSessionJson(rawContent, spDc, allowAnonymous)?.let { return it }
                     // Some Spotify builds base64-encode #appServerConfig
                     try {
                         val decoded = String(Base64.decode(rawContent, Base64.DEFAULT), Charsets.UTF_8)
-                        parseWebSessionJson(decoded, spDc)?.let { return it }
+                        parseWebSessionJson(decoded, spDc, allowAnonymous)?.let { return it }
                     } catch (_: Exception) {
                     }
                 }
@@ -800,13 +897,17 @@ object SpotifyAuthManager {
         }
     }
 
-    private fun parseWebSessionJson(rawJson: String, spDc: String): SpotifyTokenResult? {
+    private fun parseWebSessionJson(
+        rawJson: String,
+        spDc: String,
+        allowAnonymous: Boolean = false
+    ): SpotifyTokenResult? {
         return try {
             val json = JSONObject(rawJson)
             val isAnon = json.optBoolean("isAnonymous", true)
             val token = json.optString("accessToken", "").trim()
             val exp = json.optLong("accessTokenExpirationTimestampMs", 0L)
-            if (!isAnon && token.length >= 20) {
+            if ((allowAnonymous || !isAnon) && token.length >= 20) {
                 SpotifyTokenResult(
                     accessToken = token,
                     expiresAtMs = if (exp > 0L) exp else System.currentTimeMillis() + 3_500_000L,
@@ -891,6 +992,18 @@ object SpotifyAuthManager {
   try {
     var bridge = window.EchoSnapSearchBridge;
     if (!bridge) return;
+    function inspectUrlOrBody(urlStr, bodyStr, ct) {
+      var u = String(urlStr || '');
+      var combined = u + ' ' + String(bodyStr || '');
+      var hashMatch = null;
+      if (combined.indexOf('searchDesktop') >= 0 || combined.indexOf('search') >= 0) {
+        var m = /"sha256Hash"\s*:\s*"([a-f0-9]{64})"/i.exec(combined) || /sha256Hash(?:%22|")%3A(?:%22|")([a-f0-9]{64})/i.exec(combined);
+        if (m && m[1]) hashMatch = m[1];
+      }
+      if (hashMatch || ct) {
+        bridge.onPathfinderMeta(hashMatch || '', String(ct || ''));
+      }
+    }
     if (!window.__echoSnapSearchHookedFetch && window.fetch) {
       window.__echoSnapSearchHookedFetch = true;
       var origFetch = window.fetch;
@@ -904,22 +1017,14 @@ object SpotifyAuthManager {
           if (h) {
             ct = (typeof h.get === 'function') ? (h.get('client-token') || '') : (h['client-token'] || h['Client-Token'] || '');
           }
-          var hashMatch = null;
-          var urlOrBody = reqUrl + ' ' + (typeof init.body === 'string' ? init.body : '');
-          if (urlOrBody.indexOf('searchDesktop') >= 0) {
-            var m = /"sha256Hash"\s*:\s*"([a-f0-9]{64})"/i.exec(urlOrBody) || /sha256Hash(?:%22|")%3A(?:%22|")([a-f0-9]{64})/i.exec(urlOrBody);
-            if (m && m[1]) hashMatch = m[1];
-          }
-          if (hashMatch || ct) {
-            bridge.onPathfinderMeta(hashMatch || '', String(ct || ''));
-          }
+          inspectUrlOrBody(reqUrl, (typeof init.body === 'string' ? init.body : ''), ct);
         } catch (e) {}
         return origFetch.apply(this, args).then(function(resp) {
           try {
             var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');
-            if (u.indexOf('pathfinder') >= 0 && (u.indexOf('searchDesktop') >= 0 || u.indexOf('query') >= 0)) {
+            if (u.indexOf('pathfinder') >= 0 || u.indexOf('search') >= 0) {
               resp.clone().text().then(function(txt) {
-                if (txt && (txt.indexOf('tracksV2') >= 0 || txt.indexOf('searchDesktop') >= 0)) {
+                if (txt && (txt.indexOf('spotify:track:') >= 0 || txt.indexOf('tracksV2') >= 0 || txt.indexOf('searchDesktop') >= 0)) {
                   bridge.onSearchJson(txt);
                 }
               }).catch(function() {});
@@ -927,6 +1032,41 @@ object SpotifyAuthManager {
           } catch (e) {}
           return resp;
         });
+      };
+    }
+
+    if (!window.__echoSnapSearchHookedXhr && window.XMLHttpRequest) {
+      window.__echoSnapSearchHookedXhr = true;
+      var origOpen = XMLHttpRequest.prototype.open;
+      var origSend = XMLHttpRequest.prototype.send;
+      var origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.open = function(method, url) {
+        this.__echoUrl = String(url || '');
+        this.__echoCt = '';
+        return origOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+        if (name && String(name).toLowerCase() === 'client-token') {
+          this.__echoCt = String(value || '');
+        }
+        return origSetHeader.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function(body) {
+        var xhr = this;
+        try {
+          inspectUrlOrBody(xhr.__echoUrl, typeof body === 'string' ? body : '', xhr.__echoCt);
+          xhr.addEventListener('load', function() {
+            try {
+              var u = String(xhr.__echoUrl || '');
+              if ((u.indexOf('pathfinder') >= 0 || u.indexOf('search') >= 0) && xhr.responseText) {
+                if (xhr.responseText.indexOf('spotify:track:') >= 0) {
+                  bridge.onSearchJson(xhr.responseText);
+                }
+              }
+            } catch (e) {}
+          });
+        } catch (e) {}
+        return origSend.apply(this, arguments);
       };
     }
 
@@ -942,8 +1082,8 @@ object SpotifyAuthManager {
         var tid = idM[1];
         if (seen[tid]) continue;
         seen[tid] = true;
-        var title = (a.innerText || a.textContent || '').trim();
-        var row = a.closest('[data-testid="tracklist-row"]') || a.closest('[role="row"]') || a.parentElement;
+        var title = (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim();
+        var row = a.closest('[data-testid="tracklist-row"]') || a.closest('[role="row"]') || a.closest('[data-testid="top-result-card"]') || a.parentElement;
         var artist = '';
         if (row) {
           var artistLinks = row.querySelectorAll('a[href*="/artist/"]');

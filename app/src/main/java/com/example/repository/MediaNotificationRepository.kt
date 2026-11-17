@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
+import android.net.Uri
 import com.example.R
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
@@ -14,6 +15,8 @@ import com.example.palette.PaletteColorExtractor
 import com.example.service.AnimatedCanvasCandidate
 import com.example.service.AnimatedCanvasSearchService
 import com.example.service.CoverArtSearchService
+import com.example.service.LyricsCandidate
+import com.example.service.LyricsSearchService
 import com.example.service.MusicNotificationListenerService
 import com.example.service.OnlineCoverCandidate
 import com.example.util.BitmapBlurUtils
@@ -41,6 +44,7 @@ object MediaNotificationRepository {
 
     private var onlineSearchJob: Job? = null
     private var canvasSearchJob: Job? = null
+    private var lyricsSearchJob: Job? = null
     private var paletteJob: Job? = null
     private var prefsSaveJob: Job? = null
     @Volatile
@@ -100,12 +104,22 @@ object MediaNotificationRepository {
     private val _activeCanvasId = MutableStateFlow("none")
     val activeCanvasId: StateFlow<String> = _activeCanvasId.asStateFlow()
 
+    private val _lyricsCandidates = MutableStateFlow<List<LyricsCandidate>>(emptyList())
+    val lyricsCandidates: StateFlow<List<LyricsCandidate>> = _lyricsCandidates.asStateFlow()
+
+    private val _isSearchingLyrics = MutableStateFlow(false)
+    val isSearchingLyrics: StateFlow<Boolean> = _isSearchingLyrics.asStateFlow()
+
+    private val _lyricsSearchStatus = MutableStateFlow<String?>(null)
+    val lyricsSearchStatus: StateFlow<String?> = _lyricsSearchStatus.asStateFlow()
+
     private var sampleTracksList: List<MediaTrackInfo> = emptyList()
 
     fun initialize(context: Context) {
         val ctx = context.applicationContext
         appContext = ctx
         _styleConfig.value = CardStylePreferences.load(ctx)
+        SavedMediaLibrary.initialize(ctx)
         checkNotificationAccess(ctx)
 
         val initialTrack = MediaTrackInfo(
@@ -205,6 +219,8 @@ object MediaNotificationRepository {
             _onlineCoverCandidates.value = emptyList()
             _animatedCanvasCandidates.value = emptyList()
             _canvasSearchStatus.value = null
+            _lyricsCandidates.value = emptyList()
+            _lyricsSearchStatus.value = null
             _activeCanvasUrl.value = null
             _activeCanvasId.value = "none"
             userManuallySelectedCoverTrackKey = null
@@ -356,6 +372,31 @@ object MediaNotificationRepository {
         }
     }
 
+    /**
+     * Resets only adjusted visual slider & effect controls (size, blur, opacity, glow, waveform)
+     * while preserving user's saved assets, Spotify connection, and chosen card layout preset.
+     */
+    fun resetStyleValues() {
+        val defaults = CardStyleConfig()
+        updateStyleConfig(saveImmediately = true) { current ->
+            current.copy(
+                backgroundBlurRadius = defaults.backgroundBlurRadius,
+                cardBlurRadius = defaults.cardBlurRadius,
+                lyricsArtBlurRadius = defaults.lyricsArtBlurRadius,
+                cardScale = defaults.cardScale,
+                cardOpacity = defaults.cardOpacity,
+                glowIntensity = defaults.glowIntensity,
+                darkOverlayAlpha = defaults.darkOverlayAlpha,
+                cornerRadiusDp = defaults.cornerRadiusDp,
+                useTransparentBackground = defaults.useTransparentBackground,
+                enableWaveform = defaults.enableWaveform,
+                waveformBeatSync = defaults.waveformBeatSync,
+                waveformSpeedMultiplier = defaults.waveformSpeedMultiplier,
+                waveformColor = defaults.waveformColor
+            )
+        }
+    }
+
     fun updateCustomTrackDetails(title: String, artist: String, album: String) {
         val current = _currentTrack.value
         val updated = current.copy(
@@ -464,6 +505,7 @@ object MediaNotificationRepository {
                     spotifyClientId = cfg.spotifyClientId,
                     targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
                     targetArtist = if (isCustomOverride) "" else snapshot.artist,
+                    playerAppName = snapshot.appName,
                     spotifyTrackId = if (isCustomOverride) "" else snapshot.spotifyTrackId,
                     spDcWebFallback = if (ctx != null) {
                         { spDc -> com.example.service.SpotifyAuthManager.exchangeSpDcViaWebView(ctx, spDc) }
@@ -623,6 +665,143 @@ object MediaNotificationRepository {
                 _currentTrack.value = updated
                 extractPaletteForTrack(updated)
             }
+        }
+    }
+
+    fun selectSavedCover(item: SavedCoverItem) {
+        repositoryScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                SavedMediaLibrary.loadBitmap(item.localImagePath, maxDimension = 1600)
+            } ?: return@launch
+            val current = _currentTrack.value
+            userManuallySelectedCoverTrackKey = trackKey(current)
+            _selectedCoverId.value = "saved_cover_${item.id}"
+            val updated = current.copy(albumArt = bmp)
+            _currentTrack.value = updated
+            extractPaletteForTrack(updated)
+        }
+    }
+
+    fun selectSavedCanvas(item: SavedCanvasItem) {
+        val current = _currentTrack.value
+        userManuallySelectedCanvasTrackKey = trackKey(current)
+        _activeCanvasId.value = "saved_canvas_${item.id}"
+        _activeCanvasUrl.value = item.fileUri
+    }
+
+    fun saveOnlineCoverLocally(
+        candidate: OnlineCoverCandidate,
+        customName: String? = null,
+        onComplete: (SavedCoverItem?) -> Unit = {}
+    ) {
+        val ctx = appContext ?: return onComplete(null)
+        val resolvedName = customName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: candidate.title.ifBlank { "Saved Cover" }
+        repositoryScope.launch {
+            val saved = SavedMediaLibrary.saveCoverFromCandidate(ctx, candidate, resolvedName)
+            onComplete(saved)
+        }
+    }
+
+    fun saveCurrentCoverLocally(
+        customName: String? = null,
+        onComplete: (SavedCoverItem?) -> Unit = {}
+    ) {
+        val ctx = appContext ?: return onComplete(null)
+        val track = _currentTrack.value
+        val bmp = track.albumArt ?: return onComplete(null)
+        val name = customName?.trim()?.takeIf { it.isNotEmpty() } ?: track.title
+        repositoryScope.launch {
+            val saved = SavedMediaLibrary.saveCoverFromBitmap(ctx, bmp, name, track.artist)
+            onComplete(saved)
+        }
+    }
+
+    fun saveOnlineCanvasLocally(
+        candidate: AnimatedCanvasCandidate,
+        customName: String? = null,
+        onComplete: (SavedCanvasItem?) -> Unit = {}
+    ) {
+        val ctx = appContext ?: return onComplete(null)
+        val resolvedName = customName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: candidate.title.ifBlank { "Saved Canvas" }
+        repositoryScope.launch {
+            val saved = SavedMediaLibrary.saveCanvasFromCandidate(ctx, candidate, resolvedName)
+            onComplete(saved)
+        }
+    }
+
+    fun importLocalCoverUri(
+        uri: Uri,
+        customName: String? = null,
+        onComplete: (SavedCoverItem?) -> Unit = {}
+    ) {
+        val ctx = appContext ?: return onComplete(null)
+        val track = _currentTrack.value
+        val fallbackName = customName?.trim()?.takeIf { it.isNotEmpty() } ?: "${track.title} Cover"
+        repositoryScope.launch {
+            val saved = SavedMediaLibrary.importCoverFromUri(ctx, uri, fallbackName)
+            if (saved != null) {
+                selectSavedCover(saved)
+            }
+            onComplete(saved)
+        }
+    }
+
+    fun importLocalCanvasUri(
+        uri: Uri,
+        customName: String? = null,
+        onComplete: (SavedCanvasItem?) -> Unit = {}
+    ) {
+        val ctx = appContext ?: return onComplete(null)
+        val track = _currentTrack.value
+        val fallbackName = customName?.trim()?.takeIf { it.isNotEmpty() } ?: "${track.title} Canvas"
+        repositoryScope.launch {
+            val saved = SavedMediaLibrary.importCanvasFromUri(ctx, uri, fallbackName)
+            if (saved != null) {
+                selectSavedCanvas(saved)
+            }
+            onComplete(saved)
+        }
+    }
+
+    fun searchLyrics(customQuery: String? = null) {
+        val snapshot = _currentTrack.value
+        val cleanTitle = AnimatedCanvasSearchService.normalizeQueryText(snapshot.title)
+            .ifBlank { snapshot.title.trim() }
+        val cleanArtist = AnimatedCanvasSearchService.normalizeArtistText(snapshot.artist)
+            .takeIf { !it.equals(snapshot.appName, ignoreCase = true) }
+            .orEmpty()
+        val rawOverride = customQuery?.trim().orEmpty()
+
+        lyricsSearchJob?.cancel()
+        lyricsSearchJob = repositoryScope.launch {
+            _isSearchingLyrics.value = true
+            _lyricsSearchStatus.value = "Searching 16 lyrics providers..."
+            try {
+                val outcome = if (rawOverride.isNotEmpty() && !rawOverride.equals("$cleanTitle $cleanArtist".trim(), ignoreCase = true)) {
+                    LyricsSearchService.searchAcrossProviders(
+                        title = rawOverride,
+                        artist = ""
+                    )
+                } else {
+                    LyricsSearchService.searchAcrossProviders(
+                        title = cleanTitle,
+                        artist = cleanArtist
+                    )
+                }
+                _lyricsCandidates.value = outcome.candidates
+                _lyricsSearchStatus.value = outcome.statusMessage
+            } finally {
+                _isSearchingLyrics.value = false
+            }
+        }
+    }
+
+    fun applySelectedLyricLines(lines: List<String>) {
+        val joined = lines.map { it.trim() }.filter { it.isNotEmpty() }.joinToString("\n")
+        if (joined.isNotEmpty()) {
+            updateStyleConfig(saveImmediately = true) { it.copy(customLyrics = joined) }
         }
     }
 

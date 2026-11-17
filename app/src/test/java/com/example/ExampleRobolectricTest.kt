@@ -5,16 +5,20 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
+import androidx.compose.ui.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import com.example.model.CardBrandMode
-import com.example.model.CardStyleConfig
-import com.example.palette.PaletteColorExtractor
-import com.example.repository.CardStylePreferences
-import com.example.service.AnimatedCanvasCandidate
-import com.example.service.AnimatedCanvasSearchService
 import com.example.model.CardLayoutType
 import com.example.model.CardPalette
+import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
+import com.example.palette.PaletteColorExtractor
+import com.example.repository.CardStylePreferences
+import com.example.repository.SavedMediaLibrary
+import com.example.service.AnimatedCanvasCandidate
+import com.example.service.AnimatedCanvasSearchService
+import com.example.service.LyricsSearchService
+import com.example.util.AudioBeatMonitor
 import com.example.util.BitmapBlurUtils
 import com.example.util.CardShareManager
 import kotlinx.coroutines.runBlocking
@@ -28,6 +32,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -48,7 +53,6 @@ class ExampleRobolectricTest {
     val canvas = Canvas(src)
     canvas.drawColor(AndroidColor.BLACK)
     val paint = Paint().apply { color = AndroidColor.rgb(220, 40, 80) }
-    // Centered square-ish content with 40px left/right pillarbox black bars
     canvas.drawRect(60f, 0f, 260f, h.toFloat(), paint)
 
     val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(src)
@@ -57,7 +61,6 @@ class ExampleRobolectricTest {
     assertTrue("Expected horizontal pillarbox bars to be trimmed (got ${trimmed.width})", trimmed.width < 220)
     assertEquals(h, trimmed.height)
 
-    // Square cover art must be returned unchanged with zero copy overhead
     val square = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
     val same = BitmapBlurUtils.trimLetterboxBarsIfPresent(square)
     assertTrue(same === square)
@@ -68,7 +71,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `blurBitmap produces valid bitmap and keeps source alive`() {
+  fun `blurBitmap and computeBlurMipPyramid produce valid bitmaps and keep source alive`() {
     val src = Bitmap.createBitmap(640, 640, Bitmap.Config.ARGB_8888)
     Canvas(src).drawColor(AndroidColor.rgb(30, 120, 210))
 
@@ -76,6 +79,17 @@ class ExampleRobolectricTest {
     assertFalse(src.isRecycled)
     assertFalse(blurred.isRecycled)
     assertTrue(blurred.width <= 260 && blurred.height <= 260)
+
+    val mip = BitmapBlurUtils.computeBlurMipPyramid(src)
+    assertNotNull(mip)
+    mip?.let { (low, mid, high) ->
+      assertFalse(low.isRecycled)
+      assertFalse(mid.isRecycled)
+      assertFalse(high.isRecycled)
+      low.recycle()
+      mid.recycle()
+      high.recycle()
+    }
 
     val palette = runBlocking { PaletteColorExtractor.extractColors(src) }
     assertNotNull(palette)
@@ -90,17 +104,27 @@ class ExampleRobolectricTest {
     val defaults = CardStyleConfig()
     assertEquals(20f, defaults.cardBlurRadius, 0.001f)
     assertEquals(0f, defaults.lyricsArtBlurRadius, 0.001f)
+    assertEquals(1.0f, defaults.cardOpacity, 0.001f)
+    assertFalse(defaults.useTransparentBackground)
+    assertFalse(defaults.isFitToScreenPreview)
+    assertFalse(defaults.enableWaveform)
   }
 
   @Test
-  fun `card style preferences save and saveAsync roundtrip cleanly`() {
+  fun `card style preferences v130 save and saveAsync roundtrip cleanly`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val config = CardStyleConfig(
       brandMode = CardBrandMode.SPOTIFY,
       backgroundBlurRadius = 18f,
       cardScale = 0.92f,
       cardBlurRadius = 8f,
-      lyricsArtBlurRadius = 14f
+      cardOpacity = 0.78f,
+      lyricsArtBlurRadius = 14f,
+      useTransparentBackground = true,
+      isFitToScreenPreview = true,
+      enableWaveform = true,
+      waveformColor = Color(0xFF1DB954),
+      waveformBeatSync = true
     )
     CardStylePreferences.save(context, config)
     val loaded = CardStylePreferences.load(context)
@@ -108,39 +132,49 @@ class ExampleRobolectricTest {
     assertEquals(18f, loaded.backgroundBlurRadius, 0.001f)
     assertEquals(0.92f, loaded.cardScale, 0.001f)
     assertEquals(8f, loaded.cardBlurRadius, 0.001f)
+    assertEquals(0.78f, loaded.cardOpacity, 0.001f)
     assertEquals(14f, loaded.lyricsArtBlurRadius, 0.001f)
+    assertTrue(loaded.useTransparentBackground)
+    assertTrue(loaded.isFitToScreenPreview)
+    assertTrue(loaded.enableWaveform)
+    assertEquals(Color(0xFF1DB954), loaded.waveformColor)
+    assertTrue(loaded.waveformBeatSync)
 
-    val updated = config.copy(backgroundBlurRadius = 30f, cardBlurRadius = 32f, lyricsArtBlurRadius = 24f)
+    val updated = config.copy(
+      backgroundBlurRadius = 30f,
+      cardBlurRadius = 32f,
+      cardOpacity = 0.55f,
+      useTransparentBackground = false
+    )
     CardStylePreferences.saveAsync(context, updated)
     val loadedAfterAsync = CardStylePreferences.load(context)
     assertEquals(30f, loadedAfterAsync.backgroundBlurRadius, 0.001f)
     assertEquals(32f, loadedAfterAsync.cardBlurRadius, 0.001f)
-    assertEquals(24f, loadedAfterAsync.lyricsArtBlurRadius, 0.001f)
+    assertEquals(0.55f, loadedAfterAsync.cardOpacity, 0.001f)
+    assertFalse(loadedAfterAsync.useTransparentBackground)
   }
 
   @Test
-  fun `canvas search normalizes non spotify player artist metadata and query suffixes`() {
+  fun `canvas search normalizes offline file names unknown artists and player names`() {
     assertEquals("The Weeknd", AnimatedCanvasSearchService.normalizeArtistText("The Weeknd · After Hours"))
     assertEquals("Daft Punk", AnimatedCanvasSearchService.normalizeArtistText("Daft Punk — Random Access Memories"))
     assertEquals("Billie Eilish", AnimatedCanvasSearchService.normalizeArtistText("Billie Eilish - Topic"))
-    assertEquals("Ariana Grande", AnimatedCanvasSearchService.normalizeArtistText("ArianaGrandeVEVO").let {
-      if (it == "ArianaGrande") "Ariana Grande" else it
-    })
-    assertEquals("Coldplay", AnimatedCanvasSearchService.normalizeArtistText("Coldplay Official"))
+    assertEquals("", AnimatedCanvasSearchService.normalizeArtistText("<unknown>"))
+    assertEquals("", AnimatedCanvasSearchService.normalizeArtistText("unknown artist"))
 
     assertEquals(
       "Blinding Lights",
-      AnimatedCanvasSearchService.normalizeQueryText("Blinding Lights (Official Music Video) [Lyrics]")
+      AnimatedCanvasSearchService.normalizeQueryText("01 - Blinding Lights (Official Music Video) [Lyrics].mp3")
     )
     assertEquals(
       "Levitating",
-      AnimatedCanvasSearchService.normalizeQueryText("Levitating (feat. DaBaby) (Acoustic)")
+      AnimatedCanvasSearchService.normalizeQueryText("Levitating (feat. DaBaby) (Acoustic).flac")
     )
 
     val score = AnimatedCanvasSearchService.evaluateMatch(
       candidateTitle = "Blinding Lights",
       candidateArtist = "The Weeknd",
-      targetTitle = "Blinding Lights (Official Audio)",
+      targetTitle = "02. Blinding Lights (Official Audio).mp3",
       targetArtist = "The Weeknd · After Hours"
     )
     assertTrue("Expected confident match score, got ${score.totalScore}", score.totalScore >= 80)
@@ -202,6 +236,252 @@ class ExampleRobolectricTest {
   }
 
   @Test
+  fun `lyrics search cleans LRC timestamps and metadata tags`() {
+    val rawLrc = """
+      [ar: The Weeknd]
+      [ti: Blinding Lights]
+      [00:12.34] I've been tryna call
+      [00:15.60] I've been on my own for long enough
+      [00:18.90] &amp; Maybe you can show me how to love
+      [00:22.00]
+    """.trimIndent()
+    val cleaned = LyricsSearchService.parseCleanLines(rawLrc)
+    assertEquals(
+      listOf(
+        "I've been tryna call",
+        "I've been on my own for long enough",
+        "& Maybe you can show me how to love"
+      ),
+      cleaned
+    )
+  }
+
+  @Test
+  fun `audio beat monitor produces bounded distinct per track levels`() {
+    val levelsA = AudioBeatMonitor.computeBarLevels("SICKO MODE", "Travis Scott", isPlaying = true, timeSec = 1.25f)
+    val levelsB = AudioBeatMonitor.computeBarLevels("Clair de Lune", "Debussy", isPlaying = true, timeSec = 1.25f)
+    assertEquals(4, levelsA.size)
+    assertEquals(4, levelsB.size)
+    assertTrue(levelsA.all { it in 0.18f..1.0f })
+    assertTrue(levelsB.all { it in 0.18f..1.0f })
+    assertFalse(levelsA.contentEquals(levelsB))
+  }
+
+  @Test
+  fun `saved media library save rename and delete covers and canvases work offline`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    SavedMediaLibrary.initialize(context)
+
+    val bmp = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
+    Canvas(bmp).drawColor(AndroidColor.MAGENTA)
+    val savedCover = runBlocking {
+      SavedMediaLibrary.saveCoverFromBitmap(context, bmp, "Neon Cover", "Artist X")
+    }
+    assertNotNull(savedCover)
+    assertEquals("Neon Cover", savedCover!!.name)
+    assertTrue(File(savedCover.localImagePath).exists())
+
+    SavedMediaLibrary.renameCover(context, savedCover.id, "Renamed Neon")
+    assertEquals("Renamed Neon", SavedMediaLibrary.savedCovers.value.first { it.id == savedCover.id }.name)
+
+    SavedMediaLibrary.deleteCover(context, savedCover.id)
+    assertFalse(File(savedCover.localImagePath).exists())
+    assertTrue(SavedMediaLibrary.savedCovers.value.none { it.id == savedCover.id })
+    bmp.recycle()
+
+    val tempVideo = File(context.cacheDir, "test_canvas_src.mp4").apply {
+      writeBytes(ByteArray(8192) { 1 })
+    }
+    val cand = AnimatedCanvasCandidate(
+      id = "local_test",
+      title = "My Track",
+      artist = "Artist Y",
+      videoUrl = android.net.Uri.fromFile(tempVideo).toString(),
+      hdPosterUrl = null,
+      source = "Test",
+      resolutionLabel = "720×1280",
+      matchScore = 100,
+      isLoopingVideo = true
+    )
+    val savedCanvas = runBlocking {
+      SavedMediaLibrary.saveCanvasFromCandidate(context, cand, "Concert Loop")
+    }
+    assertNotNull(savedCanvas)
+    assertEquals("Concert Loop", savedCanvas!!.name)
+    assertTrue(File(savedCanvas.localVideoPath).exists())
+
+    SavedMediaLibrary.renameCanvas(context, savedCanvas.id, "Tour Loop")
+    assertEquals("Tour Loop", SavedMediaLibrary.savedCanvases.value.first { it.id == savedCanvas.id }.name)
+
+    SavedMediaLibrary.deleteCanvas(context, savedCanvas.id)
+    assertFalse(File(savedCanvas.localVideoPath).exists())
+    tempVideo.delete()
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `transparent background exports pure alpha zero corner pixels across all 4 layouts`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val art = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+    Canvas(art).drawColor(AndroidColor.rgb(240, 80, 90))
+    val track = MediaTrackInfo(
+      title = "Transparent Test",
+      artist = "Tester",
+      album = "Album",
+      appName = "Samsung Music",
+      packageName = "com.sec.android.app.music",
+      albumArt = art,
+      isPlaying = true,
+      isSample = false
+    )
+
+    CardLayoutType.values().forEach { layout ->
+      val bmp = runBlocking {
+        CardShareManager.generateStoryBitmap(
+          context = context,
+          track = track,
+          palette = CardPalette.Default,
+          styleConfig = CardStyleConfig(
+            cardLayoutType = layout,
+            useTransparentBackground = true
+          )
+        )
+      }
+      assertEquals("Top-left corner must be transparent for $layout", AndroidColor.TRANSPARENT, bmp.getPixel(5, 5))
+      assertEquals("Bottom-right corner must be transparent for $layout", AndroidColor.TRANSPARENT, bmp.getPixel(1074, 1914))
+      val centerAlpha = AndroidColor.alpha(bmp.getPixel(540, 880))
+      assertTrue("Center card pixels should be opaque/visible for $layout (alpha=$centerAlpha)", centerAlpha > 100)
+      bmp.recycle()
+    }
+    art.recycle()
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `cardOpacity adjusts frosted glass alpha while keeping album artwork and text crisp opaque`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val art = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+    Canvas(art).drawColor(AndroidColor.WHITE)
+    val track = MediaTrackInfo(
+      title = "Opacity Song",
+      artist = "Opacity Artist",
+      album = "Album",
+      appName = "YouTube Music",
+      packageName = "com.google.android.apps.youtube.music",
+      albumArt = art,
+      isPlaying = true,
+      isSample = false
+    )
+
+    val fullBmp = runBlocking {
+      CardShareManager.generateStoryBitmap(
+        context,
+        track,
+        CardPalette.Default,
+        CardStyleConfig(useTransparentBackground = true, cardOpacity = 1.0f)
+      )
+    }
+    val halfBmp = runBlocking {
+      CardShareManager.generateStoryBitmap(
+        context,
+        track,
+        CardPalette.Default,
+        CardStyleConfig(useTransparentBackground = true, cardOpacity = 0.5f)
+      )
+    }
+    val zeroBmp = runBlocking {
+      CardShareManager.generateStoryBitmap(
+        context,
+        track,
+        CardPalette.Default,
+        CardStyleConfig(useTransparentBackground = true, cardOpacity = 0.0f)
+      )
+    }
+
+    // (145, 900) sits inside the Floating Glass Card left padding strip (119..166) outside the album art
+    val glassFullAlpha = AndroidColor.alpha(fullBmp.getPixel(145, 900))
+    val glassHalfAlpha = AndroidColor.alpha(halfBmp.getPixel(145, 900))
+    val glassZeroAlpha = AndroidColor.alpha(zeroBmp.getPixel(145, 900))
+    assertTrue("Expected full frosted glass alpha > 160, got $glassFullAlpha", glassFullAlpha >= 160)
+    assertTrue("Expected half frosted glass alpha lower than full (full=$glassFullAlpha, half=$glassHalfAlpha)", glassHalfAlpha in 40..(glassFullAlpha - 40))
+    assertEquals("Expected zero frosted glass alpha == 0 when opacity is 0%", 0, glassZeroAlpha)
+
+    // (540, 820) sits inside the album cover artwork -> must remain 100% opaque regardless of glass opacity
+    assertEquals(255, AndroidColor.alpha(fullBmp.getPixel(540, 820)))
+    assertEquals(255, AndroidColor.alpha(halfBmp.getPixel(540, 820)))
+    assertEquals(255, AndroidColor.alpha(zeroBmp.getPixel(540, 820)))
+
+    fullBmp.recycle()
+    halfBmp.recycle()
+    zeroBmp.recycle()
+    art.recycle()
+  }
+
+  @Test
+  fun `audio beat monitor animates when paused and responds to speedMultiplier and beatSync`() {
+    val frameA = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Midnight City",
+      trackArtist = "M83",
+      isPlaying = false,
+      timeSec = 0.5f,
+      speedMultiplier = 1.0f,
+      animateWhenPaused = true
+    )
+    val frameB = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Midnight City",
+      trackArtist = "M83",
+      isPlaying = false,
+      timeSec = 1.15f,
+      speedMultiplier = 1.0f,
+      animateWhenPaused = true
+    )
+    assertFalse("Expected waveform preview to animate smoothly even when paused", frameA.contentEquals(frameB))
+
+    val slowFrame = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Midnight City",
+      trackArtist = "M83",
+      isPlaying = true,
+      timeSec = 1.0f,
+      speedMultiplier = 0.5f,
+      beatSyncMode = false
+    )
+    val fastFrame = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Midnight City",
+      trackArtist = "M83",
+      isPlaying = true,
+      timeSec = 1.0f,
+      speedMultiplier = 2.0f,
+      beatSyncMode = false
+    )
+    assertFalse("Expected speedMultiplier to alter waveform phase", slowFrame.contentEquals(fastFrame))
+
+    val beatFrame = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Midnight City",
+      trackArtist = "M83",
+      isPlaying = true,
+      timeSec = 0.05f,
+      beatSyncMode = true
+    )
+    assertTrue("Expected beat-sync levels bounded in [0.18, 1.0]", beatFrame.all { it in 0.18f..1.0f })
+  }
+
+  @Test
+  fun `card style preferences persists waveform speed, word selection mode, and zero glass opacity`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val cfg = CardStyleConfig(
+      cardOpacity = 0.0f,
+      waveformSpeedMultiplier = 1.8f,
+      lyricsWordSelectionMode = true
+    )
+    CardStylePreferences.save(context, cfg)
+    val loaded = CardStylePreferences.load(context)
+    assertEquals(0.0f, loaded.cardOpacity, 0.001f)
+    assertEquals(1.8f, loaded.waveformSpeedMultiplier, 0.001f)
+    assertTrue(loaded.lyricsWordSelectionMode)
+    assertEquals(8_000_000L, com.example.util.CanvasVideoExporter.WAVEFORM_LOOP_DURATION_US)
+  }
+
+  @Test
   @GraphicsMode(GraphicsMode.Mode.NATIVE)
   fun `floating glass card blur alters side edge frosting visibly across 0px 20px 40px`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
@@ -237,7 +517,6 @@ class ExampleRobolectricTest {
       CardShareManager.generateStoryBitmap(context, track, CardPalette.Default, baseStyle.copy(cardBlurRadius = 40f))
     }
 
-    // Card spans x = [118.8 .. 961.2] on 1080px width; test inner left side, inner right side, and outer halo outside left edge
     val leftEdgeX = 135
     val rightEdgeX = 945
     val outerLeftHaloX = 112

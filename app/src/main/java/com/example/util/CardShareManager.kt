@@ -66,43 +66,26 @@ object CardShareManager {
         val width = 1080
         val height = 1920
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(AndroidColor.TRANSPARENT)
         val canvas = Canvas(bitmap)
 
         // Normalize album art to software ARGB_8888 so Canvas never throws on HARDWARE bitmaps
-        val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1024)
+        val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1200)
 
         try {
-            // 1. Draw Background: Full-screen blurred album cover (`object-fit: cover`) OR palette gradient
-            if (styleConfig.useBlurredAlbumBackground && safeAlbumArt != null) {
-                val exportBlurMaxDim = if (styleConfig.backgroundBlurRadius <= 10f) 480 else 360
-                val blurredBg = BitmapBlurUtils.blurBitmap(
-                    source = safeAlbumArt,
-                    radiusPx = styleConfig.backgroundBlurRadius,
-                    maxDimension = exportBlurMaxDim
-                )
-                drawCenterCroppedBitmap(
+            // 1. Draw Background unless "No Background (Transparent)" is selected
+            if (!styleConfig.useTransparentBackground) {
+                drawBackgroundOnly(
                     canvas = canvas,
-                    bitmap = blurredBg,
-                    destRect = RectF(0f, 0f, width.toFloat(), height.toFloat()),
-                    paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+                    targetWidth = width,
+                    targetHeight = height,
+                    albumArt = safeAlbumArt,
+                    palette = palette,
+                    styleConfig = styleConfig
                 )
-                if (blurredBg !== safeAlbumArt && !blurredBg.isRecycled) {
-                    blurredBg.recycle()
-                }
-            } else {
-                val gradientStops = resolveGradientStopsArgb(palette, styleConfig)
-                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
-                    shader = LinearGradient(
-                        0f, 0f, width.toFloat(), height.toFloat(),
-                        gradientStops,
-                        floatArrayOf(0f, 0.52f, 1f),
-                        Shader.TileMode.CLAMP
-                    )
-                }
-                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
             }
 
-            // Subtle dark overlay rgba(0, 0, 0, 0.25) for readable contrast
+            // Subtle dark overlay rgba(0, 0, 0, 0.25) (omitted when exporting pure transparent card)
             val safeTrack = if (safeAlbumArt !== track.albumArt) track.copy(albumArt = safeAlbumArt) else track
             drawOverlayAndCardOnCanvas(
                 context = context,
@@ -111,7 +94,9 @@ object CardShareManager {
                 targetHeight = height,
                 track = safeTrack,
                 palette = palette,
-                styleConfig = styleConfig
+                styleConfig = styleConfig,
+                skipScrim = styleConfig.useTransparentBackground,
+                includeWaveform = true
             )
         } finally {
             if (safeAlbumArt != null && safeAlbumArt !== track.albumArt && !safeAlbumArt.isRecycled) {
@@ -120,6 +105,71 @@ object CardShareManager {
         }
 
         bitmap
+    }
+
+    suspend fun generateStaticBackgroundBitmap(
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig,
+        targetWidth: Int = CanvasVideoExporter.OUT_WIDTH,
+        targetHeight: Int = CanvasVideoExporter.OUT_HEIGHT
+    ): Bitmap = withContext(Dispatchers.Default) {
+        val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val safeAlbumArt = BitmapBlurUtils.toSafeSoftwareBitmap(track.albumArt, maxDimension = 1024)
+        try {
+            drawBackgroundOnly(
+                canvas = canvas,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+                albumArt = safeAlbumArt,
+                palette = palette,
+                styleConfig = styleConfig
+            )
+        } finally {
+            if (safeAlbumArt != null && safeAlbumArt !== track.albumArt && !safeAlbumArt.isRecycled) {
+                safeAlbumArt.recycle()
+            }
+        }
+        bitmap
+    }
+
+    private fun drawBackgroundOnly(
+        canvas: Canvas,
+        targetWidth: Int,
+        targetHeight: Int,
+        albumArt: Bitmap?,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig
+    ) {
+        if (styleConfig.useBlurredAlbumBackground && albumArt != null) {
+            val exportBlurMaxDim = if (styleConfig.backgroundBlurRadius <= 10f) 480 else 360
+            val blurredBg = BitmapBlurUtils.blurBitmap(
+                source = albumArt,
+                radiusPx = styleConfig.backgroundBlurRadius,
+                maxDimension = exportBlurMaxDim
+            )
+            drawCenterCroppedBitmap(
+                canvas = canvas,
+                bitmap = blurredBg,
+                destRect = RectF(0f, 0f, targetWidth.toFloat(), targetHeight.toFloat()),
+                paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            )
+            if (blurredBg !== albumArt && !blurredBg.isRecycled) {
+                blurredBg.recycle()
+            }
+        } else {
+            val gradientStops = resolveGradientStopsArgb(palette, styleConfig)
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, targetWidth.toFloat(), targetHeight.toFloat(),
+                    gradientStops,
+                    floatArrayOf(0f, 0.52f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(0f, 0f, targetWidth.toFloat(), targetHeight.toFloat(), bgPaint)
+        }
     }
 
     /**
@@ -132,7 +182,8 @@ object CardShareManager {
         palette: CardPalette,
         styleConfig: CardStyleConfig,
         targetWidth: Int = 1080,
-        targetHeight: Int = 1920
+        targetHeight: Int = 1920,
+        includeWaveform: Boolean = true
     ): Bitmap = withContext(Dispatchers.Default) {
         val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(AndroidColor.TRANSPARENT)
@@ -148,7 +199,9 @@ object CardShareManager {
                 targetHeight = targetHeight,
                 track = safeTrack,
                 palette = palette,
-                styleConfig = styleConfig
+                styleConfig = styleConfig,
+                skipScrim = styleConfig.useTransparentBackground,
+                includeWaveform = includeWaveform
             )
         } finally {
             if (safeAlbumArt != null && safeAlbumArt !== track.albumArt && !safeAlbumArt.isRecycled) {
@@ -165,7 +218,9 @@ object CardShareManager {
         targetHeight: Int,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        skipScrim: Boolean = false,
+        includeWaveform: Boolean = true
     ) {
         val width = 1080
         val height = 1920
@@ -174,14 +229,25 @@ object CardShareManager {
             canvas.scale(targetWidth / width.toFloat(), targetHeight / height.toFloat())
         }
 
-        val overlayAlpha = (255f * styleConfig.darkOverlayAlpha.coerceIn(0f, 1f)).roundToInt()
-        if (overlayAlpha > 0) {
-            canvas.drawColor(AndroidColor.argb(overlayAlpha, 0, 0, 0))
+        if (!skipScrim) {
+            val overlayAlpha = (255f * styleConfig.darkOverlayAlpha.coerceIn(0f, 1f)).roundToInt()
+            if (overlayAlpha > 0) {
+                canvas.drawColor(AndroidColor.argb(overlayAlpha, 0, 0, 0))
+            }
         }
 
         when (styleConfig.cardLayoutType) {
             CardLayoutType.SPOTIFY_INNER_CARD -> {
-                drawFloatingGlassCardLayout(context, canvas, width, height, track, palette, styleConfig)
+                drawFloatingGlassCardLayout(
+                    context = context,
+                    canvas = canvas,
+                    w = width,
+                    h = height,
+                    track = track,
+                    palette = palette,
+                    styleConfig = styleConfig,
+                    includeWaveform = includeWaveform
+                )
             }
             CardLayoutType.FLOATING_ARTWORK -> {
                 drawFloatingArtworkLayout(context, canvas, width, height, track, palette, styleConfig)
@@ -215,7 +281,8 @@ object CardShareManager {
         h: Int,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        includeWaveform: Boolean = true
     ) {
         val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
         val cardW = (w * 0.78f * scale).coerceIn(w * 0.44f, w * 0.94f)
@@ -248,41 +315,47 @@ object CardShareManager {
         val cardBottom = cardTop + cardH
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
 
+        val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
         val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
-        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.argb((145 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).roundToInt().coerceIn(0, 255), 0, 0, 0)
-            maskFilter = BlurMaskFilter(64f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+        val shadowAlpha = (145f * styleConfig.glowIntensity.coerceAtLeast(0.25f) * glassOpacity)
+            .roundToInt()
+            .coerceIn(0, 255)
+        if (shadowAlpha > 2) {
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.argb(shadowAlpha, 0, 0, 0)
+                maskFilter = BlurMaskFilter(64f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+            }
+            canvas.drawRoundRect(
+                RectF(cardLeft, cardTop + (22f * scale), cardRight, cardBottom + (22f * scale)),
+                cornerRadius,
+                cornerRadius,
+                shadowPaint
+            )
         }
-        canvas.drawRoundRect(
-            RectF(cardLeft, cardTop + (22f * scale), cardRight, cardBottom + (22f * scale)),
-            cornerRadius,
-            cornerRadius,
-            shadowPaint
-        )
 
         val albumArt = track.albumArt
         val glassBlur = styleConfig.cardBlurRadius.coerceIn(0f, 40f)
         val glassDownFactor = (glassBlur / 20f).coerceIn(0f, 1f)
         val glassUpFactor = ((glassBlur - 20f) / 20f).coerceIn(0f, 1f)
 
-        val topAlpha = if (glassBlur <= 20f) {
+        val topAlpha = (if (glassBlur <= 20f) {
             0.20f + (0.67f * glassDownFactor)
         } else {
             0.87f - (0.31f * glassUpFactor)
-        }
-        val bottomAlpha = if (glassBlur <= 20f) {
+        }) * glassOpacity
+        val bottomAlpha = (if (glassBlur <= 20f) {
             0.30f + (0.62f * glassDownFactor)
         } else {
             0.92f - (0.28f * glassUpFactor)
-        }
-        val borderAlphaInt = if (glassBlur <= 20f) {
-            ((0.30f - 0.16f * glassDownFactor) * 255f).roundToInt().coerceIn(0, 255)
+        }) * glassOpacity
+        val borderAlphaInt = ((if (glassBlur <= 20f) {
+            0.30f - 0.16f * glassDownFactor
         } else {
-            ((0.14f + 0.24f * glassUpFactor) * 255f).roundToInt().coerceIn(0, 255)
-        }
+            0.14f + 0.24f * glassUpFactor
+        }) * glassOpacity * 255f).roundToInt().coerceIn(0, 255)
         val sideFrostColor = lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.32f)
 
-        if (glassUpFactor > 0.01f) {
+        if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
             val spreadPx = 12f * glassUpFactor
             val outerHaloRect = RectF(
                 cardLeft - spreadPx,
@@ -293,7 +366,7 @@ object CardShareManager {
             val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.STROKE
                 strokeWidth = (15f + 27f * glassUpFactor) * scale
-                color = withAlpha(sideFrostColor, 0.36f * glassUpFactor)
+                color = withAlpha(sideFrostColor, 0.36f * glassUpFactor * glassOpacity)
                 maskFilter = BlurMaskFilter((30f + 72f * glassUpFactor) * scale, BlurMaskFilter.Blur.NORMAL)
             }
             canvas.drawRoundRect(outerHaloRect, cornerRadius, cornerRadius, haloPaint)
@@ -311,24 +384,26 @@ object CardShareManager {
         }
         canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
 
-        if (glassUpFactor > 0.01f) {
+        if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
             drawFrostedGlassOverlay(
                 canvas = canvas,
                 cardRect = cardRect,
                 cornerRadius = cornerRadius,
                 albumArt = albumArt,
                 blurRadius = 26f + (14f * glassUpFactor),
-                intensity = glassUpFactor,
+                intensity = glassUpFactor * glassOpacity,
                 sideFrostColor = sideFrostColor
             )
         }
 
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 3f + (3.6f * glassUpFactor)
-            color = AndroidColor.argb(borderAlphaInt, 255, 255, 255)
+        if (borderAlphaInt > 0) {
+            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 3f + (3.6f * glassUpFactor)
+                color = AndroidColor.argb(borderAlphaInt, 255, 255, 255)
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
         }
-        canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
 
         val artLeft = cardLeft + innerPad
         val artTop = cardTop + innerPad
@@ -381,6 +456,112 @@ object CardShareManager {
             textSize = 42f * scale,
             showWordmark = styleConfig.showLogoWordmark
         )
+
+        if (includeWaveform && styleConfig.enableWaveform) {
+            val wfRect = computeFloatingGlassWaveformRectIn1080x1920(track, styleConfig)
+            drawDynamicIslandWaveform(
+                canvas = canvas,
+                rect = wfRect,
+                colorArgb = styleConfig.waveformColor.toArgb(),
+                track = track,
+                timeSec = 1.4f,
+                speedMultiplier = styleConfig.waveformSpeedMultiplier,
+                beatSyncMode = styleConfig.waveformBeatSync
+            )
+        }
+    }
+
+    private fun computeFloatingGlassWaveformRectIn1080x1920(
+        track: MediaTrackInfo,
+        styleConfig: CardStyleConfig
+    ): RectF {
+        val w = 1080
+        val h = 1920
+        val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
+        val cardW = (w * 0.78f * scale).coerceIn(w * 0.44f, w * 0.94f)
+        val innerPad = 48f * scale
+        val artSize = cardW - innerPad * 2f
+        val textMaxW = artSize.toInt().coerceAtLeast(100)
+        val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 54f * scale
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            letterSpacing = -0.02f
+        }
+        val titleLayout = buildEllipsizedLayout(track.title, titlePaint, textMaxW, maxLines = 2)
+        val artistPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 40f * scale
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val artistLayout = buildEllipsizedLayout(track.artist, artistPaint, textMaxW, maxLines = 1)
+        val badgeSize = 60f * scale
+        val cardH = innerPad + artSize + (42f * scale) + titleLayout.height + (12f * scale) + artistLayout.height + (54f * scale) + badgeSize + innerPad
+
+        val cardLeft = (w - cardW) / 2f
+        val cardRight = cardLeft + cardW
+        val cardTop = (h - cardH) / 2f
+        val footerTop = cardTop + innerPad + artSize + (42f * scale) + titleLayout.height + (12f * scale) + artistLayout.height + (54f * scale)
+
+        val wfWidth = 78f * scale
+        val wfHeight = 56f * scale
+        val wfRight = cardRight - innerPad
+        val wfTop = footerTop + (badgeSize - wfHeight) / 2f
+        return RectF(wfRight - wfWidth, wfTop, wfRight, wfTop + wfHeight)
+    }
+
+    fun computeFloatingGlassWaveformRect(
+        targetWidth: Int,
+        targetHeight: Int,
+        track: MediaTrackInfo,
+        styleConfig: CardStyleConfig
+    ): RectF {
+        val base = computeFloatingGlassWaveformRectIn1080x1920(track, styleConfig)
+        val sx = targetWidth / 1080f
+        val sy = targetHeight / 1920f
+        return RectF(base.left * sx, base.top * sy, base.right * sx, base.bottom * sy)
+    }
+
+    private fun drawDynamicIslandWaveform(
+        canvas: Canvas,
+        rect: RectF,
+        colorArgb: Int,
+        track: MediaTrackInfo,
+        timeSec: Float,
+        speedMultiplier: Float = 1.0f,
+        beatSyncMode: Boolean = false
+    ) {
+        val levels = AudioBeatMonitor.computeBarLevels(
+            trackTitle = track.title,
+            trackArtist = track.artist,
+            isPlaying = true,
+            timeSec = timeSec,
+            speedMultiplier = speedMultiplier,
+            beatSyncMode = beatSyncMode,
+            animateWhenPaused = true
+        )
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = colorArgb
+            style = Paint.Style.FILL
+        }
+        val padX = rect.width() * 0.08f
+        val usableW = (rect.width() - padX * 2f).coerceAtLeast(8f)
+        val gap = usableW * 0.14f
+        val barW = ((usableW - gap * 3f) / 4f).coerceAtLeast(2f)
+        val corner = barW / 2f
+        val maxBarH = rect.height() * 0.90f
+        val cy = rect.centerY()
+
+        for (i in 0 until 4) {
+            val frac = levels[i].coerceIn(0.18f, 1f)
+            val barH = max(barW, maxBarH * frac)
+            val left = rect.left + padX + i * (barW + gap)
+            val top = cy - barH / 2f
+            canvas.drawRoundRect(
+                RectF(left, top, left + barW, top + barH),
+                corner,
+                corner,
+                paint
+            )
+        }
     }
 
     private fun drawFloatingArtworkLayout(
@@ -400,10 +581,11 @@ object CardShareManager {
         val artBottom = artTop + artSize
         val artRadius = styleConfig.cornerRadiusDp * 3f * scale
 
-        if (styleConfig.glowIntensity > 0.05f) {
+        val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
+        if (styleConfig.glowIntensity > 0.05f && glassOpacity > 0.02f) {
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = palette.vibrantColor.toArgb()
-                alpha = (180 * styleConfig.glowIntensity).toInt().coerceIn(0, 255)
+                alpha = (180 * styleConfig.glowIntensity * glassOpacity).toInt().coerceIn(0, 255)
                 maskFilter = BlurMaskFilter(80f * styleConfig.glowIntensity * scale, BlurMaskFilter.Blur.NORMAL)
             }
             canvas.drawRoundRect(
@@ -484,10 +666,14 @@ object CardShareManager {
         val cardTop = (h - cardH) / 2f
         val cardRect = RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH)
 
-        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.argb(224, 20, 20, 24)
+        val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
+        val bgAlpha = (224f * glassOpacity).roundToInt().coerceIn(0, 255)
+        if (bgAlpha > 0) {
+            val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.argb(bgAlpha, 20, 20, 24)
+            }
+            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
         }
-        canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
 
         val artLeft = cardLeft + innerPad
         val artTop = cardTop + innerPad
@@ -612,39 +798,54 @@ object CardShareManager {
         val cardBottom = cardTop + cardH
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
 
+        val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
         val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
-        val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = AndroidColor.argb((135 * styleConfig.glowIntensity.coerceAtLeast(0.25f)).roundToInt().coerceIn(0, 255), 0, 0, 0)
-            maskFilter = BlurMaskFilter(58f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+        val shadowAlpha = (135f * styleConfig.glowIntensity.coerceAtLeast(0.25f) * glassOpacity)
+            .roundToInt()
+            .coerceIn(0, 255)
+        if (shadowAlpha > 2) {
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = AndroidColor.argb(shadowAlpha, 0, 0, 0)
+                maskFilter = BlurMaskFilter(58f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+            }
+            canvas.drawRoundRect(
+                RectF(cardLeft, cardTop + (20f * scale), cardRight, cardBottom + (20f * scale)),
+                cornerRadius,
+                cornerRadius,
+                shadowPaint
+            )
         }
-        canvas.drawRoundRect(
-            RectF(cardLeft, cardTop + (20f * scale), cardRight, cardBottom + (20f * scale)),
-            cornerRadius,
-            cornerRadius,
-            shadowPaint
-        )
 
         val albumArt = track.albumArt
         if (useSongArtBg && albumArt != null) {
-            drawBlurredCardCoverBackground(
-                canvas = canvas,
-                cardRect = cardRect,
-                cornerRadius = cornerRadius,
-                albumArt = albumArt,
-                blurRadius = styleConfig.lyricsArtBlurRadius
-            )
+            if (glassOpacity > 0.01f) {
+                drawBlurredCardCoverBackground(
+                    canvas = canvas,
+                    cardRect = cardRect,
+                    cornerRadius = cornerRadius,
+                    albumArt = albumArt,
+                    blurRadius = styleConfig.lyricsArtBlurRadius,
+                    opacity = glassOpacity
+                )
+            }
 
-            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = 3f
-                color = AndroidColor.argb(42, 255, 255, 255)
+            val borderAlpha = (42f * glassOpacity).roundToInt().coerceIn(0, 255)
+            if (borderAlpha > 0) {
+                val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.STROKE
+                    strokeWidth = 3f
+                    color = AndroidColor.argb(borderAlpha, 255, 255, 255)
+                }
+                canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
             }
-            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
         } else {
-            val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = cardArgb
+            val fillAlpha = (255f * glassOpacity).roundToInt().coerceIn(0, 255)
+            if (fillAlpha > 0) {
+                val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = withAlpha(cardArgb, glassOpacity)
+                }
+                canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
             }
-            canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
         }
 
         // Header cover thumbnail
@@ -908,8 +1109,11 @@ object CardShareManager {
         cardRect: RectF,
         cornerRadius: Float,
         albumArt: Bitmap,
-        blurRadius: Float
+        blurRadius: Float,
+        opacity: Float = 1.0f
     ) {
+        val clampedOpacity = opacity.coerceIn(0f, 1f)
+        if (clampedOpacity <= 0.01f) return
         val clamped = blurRadius.coerceIn(0f, 40f)
         val drawBmp = if (clamped > 0.5f) {
             val maxDim = if (clamped <= 10f) 420 else 300
@@ -927,19 +1131,22 @@ object CardShareManager {
             addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
         }
         canvas.clipPath(cardClip)
+        val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG).apply {
+            alpha = (255f * clampedOpacity).roundToInt().coerceIn(0, 255)
+        }
         drawCenterCroppedBitmap(
             canvas = canvas,
             bitmap = drawBmp,
             destRect = cardRect,
-            paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+            paint = artPaint
         )
         val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 cardRect.left, cardRect.top, cardRect.left, cardRect.bottom,
                 intArrayOf(
-                    AndroidColor.argb(112, 0, 0, 0),
-                    AndroidColor.argb(143, 0, 0, 0),
-                    AndroidColor.argb(188, 0, 0, 0)
+                    AndroidColor.argb((112f * clampedOpacity).roundToInt().coerceIn(0, 255), 0, 0, 0),
+                    AndroidColor.argb((143f * clampedOpacity).roundToInt().coerceIn(0, 255), 0, 0, 0),
+                    AndroidColor.argb((188f * clampedOpacity).roundToInt().coerceIn(0, 255), 0, 0, 0)
                 ),
                 floatArrayOf(0f, 0.5f, 1f),
                 Shader.TileMode.CLAMP
@@ -1093,20 +1300,18 @@ object CardShareManager {
         styleConfig: CardStyleConfig,
         activeCanvasVideoUrl: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        if (!activeCanvasVideoUrl.isNullOrBlank()) {
-            val videoFile = exportAnimatedVideoIfActive(
-                context = context,
-                track = track,
-                palette = palette,
-                styleConfig = styleConfig,
-                activeCanvasVideoUrl = activeCanvasVideoUrl,
-                prefix = "${styleConfig.brandMode.wordmark}_canvas"
-            )
-            if (videoFile != null) {
-                val savedVideo = saveVideoFileToGallery(context, track, styleConfig, videoFile)
-                videoFile.delete()
-                if (savedVideo) return@withContext true
-            }
+        val videoFile = exportAnimatedVideoIfActive(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            activeCanvasVideoUrl = activeCanvasVideoUrl,
+            prefix = "${styleConfig.brandMode.wordmark}_motion"
+        )
+        if (videoFile != null) {
+            val savedVideo = saveVideoFileToGallery(context, track, styleConfig, videoFile)
+            videoFile.delete()
+            if (savedVideo) return@withContext true
         }
 
         var bitmap: Bitmap? = null
@@ -1152,7 +1357,12 @@ object CardShareManager {
             }
 
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Saved to Gallery (Pictures/EchoSnap)!", Toast.LENGTH_LONG).show()
+                val msg = if (styleConfig.useTransparentBackground) {
+                    "Saved Transparent PNG (Pictures/EchoSnap)!"
+                } else {
+                    "Saved to Gallery (Pictures/EchoSnap)!"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
             }
             true
         } catch (e: Exception) {
@@ -1215,7 +1425,7 @@ object CardShareManager {
             withContext(Dispatchers.Main) {
                 Toast.makeText(
                     context,
-                    "Saved Animated Canvas Video (Movies/EchoSnap)!",
+                    "Saved Animated Video (Movies/EchoSnap)!",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -1272,26 +1482,76 @@ object CardShareManager {
         activeCanvasVideoUrl: String?,
         prefix: String
     ): File? {
-        if (activeCanvasVideoUrl.isNullOrBlank()) return null
+        // Transparent "No Background" exports must preserve full ARGB alpha PNG (MP4 lacks alpha channel)
+        if (styleConfig.useTransparentBackground) return null
+
+        val hasWaveformMotion = styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
+            styleConfig.enableWaveform
+        val hasCanvasVideo = !activeCanvasVideoUrl.isNullOrBlank()
+        if (!hasCanvasVideo && !hasWaveformMotion) return null
+
+        val waveformSpec = if (hasWaveformMotion) {
+            WaveformExportSpec(
+                rectIn720x1280 = computeFloatingGlassWaveformRect(
+                    targetWidth = CanvasVideoExporter.OUT_WIDTH,
+                    targetHeight = CanvasVideoExporter.OUT_HEIGHT,
+                    track = track,
+                    styleConfig = styleConfig
+                ),
+                waveformColorArgb = styleConfig.waveformColor.toArgb(),
+                cardOpacity = styleConfig.cardOpacity,
+                trackTitle = track.title,
+                trackArtist = track.artist,
+                isPlaying = true,
+                speedMultiplier = styleConfig.waveformSpeedMultiplier,
+                beatSyncEnabled = styleConfig.waveformBeatSync
+            )
+        } else {
+            null
+        }
+
         val overlay = generateTransparentCardOverlayBitmap(
             context = context,
             track = track,
             palette = palette,
             styleConfig = styleConfig,
-            targetWidth = 720,
-            targetHeight = 1280
+            targetWidth = CanvasVideoExporter.OUT_WIDTH,
+            targetHeight = CanvasVideoExporter.OUT_HEIGHT,
+            includeWaveform = false
         )
-        return try {
-            CanvasVideoExporter.exportAnimatedStoryVideo(
-                context = context,
-                canvasVideoUrl = activeCanvasVideoUrl,
-                overlayBitmap = overlay,
-                blurRadiusPx = styleConfig.backgroundBlurRadius,
-                outputFileName = "${prefix}_${System.currentTimeMillis()}.mp4"
+
+        return if (hasCanvasVideo) {
+            try {
+                CanvasVideoExporter.exportAnimatedStoryVideo(
+                    context = context,
+                    canvasVideoUrl = activeCanvasVideoUrl!!,
+                    overlayBitmap = overlay,
+                    blurRadiusPx = styleConfig.backgroundBlurRadius,
+                    outputFileName = "${prefix}_${System.currentTimeMillis()}.mp4",
+                    waveformSpec = waveformSpec
+                )
+            } finally {
+                if (!overlay.isRecycled) overlay.recycle()
+            }
+        } else {
+            val staticBg = generateStaticBackgroundBitmap(
+                track = track,
+                palette = palette,
+                styleConfig = styleConfig,
+                targetWidth = CanvasVideoExporter.OUT_WIDTH,
+                targetHeight = CanvasVideoExporter.OUT_HEIGHT
             )
-        } finally {
-            if (!overlay.isRecycled) {
-                overlay.recycle()
+            try {
+                CanvasVideoExporter.exportStaticBackgroundWaveformVideo(
+                    context = context,
+                    backgroundBitmap = staticBg,
+                    overlayBitmap = overlay,
+                    waveformSpec = waveformSpec!!,
+                    outputFileName = "${prefix}_wf8s_${System.currentTimeMillis()}.mp4"
+                )
+            } finally {
+                if (!staticBg.isRecycled) staticBg.recycle()
+                if (!overlay.isRecycled) overlay.recycle()
             }
         }
     }

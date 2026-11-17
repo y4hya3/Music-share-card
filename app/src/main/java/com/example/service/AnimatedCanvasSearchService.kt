@@ -62,7 +62,11 @@ object AnimatedCanvasSearchService {
         "spotify", "youtube music", "youtube", "apple music", "echosnap", "bitchord",
         "soundcloud", "music", "music player", "samsung music", "tidal", "deezer",
         "amazon music", "audiomack", "anghami", "unknown", "unknown artist", "<unknown>",
-        "various", "various artists"
+        "various", "various artists", "musicolet", "poweramp", "vlc", "vlc for android",
+        "retro music", "oto music", "pulsar", "phonograph", "aimp", "foobar2000",
+        "neutron", "blackplayer", "mi music", "lark player", "gaana", "jiosaavn",
+        "wynk", "symfonium", "namida", "metrolist", "innertune", "rimusic",
+        "yandex music", "vk music", "plexamp", "media monkey", "mediamonkey"
     )
 
     @Volatile
@@ -96,6 +100,7 @@ object AnimatedCanvasSearchService {
         spotifyClientId: String = "",
         targetTitle: String = "",
         targetArtist: String = "",
+        playerAppName: String = "",
         spotifyTrackId: String = "",
         spDcWebFallback: (suspend (String) -> SpotifyTokenResult?)? = null,
         webViewSearchFallback: (suspend (String) -> WebViewSpotifySearchResult?)? = null,
@@ -109,20 +114,29 @@ object AnimatedCanvasSearchService {
             )
         }
 
+        val normalizedPlayerApp = playerAppName.trim().lowercase(Locale.US)
+        fun isGenericOrPlayerArtist(artist: String): Boolean {
+            val lower = artist.trim().lowercase(Locale.US)
+            return lower.isEmpty() ||
+                lower in GENERIC_APP_ARTISTS ||
+                (normalizedPlayerApp.isNotEmpty() && lower == normalizedPlayerApp)
+        }
+
         var cleanTitle = normalizeQueryText(targetTitle).ifEmpty { cleaned }
         var cleanArtist = normalizeArtistText(targetArtist)
-        var hasRealTargetArtist = cleanArtist.isNotEmpty() &&
-            cleanArtist.lowercase(Locale.US) !in GENERIC_APP_ARTISTS
+        var hasRealTargetArtist = !isGenericOrPlayerArtist(cleanArtist)
 
-        // Many non-Spotify players (YouTube, SoundCloud, local players) embed "Artist - Title" inside title
+        // Many non-Spotify / offline players (YouTube, SoundCloud, local MP3s) embed "Artist - Title" inside title
         if (cleanTitle.contains(" - ")) {
             val parts = cleanTitle.split(" - ", limit = 2).map { it.trim() }
             if (parts.size == 2 && parts[0].isNotEmpty() && parts[1].isNotEmpty()) {
                 if (!hasRealTargetArtist) {
-                    cleanArtist = normalizeArtistText(parts[0])
+                    val parsedArtist = normalizeArtistText(parts[0])
+                    if (!isGenericOrPlayerArtist(parsedArtist)) {
+                        cleanArtist = parsedArtist
+                        hasRealTargetArtist = true
+                    }
                     cleanTitle = normalizeQueryText(parts[1]).ifEmpty { cleanTitle }
-                    hasRealTargetArtist = cleanArtist.isNotEmpty() &&
-                        cleanArtist.lowercase(Locale.US) !in GENERIC_APP_ARTISTS
                 } else if (parts[0].equals(cleanArtist, ignoreCase = true) ||
                     cleanArtist.contains(parts[0], ignoreCase = true)
                 ) {
@@ -147,13 +161,26 @@ object AnimatedCanvasSearchService {
         var spotifyNote = ""
 
         coroutineScope {
-            val spotifyDeferred = if (
-                activeToken.isNotEmpty() ||
-                effectiveSpDc.isNotEmpty() ||
-                (spotifyRefreshToken.isNotBlank() && spotifyClientId.isNotBlank())
-            ) {
-                async {
-                    val now = System.currentTimeMillis()
+            val spotifyDeferred = async {
+                val now = System.currentTimeMillis()
+                val hasAccountCreds = activeToken.isNotEmpty() ||
+                    effectiveSpDc.isNotEmpty() ||
+                    (spotifyRefreshToken.isNotBlank() && spotifyClientId.isNotBlank())
+
+                if (!hasAccountCreds) {
+                    val anonToken = SpotifyAuthManager.fetchAnonymousWebToken()?.accessToken.orEmpty()
+                    val outcome = querySpotifyTracksAndCanvases(
+                        cleanQuery = cleaned,
+                        cleanTitle = cleanTitle,
+                        cleanArtist = if (hasRealTargetArtist) cleanArtist else "",
+                        knownSpotifyTrackId = spotifyTrackId,
+                        spotifyClientId = spotifyClientId,
+                        bearerToken = anonToken,
+                        isAnonymousSession = true,
+                        webViewSearchFallback = webViewSearchFallback
+                    )
+                    outcome
+                } else {
                     val tokenNeedsSpDcRefresh = effectiveSpDc.isNotEmpty() &&
                         (activeToken.isEmpty() || (spotifyTokenExpiryMs > 0L && now >= spotifyTokenExpiryMs - 60_000L))
                     if (tokenNeedsSpDcRefresh) {
@@ -165,19 +192,16 @@ object AnimatedCanvasSearchService {
                         }
                     }
 
-                    var outcome = if (activeToken.isNotEmpty()) {
-                        querySpotifyTracksAndCanvases(
-                            cleanQuery = cleaned,
-                            cleanTitle = cleanTitle,
-                            cleanArtist = if (hasRealTargetArtist) cleanArtist else "",
-                            knownSpotifyTrackId = spotifyTrackId,
-                            spotifyClientId = spotifyClientId,
-                            bearerToken = activeToken,
-                            webViewSearchFallback = webViewSearchFallback
-                        )
-                    } else {
-                        SpotifyQueryOutcome(emptyList(), tokenAccepted = false, note = "Refreshing Spotify session...")
-                    }
+                    var outcome = querySpotifyTracksAndCanvases(
+                        cleanQuery = cleaned,
+                        cleanTitle = cleanTitle,
+                        cleanArtist = if (hasRealTargetArtist) cleanArtist else "",
+                        knownSpotifyTrackId = spotifyTrackId,
+                        spotifyClientId = spotifyClientId,
+                        bearerToken = activeToken,
+                        isAnonymousSession = false,
+                        webViewSearchFallback = webViewSearchFallback
+                    )
 
                     if (!outcome.tokenAccepted && effectiveSpDc.isNotEmpty()) {
                         val exchanged = SpotifyAuthManager.exchangeSpDcForAccessToken(effectiveSpDc)
@@ -192,6 +216,7 @@ object AnimatedCanvasSearchService {
                                 knownSpotifyTrackId = spotifyTrackId,
                                 spotifyClientId = spotifyClientId,
                                 bearerToken = activeToken,
+                                isAnonymousSession = false,
                                 webViewSearchFallback = webViewSearchFallback
                             )
                         }
@@ -209,14 +234,13 @@ object AnimatedCanvasSearchService {
                                 knownSpotifyTrackId = spotifyTrackId,
                                 spotifyClientId = spotifyClientId,
                                 bearerToken = activeToken,
+                                isAnonymousSession = false,
                                 webViewSearchFallback = webViewSearchFallback
                             )
                         }
                     }
                     outcome
                 }
-            } else {
-                null
             }
 
             val itunesVideoDeferred = async {
@@ -385,6 +409,8 @@ object AnimatedCanvasSearchService {
     fun normalizeQueryText(input: String): String {
         val noDiacritics = stripDiacritics(input)
         return noDiacritics
+            .replace("\\.(mp3|flac|m4a|wav|ogg|aac|opus|wma|alac|aiff)$".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("^\\d{1,3}\\s*[._-]\\s*".toRegex(), "")
             .replace("\\([^)]*(feat\\.|ft\\.|with\\s+|official|video|audio|lyric|remaster|version|live|edit|mix|acoustic|visualizer|explicit|clean|hd|4k|bonus|deluxe|single|soundtrack|oficial|clip|from\\s+\")[^)]*\\)".toRegex(RegexOption.IGNORE_CASE), " ")
             .replace("\\[[^\\]]*\\]".toRegex(), " ")
             .replace("\\s+[-–—]\\s+(official|lyric|audio|video|remaster|single|ep|radio\\s+edit).*".toRegex(RegexOption.IGNORE_CASE), " ")
@@ -395,7 +421,7 @@ object AnimatedCanvasSearchService {
 
     fun normalizeArtistText(input: String): String {
         val noDiacritics = stripDiacritics(input)
-        return noDiacritics
+        val cleaned = noDiacritics
             .replace("\\r?\\n.*".toRegex(), "")
             .replace("\\s*-\\s*Topic$".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("VEVO$".toRegex(RegexOption.IGNORE_CASE), "")
@@ -403,6 +429,14 @@ object AnimatedCanvasSearchService {
             .replace("\\s*(feat\\.|ft\\.|featuring|with|&|,|•|·|—|–|\\||/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
+        return if (cleaned.equals("<unknown>", ignoreCase = true) ||
+            cleaned.equals("unknown", ignoreCase = true) ||
+            cleaned.equals("unknown artist", ignoreCase = true)
+        ) {
+            ""
+        } else {
+            cleaned
+        }
     }
 
     private fun stripDiacritics(text: String): String {
@@ -525,6 +559,7 @@ object AnimatedCanvasSearchService {
         knownSpotifyTrackId: String,
         spotifyClientId: String,
         bearerToken: String,
+        isAnonymousSession: Boolean = false,
         webViewSearchFallback: (suspend (String) -> WebViewSpotifySearchResult?)? = null
     ): SpotifyQueryOutcome {
         return try {
@@ -549,18 +584,18 @@ object AnimatedCanvasSearchService {
             }
             cachedTracks?.forEach { m -> collectedTracks.putIfAbsent(m.id, m) }
 
-            // 2. Parallel resolution: playback state + Pathfinder GraphQL + MusicBrainz + Deezer ISRC / Songlink
+            // 2. Parallel resolution: MusicBrainz + Deezer ISRC / Songlink + Pathfinder GraphQL + (if signed in) playback endpoints
             if (collectedTracks.isEmpty()) {
                 coroutineScope {
-                    val currentlyPlayingDeferred = async {
-                        fetchMatchingCurrentlyPlayingTrack(cleanTitle, cleanArtist, bearerToken)
-                    }
-                    val recentlyPlayedDeferred = async {
-                        fetchMatchingRecentlyPlayedTracks(cleanTitle, cleanArtist, bearerToken)
-                    }
-                    val pathfinderDeferred = async {
-                        searchTracksViaPathfinder(cleanQuery, cleanTitle, cleanArtist, bearerToken)
-                    }
+                    val currentlyPlayingDeferred = if (bearerToken.isNotBlank() && !isAnonymousSession) {
+                        async { fetchMatchingCurrentlyPlayingTrack(cleanTitle, cleanArtist, bearerToken) }
+                    } else null
+                    val recentlyPlayedDeferred = if (bearerToken.isNotBlank() && !isAnonymousSession) {
+                        async { fetchMatchingRecentlyPlayedTracks(cleanTitle, cleanArtist, bearerToken) }
+                    } else null
+                    val pathfinderDeferred = if (bearerToken.isNotBlank()) {
+                        async { searchTracksViaPathfinder(cleanQuery, cleanTitle, cleanArtist, bearerToken) }
+                    } else null
                     val musicBrainzDeferred = async {
                         resolveSpotifyTracksViaMusicBrainz(cleanQuery, cleanTitle, cleanArtist)
                     }
@@ -568,23 +603,24 @@ object AnimatedCanvasSearchService {
                         resolveSpotifyTracksViaSonglink(cleanQuery, cleanTitle, cleanArtist)
                     }
 
-                    val cpResult = currentlyPlayingDeferred.await()
-                    if (cpResult.authError) tokenAuthFailed = true
-                    cpResult.match?.let { m ->
+                    currentlyPlayingDeferred?.await()?.let { cpResult ->
+                        if (cpResult.authError) tokenAuthFailed = true
+                        cpResult.match?.let { m ->
+                            val existing = collectedTracks[m.id]
+                            if (existing == null || m.matchScore > existing.matchScore) {
+                                collectedTracks[m.id] = m
+                            }
+                        }
+                    }
+
+                    recentlyPlayedDeferred?.await()?.forEach { m ->
                         val existing = collectedTracks[m.id]
                         if (existing == null || m.matchScore > existing.matchScore) {
                             collectedTracks[m.id] = m
                         }
                     }
 
-                    recentlyPlayedDeferred.await().forEach { m ->
-                        val existing = collectedTracks[m.id]
-                        if (existing == null || m.matchScore > existing.matchScore) {
-                            collectedTracks[m.id] = m
-                        }
-                    }
-
-                    pathfinderDeferred.await().forEach { m ->
+                    pathfinderDeferred?.await()?.forEach { m ->
                         val existing = collectedTracks[m.id]
                         if (existing == null) {
                             collectedTracks[m.id] = m
@@ -613,24 +649,22 @@ object AnimatedCanvasSearchService {
                 }
             }
 
-            if (tokenAuthFailed && collectedTracks.isEmpty()) {
-                return SpotifyQueryOutcome(
-                    candidates = emptyList(),
-                    tokenAccepted = false,
-                    note = "Spotify session expired — reconnect or paste sp_dc in Edit"
-                )
-            }
-
             // 2.5 Off-screen Spotify Web Player search fallback for non-Spotify music players.
-            // Runs only when HTTP sources found zero Spotify Track IDs, capturing live track IDs + hashes + client-token.
+            // Runs BEFORE any 401 abort whenever HTTP sources found zero Spotify Track IDs.
             if (collectedTracks.isEmpty() && webViewSearchFallback != null) {
-                val searchTerm = if (cleanTitle.isNotEmpty() && cleanArtist.isNotEmpty()) {
-                    "$cleanTitle $cleanArtist"
-                } else {
-                    cleanQuery
-                }
-                val wvResult = webViewSearchFallback.invoke(searchTerm)
-                if (wvResult != null) {
+                val searchTermsToTry = buildList {
+                    if (cleanTitle.isNotEmpty() && cleanArtist.isNotEmpty()) {
+                        add("$cleanTitle $cleanArtist")
+                    }
+                    add(cleanQuery)
+                    if (cleanTitle.length >= 3 && cleanTitle != cleanQuery) {
+                        add(cleanTitle)
+                    }
+                }.distinct()
+
+                for (searchTerm in searchTermsToTry) {
+                    if (collectedTracks.isNotEmpty()) break
+                    val wvResult = webViewSearchFallback.invoke(searchTerm) ?: continue
                     wvResult.capturedPathfinderHash?.takeIf { it.length == 64 }?.let { freshHash ->
                         cachedPathfinderSearchHash = freshHash to (System.currentTimeMillis() + 3_600_000L)
                     }
@@ -639,7 +673,7 @@ object AnimatedCanvasSearchService {
                     }
                     for (wt in wvResult.tracks) {
                         val breakdown = evaluateMatch(wt.title, wt.artist, cleanTitle, cleanArtist)
-                        val artistUnknownInDom = wt.artist.isBlank() && breakdown.titleScore >= 40
+                        val artistUnknownInDom = wt.artist.isBlank() && breakdown.titleScore >= 36
                         if (artistUnknownInDom ||
                             isVerifiedMatch(breakdown, cleanTitle.isNotEmpty(), cleanArtist.isNotEmpty())
                         ) {
@@ -657,7 +691,7 @@ object AnimatedCanvasSearchService {
                         }
                     }
                     // If WebView captured a fresh hash/token without DOM tracks yet, retry HTTP Pathfinder immediately
-                    if (collectedTracks.isEmpty() && !wvResult.capturedPathfinderHash.isNullOrBlank()) {
+                    if (collectedTracks.isEmpty() && bearerToken.isNotBlank() && !wvResult.capturedPathfinderHash.isNullOrBlank()) {
                         searchTracksViaPathfinder(cleanQuery, cleanTitle, cleanArtist, bearerToken).forEach { m ->
                             collectedTracks.putIfAbsent(m.id, m)
                         }
@@ -667,7 +701,7 @@ object AnimatedCanvasSearchService {
 
             // 3. Only call REST /v1/search when the user configured a custom PKCE Client ID (Web Player tokens are globally 429 throttled on /v1/search)
             val nowMs = System.currentTimeMillis()
-            if (collectedTracks.isEmpty() && spotifyClientId.isNotBlank() && nowMs >= spotifySearchCooldownUntilMs) {
+            if (collectedTracks.isEmpty() && bearerToken.isNotBlank() && spotifyClientId.isNotBlank() && nowMs >= spotifySearchCooldownUntilMs) {
                 val structuredQuery = if (cleanTitle.isNotEmpty() && cleanArtist.isNotEmpty()) {
                     "track:\"$cleanTitle\" artist:\"$cleanArtist\""
                 } else {
@@ -680,11 +714,7 @@ object AnimatedCanvasSearchService {
                 val statusCode = resp.statusCode
                 val body = resp.body
                 if (statusCode == 401 || statusCode == 403) {
-                    return SpotifyQueryOutcome(
-                        candidates = emptyList(),
-                        tokenAccepted = false,
-                        note = "Spotify session expired ($statusCode) — reconnect or update sp_dc"
-                    )
+                    tokenAuthFailed = true
                 } else if (statusCode == 429) {
                     val cooldownMs = ((resp.retryAfterSec ?: 15L) * 1000L).coerceIn(5_000L, 30_000L)
                     spotifySearchCooldownUntilMs = System.currentTimeMillis() + cooldownMs
@@ -708,8 +738,14 @@ object AnimatedCanvasSearchService {
             if (tracks.isEmpty()) {
                 return SpotifyQueryOutcome(
                     candidates = emptyList(),
-                    tokenAccepted = true,
-                    note = ""
+                    tokenAccepted = !tokenAuthFailed,
+                    note = if (tokenAuthFailed) {
+                        "Spotify session expired — reconnect or paste sp_dc in Edit"
+                    } else if (isAnonymousSession) {
+                        "No Spotify track ID matched for this song yet"
+                    } else {
+                        "Could not match this track on Spotify"
+                    }
                 )
             }
 
@@ -718,12 +754,24 @@ object AnimatedCanvasSearchService {
             }
             queryTrackCache[cacheKey] = System.currentTimeMillis() to tracks
 
+            if (bearerToken.isBlank()) {
+                return SpotifyQueryOutcome(
+                    candidates = emptyList(),
+                    tokenAccepted = !isAnonymousSession,
+                    note = "Matched track on Spotify, but Spotify requires signing in (Edit → Spotify) to fetch Canvas video loops"
+                )
+            }
+
             val canvasOutcome = fetchSpotifyCanvases(tracks.map { it.uri }, bearerToken)
-            if (canvasOutcome.statusCode == 401) {
+            if (canvasOutcome.statusCode == 401 || (isAnonymousSession && canvasOutcome.statusCode == 403)) {
                 return SpotifyQueryOutcome(
                     candidates = emptyList(),
                     tokenAccepted = false,
-                    note = "Spotify session expired (401) — log in again"
+                    note = if (isAnonymousSession) {
+                        "Spotify's server blocked Canvas without an account — log in to Spotify in Edit to unlock Canvas loops"
+                    } else {
+                        "Spotify session expired (${canvasOutcome.statusCode}) — log in again"
+                    }
                 )
             }
             val canvasByTrackUri = canvasOutcome.entries
@@ -757,7 +805,7 @@ object AnimatedCanvasSearchService {
             val note = when {
                 canvasCount > 0 -> "Spotify Canvas unlocked ($canvasCount loop${if (canvasCount == 1) "" else "s"})"
                 canvasOutcome.statusCode == 403 -> "Spotify Canvas unavailable (403) — try reconnecting Spotify"
-                else -> "Spotify connected (no Canvas loop on track)"
+                else -> "Matched on Spotify, but artist uploaded no Canvas for this track"
             }
 
             SpotifyQueryOutcome(
@@ -769,7 +817,7 @@ object AnimatedCanvasSearchService {
             Log.w(TAG, "Spotify search failed", e)
             SpotifyQueryOutcome(
                 candidates = emptyList(),
-                tokenAccepted = true,
+                tokenAccepted = !isAnonymousSession,
                 note = ""
             )
         }
@@ -2019,7 +2067,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = if (isSonglink) 9000 else 6000
                 readTimeout = if (isSonglink) 11000 else 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.2.1 (Android)")
+                setRequestProperty("User-Agent", "EchoSnap/1.3.0 ( https://echosnap.app )")
                 setRequestProperty("Accept", "application/json")
                 if (!bearerToken.isNullOrBlank()) {
                     setRequestProperty("Authorization", "Bearer $bearerToken")
@@ -2055,7 +2103,7 @@ object AnimatedCanvasSearchService {
                 connectTimeout = 6000
                 readTimeout = 6000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.2.1 (Android)")
+                setRequestProperty("User-Agent", "EchoSnap/1.3.0 ( https://echosnap.app )")
             }
             try {
                 val code = conn.responseCode

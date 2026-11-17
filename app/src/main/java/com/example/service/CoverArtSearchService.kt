@@ -56,8 +56,21 @@ object CoverArtSearchService {
         }
     }
 
-    suspend fun fetchFullResolutionArt(candidate: OnlineCoverCandidate): Bitmap? = withContext(Dispatchers.IO) {
-        val full = downloadBitmap(candidate.fullResUrl, maxDimension = 1024)
+    suspend fun fetchFullResolutionArt(
+        candidate: OnlineCoverCandidate,
+        maxDimension: Int = 1024
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        val targetUrl = if (maxDimension >= 1500 && candidate.fullResUrl.contains("1000x1000bb")) {
+            candidate.fullResUrl.replace("1000x1000bb", "3000x3000bb")
+        } else {
+            candidate.fullResUrl
+        }
+        val full = downloadBitmap(targetUrl, maxDimension = maxDimension)
+            ?: if (targetUrl != candidate.fullResUrl) {
+                downloadBitmap(candidate.fullResUrl, maxDimension = maxDimension)
+            } else {
+                null
+            }
         if (full != null) {
             val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(full)
             if (trimmed !== full && !full.isRecycled) {

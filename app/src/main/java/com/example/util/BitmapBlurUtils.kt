@@ -7,8 +7,10 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.util.Size
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import kotlin.math.abs
@@ -262,6 +264,79 @@ object BitmapBlurUtils {
         }
     }
 
+    /**
+     * Resolves crisp high-resolution local/offline artwork from MediaStore content URIs or files.
+     * Compares full stream decode, Android Q+ ContentResolver.loadThumbnail(maxDimension), and
+     * ID3 embedded art so offline music players never display choppy 128px/256px thumbnails.
+     */
+    fun decodeHighResFromUri(context: Context, uri: Uri, maxDimension: Int = 1200): Bitmap? {
+        var best: Bitmap? = decodeSampledFromUri(context, uri, maxDimension = maxDimension)
+        var bestPixels = if (best != null && !best.isRecycled) best.width.toLong() * best.height.toLong() else 0L
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                val thumb = context.contentResolver.loadThumbnail(uri, Size(maxDimension, maxDimension), null)
+                val safeThumb = toSafeSoftwareBitmap(thumb, maxDimension = maxDimension)
+                if (safeThumb !== thumb && !thumb.isRecycled) {
+                    thumb.recycle()
+                }
+                if (safeThumb != null && !safeThumb.isRecycled) {
+                    val thumbPixels = safeThumb.width.toLong() * safeThumb.height.toLong()
+                    if (thumbPixels > bestPixels) {
+                        if (best != null && best !== safeThumb && !best.isRecycled) best.recycle()
+                        best = safeThumb
+                        bestPixels = thumbPixels
+                    } else if (safeThumb !== best) {
+                        safeThumb.recycle()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        val maxSide = maxOf(best?.width ?: 0, best?.height ?: 0)
+        if (maxSide < 720) {
+            val embedded = decodeEmbeddedAudioArtFromUri(context, uri, maxDimension = maxDimension)
+            if (embedded != null && !embedded.isRecycled) {
+                val embPixels = embedded.width.toLong() * embedded.height.toLong()
+                if (embPixels > bestPixels) {
+                    if (best != null && best !== embedded && !best.isRecycled) best.recycle()
+                    best = embedded
+                } else if (embedded !== best) {
+                    embedded.recycle()
+                }
+            }
+        }
+        return best
+    }
+
+    fun decodeEmbeddedAudioArtFromUri(context: Context, uri: Uri, maxDimension: Int = 1200): Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val picBytes = retriever.embeddedPicture ?: return null
+            if (picBytes.isEmpty()) return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(picBytes, 0, picBytes.size, bounds)
+            val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, maxDimension, maxDimension)
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val decoded = BitmapFactory.decodeByteArray(picBytes, 0, picBytes.size, opts) ?: return null
+            val safe = toSafeSoftwareBitmap(decoded, maxDimension = maxDimension)
+            if (safe !== decoded && !decoded.isRecycled) decoded.recycle()
+            safe
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun decodeSampledFromStream(stream: InputStream, maxDimension: Int = 1024): Bitmap? {
         return try {
             val buffer = ByteArrayOutputStream()
@@ -353,6 +428,25 @@ object BitmapBlurUtils {
         val effectiveRadius = ((clampedRadius / 40f) * maxEffective).roundToInt().coerceIn(1, maxEffective)
         stackBlurInPlace(mutable, effectiveRadius)
         return mutable
+    }
+
+    /**
+     * Pre-computes a 3-stop blur mip pyramid (12px, 24px, 40px) once per cover art change so
+     * devices below Android 12 can crossfade between cached blur textures at 60fps during slider drag.
+     */
+    fun computeBlurMipPyramid(source: Bitmap): Triple<Bitmap, Bitmap, Bitmap>? {
+        return try {
+            val safe = toSafeSoftwareBitmap(source, maxDimension = 720) ?: return null
+            val low = blurBitmap(safe, radiusPx = 12f, maxDimension = 340)
+            val mid = blurBitmap(safe, radiusPx = 24f, maxDimension = 260)
+            val high = blurBitmap(safe, radiusPx = 40f, maxDimension = 220)
+            if (safe !== source && safe !== low && safe !== mid && safe !== high && !safe.isRecycled) {
+                safe.recycle()
+            }
+            Triple(low, mid, high)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun stackBlurInPlace(bitmap: Bitmap, radius: Int) {

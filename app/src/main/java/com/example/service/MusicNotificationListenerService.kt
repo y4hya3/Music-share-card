@@ -399,7 +399,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 return true
             }
 
-            val safeSoftware = BitmapBlurUtils.toSafeSoftwareBitmap(bestRawArt, maxDimension = 1024)
+            val safeSoftware = BitmapBlurUtils.toSafeSoftwareBitmap(bestRawArt, maxDimension = 1400)
             val safeArt = if (safeSoftware != null) {
                 val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(safeSoftware)
                 if (safeSoftware !== bestRawArt && trimmed !== safeSoftware && !safeSoftware.isRecycled) {
@@ -428,20 +428,21 @@ class MusicNotificationListenerService : NotificationListenerService() {
             )
             MediaNotificationRepository.updateTrack(trackInfo)
 
-            // Fetch high-resolution art from METADATA_KEY_*_URI whenever embedded art is missing OR low-res (< 600px)
+            // Fetch high-resolution art from METADATA_KEY_*_URI whenever embedded art is missing OR below 900px
             val updatedRepoTrack = MediaNotificationRepository.currentTrack.value
             val repoHasHighResForSameTrack = !updatedRepoTrack.isSample &&
                 updatedRepoTrack.packageName == controller.packageName &&
                 updatedRepoTrack.title == title &&
                 updatedRepoTrack.artist == resolvedArtist &&
-                maxOf(updatedRepoTrack.albumArt?.width ?: 0, updatedRepoTrack.albumArt?.height ?: 0) >= 600
+                maxOf(updatedRepoTrack.albumArt?.width ?: 0, updatedRepoTrack.albumArt?.height ?: 0) >= 900
 
             val bestMaxDim = maxOf(safeArt?.width ?: 0, safeArt?.height ?: 0)
-            if (!repoHasHighResForSameTrack && (safeArt == null || bestMaxDim < 600)) {
+            if (!repoHasHighResForSameTrack && (safeArt == null || bestMaxDim < 900)) {
                 val uris = listOfNotNull(
                     metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
                     metadata.getString(MediaMetadata.METADATA_KEY_ART_URI),
-                    metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+                    metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI),
+                    metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
                 ).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
 
                 if (uris.isNotEmpty()) {
@@ -508,7 +509,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                             } else if (decoded !== bestUriBitmap) {
                                 decoded.recycle()
                             }
-                            if (maxOf(decoded.width, decoded.height) >= 600) {
+                            if (maxOf(decoded.width, decoded.height) >= 900) {
                                 break
                             }
                         }
@@ -537,7 +538,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                         connectTimeout = 6000
                         readTimeout = 6000
                         instanceFollowRedirects = false
-                        setRequestProperty("User-Agent", "BitChord/1.0 Android")
+                        setRequestProperty("User-Agent", "EchoSnap/1.3.0 Android")
                     }
                     try {
                         val code = conn.responseCode
@@ -549,7 +550,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                         }
                         if (code in 200..299) {
                             return conn.inputStream.use {
-                                BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = 1024)
+                                BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = 1400)
                             }
                         }
                         return null
@@ -558,9 +559,16 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     }
                 }
                 null
+            } else if (uriString.startsWith("spotify:image:", ignoreCase = true)) {
+                val imageHash = uriString.substringAfterLast(':').trim()
+                if (imageHash.isNotEmpty()) {
+                    fetchBitmapFromUriString(context, "https://i.scdn.co/image/$imageHash")
+                } else {
+                    null
+                }
             } else {
                 val uri = Uri.parse(uriString)
-                BitmapBlurUtils.decodeSampledFromUri(context, uri, maxDimension = 1024)
+                BitmapBlurUtils.decodeHighResFromUri(context, uri, maxDimension = 1400)
             }
         }
 
