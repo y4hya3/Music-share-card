@@ -777,9 +777,12 @@ object MediaNotificationRepository {
         lyricsSearchJob?.cancel()
         lyricsSearchJob = repositoryScope.launch {
             _isSearchingLyrics.value = true
-            _lyricsSearchStatus.value = "Searching 16 lyrics providers..."
+            _lyricsSearchStatus.value = "Searching Genius & ${LyricsSearchService.PROVIDERS.size - 1} lyrics providers..."
             try {
-                val outcome = if (rawOverride.isNotEmpty() && !rawOverride.equals("$cleanTitle $cleanArtist".trim(), ignoreCase = true)) {
+                val outcome = if (rawOverride.isNotEmpty() &&
+                    !rawOverride.equals("$cleanTitle $cleanArtist".trim(), ignoreCase = true) &&
+                    !rawOverride.equals(cleanTitle, ignoreCase = true)
+                ) {
                     LyricsSearchService.searchAcrossProviders(
                         title = rawOverride,
                         artist = ""

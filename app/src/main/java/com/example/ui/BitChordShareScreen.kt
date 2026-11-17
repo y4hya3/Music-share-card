@@ -235,6 +235,9 @@ fun BitChordShareScreen(
         }
     }
 
+    fun isGifExportExpected(style: CardStyleConfig): Boolean =
+        CardShareManager.isGifExportActive(style)
+
     fun isVideoExportExpected(style: CardStyleConfig, canvasUrl: String?): Boolean {
         if (style.useTransparentBackground) return false
         if (!canvasUrl.isNullOrBlank()) return true
@@ -249,6 +252,7 @@ fun BitChordShareScreen(
             val latestStyle = MediaNotificationRepository.styleConfig.value
             val latestCanvas = MediaNotificationRepository.activeCanvasUrl.value
             actionStatusText = when {
+                isGifExportExpected(latestStyle) -> "Exporting transparent 9:16 GIF..."
                 latestStyle.useTransparentBackground -> "Saving transparent 9:16 PNG..."
                 isVideoExportExpected(latestStyle, latestCanvas) -> "Exporting 9:16 MP4 video..."
                 else -> "Saving to Pictures/EchoSnap..."
@@ -668,7 +672,11 @@ fun BitChordShareScreen(
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
                                     val c = MediaNotificationRepository.activeCanvasUrl.value
-                                    val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for WhatsApp..." else "Preparing for WhatsApp..."
+                                    val msg = when {
+                                        isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for WhatsApp..."
+                                        isVideoExportExpected(s, c) -> "Exporting 9:16 video for WhatsApp..."
+                                        else -> "Preparing for WhatsApp..."
+                                    }
                                     runShareAction(msg) {
                                         CardShareManager.shareToWhatsApp(context, t, p, s, c)
                                     }
@@ -678,7 +686,11 @@ fun BitChordShareScreen(
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
                                     val c = MediaNotificationRepository.activeCanvasUrl.value
-                                    val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Instagram Story..." else "Preparing Instagram Story..."
+                                    val msg = when {
+                                        isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Instagram..."
+                                        isVideoExportExpected(s, c) -> "Exporting 9:16 video for Instagram Story..."
+                                        else -> "Preparing Instagram Story..."
+                                    }
                                     runShareAction(msg) {
                                         CardShareManager.shareToInstagramStory(context, t, p, s, c)
                                     }
@@ -688,7 +700,11 @@ fun BitChordShareScreen(
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
                                     val c = MediaNotificationRepository.activeCanvasUrl.value
-                                    val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Snapchat Story..." else "Preparing Snapchat Story..."
+                                    val msg = when {
+                                        isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Snapchat..."
+                                        isVideoExportExpected(s, c) -> "Exporting 9:16 video for Snapchat Story..."
+                                        else -> "Preparing Snapchat Story..."
+                                    }
                                     runShareAction(msg) {
                                         CardShareManager.shareToSnapchatStory(context, t, p, s, c)
                                     }
@@ -698,7 +714,11 @@ fun BitChordShareScreen(
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
                                     val c = MediaNotificationRepository.activeCanvasUrl.value
-                                    val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Discord..." else "Preparing for Discord..."
+                                    val msg = when {
+                                        isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Discord..."
+                                        isVideoExportExpected(s, c) -> "Exporting 9:16 video for Discord..."
+                                        else -> "Preparing for Discord..."
+                                    }
                                     runShareAction(msg) {
                                         CardShareManager.shareToDiscord(context, t, p, s, c)
                                     }
@@ -708,7 +728,11 @@ fun BitChordShareScreen(
                                     val p = MediaNotificationRepository.extractedPalette.value
                                     val s = MediaNotificationRepository.styleConfig.value
                                     val c = MediaNotificationRepository.activeCanvasUrl.value
-                                    val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 MP4 video..." else "Opening Share Sheet..."
+                                    val msg = when {
+                                        isGifExportExpected(s) -> "Exporting transparent 9:16 GIF..."
+                                        isVideoExportExpected(s, c) -> "Exporting 9:16 MP4 video..."
+                                        else -> "Opening Share Sheet..."
+                                    }
                                     runShareAction(msg) {
                                         CardShareManager.shareStoryCard(context, t, p, s, c)
                                     }
@@ -850,7 +874,11 @@ fun BitChordShareScreen(
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
                                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for WhatsApp..." else "Preparing for WhatsApp..."
+                                val msg = when {
+                                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for WhatsApp..."
+                                    isVideoExportExpected(s, c) -> "Exporting 9:16 video for WhatsApp..."
+                                    else -> "Preparing for WhatsApp..."
+                                }
                                 runShareAction(msg) {
                                     CardShareManager.shareToWhatsApp(context, t, p, s, c)
                                 }
@@ -860,7 +888,11 @@ fun BitChordShareScreen(
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
                                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Instagram Story..." else "Preparing Instagram Story..."
+                                val msg = when {
+                                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Instagram..."
+                                    isVideoExportExpected(s, c) -> "Exporting 9:16 video for Instagram Story..."
+                                    else -> "Preparing Instagram Story..."
+                                }
                                 runShareAction(msg) {
                                     CardShareManager.shareToInstagramStory(context, t, p, s, c)
                                 }
@@ -870,7 +902,11 @@ fun BitChordShareScreen(
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
                                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Snapchat Story..." else "Preparing Snapchat Story..."
+                                val msg = when {
+                                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Snapchat..."
+                                    isVideoExportExpected(s, c) -> "Exporting 9:16 video for Snapchat Story..."
+                                    else -> "Preparing Snapchat Story..."
+                                }
                                 runShareAction(msg) {
                                     CardShareManager.shareToSnapchatStory(context, t, p, s, c)
                                 }
@@ -880,7 +916,11 @@ fun BitChordShareScreen(
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
                                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 video for Discord..." else "Preparing for Discord..."
+                                val msg = when {
+                                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF for Discord..."
+                                    isVideoExportExpected(s, c) -> "Exporting 9:16 video for Discord..."
+                                    else -> "Preparing for Discord..."
+                                }
                                 runShareAction(msg) {
                                     CardShareManager.shareToDiscord(context, t, p, s, c)
                                 }
@@ -890,7 +930,11 @@ fun BitChordShareScreen(
                                 val p = MediaNotificationRepository.extractedPalette.value
                                 val s = MediaNotificationRepository.styleConfig.value
                                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 MP4 video..." else "Opening Share Sheet..."
+                                val msg = when {
+                                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF..."
+                                    isVideoExportExpected(s, c) -> "Exporting 9:16 MP4 video..."
+                                    else -> "Opening Share Sheet..."
+                                }
                                 runShareAction(msg) {
                                     CardShareManager.shareStoryCard(context, t, p, s, c)
                                 }
@@ -919,7 +963,7 @@ fun BitChordShareScreen(
                 showEditSheet = false
             },
             onStyleChange = { newConfig ->
-                MediaNotificationRepository.updateStyleConfig(saveImmediately = false) { newConfig }
+                MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { newConfig }
             },
             onLiveBlurPreview = { dragBlurRadius = it },
             onLiveCardScalePreview = { dragCardScale = it },
@@ -939,6 +983,7 @@ fun BitChordShareScreen(
         SettingsDialog(
             styleConfig = effectiveStyleConfig,
             currentTrack = currentTrack,
+            palette = palette,
             isAccessGranted = isAccessGranted,
             onStyleChange = { updated ->
                 MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { updated }
@@ -967,7 +1012,11 @@ fun BitChordShareScreen(
                 val p = MediaNotificationRepository.extractedPalette.value
                 val s = MediaNotificationRepository.styleConfig.value
                 val c = MediaNotificationRepository.activeCanvasUrl.value
-                val msg = if (isVideoExportExpected(s, c)) "Exporting 9:16 MP4 video..." else "Opening Share Sheet..."
+                val msg = when {
+                    isGifExportExpected(s) -> "Exporting transparent 9:16 GIF..."
+                    isVideoExportExpected(s, c) -> "Exporting 9:16 MP4 video..."
+                    else -> "Opening Share Sheet..."
+                }
                 runShareAction(msg) {
                     CardShareManager.shareStoryCard(context, t, p, s, c)
                 }
@@ -990,8 +1039,7 @@ private fun CleanExportPreviewDialog(
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showHud by remember { mutableStateOf(true) }
     val hasAnimatedCanvas = !activeCanvasVideoUrl.isNullOrBlank() && !styleConfig.useTransparentBackground
-    val hasAnimatedWaveform = !styleConfig.useTransparentBackground &&
-        styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
+    val hasAnimatedWaveform = styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
         styleConfig.enableWaveform
 
     LaunchedEffect(track, palette, styleConfig, activeCanvasVideoUrl) {
@@ -1164,11 +1212,16 @@ private fun CleanExportPreviewDialog(
                     ) {
                         Text(
                             text = when {
-                                styleConfig.useTransparentBackground -> "Transparent 9:16 PNG • Tap to hide UI"
-                                hasAnimatedCanvas -> "Canvas Video Preview (9:16) • Tap to hide UI"
-                                styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD && styleConfig.enableWaveform ->
+                                styleConfig.useTransparentBackground && hasAnimatedWaveform ->
+                                    "Transparent 9:16 GIF Sticker • Tap to hide UI"
+                                styleConfig.useTransparentBackground ->
+                                    "Transparent 9:16 PNG • Tap to hide UI"
+                                hasAnimatedCanvas ->
+                                    "Canvas Video Preview (9:16) • Tap to hide UI"
+                                hasAnimatedWaveform ->
                                     "8s Waveform Video Preview (9:16) • Tap to hide UI"
-                                else -> "Export Preview (9:16) • Tap image to hide UI"
+                                else ->
+                                    "Export Preview (9:16) • Tap image to hide UI"
                             },
                             color = Color.White,
                             fontSize = 12.sp,

@@ -32,7 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
@@ -637,12 +637,17 @@ fun DynamicIslandWaveformBars(
     }
 
     LaunchedEffect(track.title, track.artist, track.isPlaying, beatSyncEnabled, speedMultiplier, animateAlways) {
-        val startMs = System.nanoTime() / 1_000_000L
+        val startNanos = System.nanoTime()
+        var lastEnsureNanos = 0L
         while (true) {
-            val tSec = withFrameMillis { frameMs ->
-                ((frameMs - startMs).coerceAtLeast(0L)) / 1000f
+            val frameNanos = withFrameNanos { it }
+            val tSec = ((frameNanos - startNanos).coerceAtLeast(0L)) / 1_000_000_000f
+            if (beatSyncEnabled && frameNanos - lastEnsureNanos >= 800_000_000L) {
+                lastEnsureNanos = frameNanos
+                sampler.ensureActive(context)
             }
             val live = if (beatSyncEnabled) sampler.currentBands() else null
+            val liveSignal = beatSyncEnabled && sampler.hasLiveSignal()
             levels = AudioBeatMonitor.computeBarLevels(
                 trackTitle = track.title,
                 trackArtist = track.artist,
@@ -651,7 +656,8 @@ fun DynamicIslandWaveformBars(
                 liveAudioBands = live,
                 speedMultiplier = speedMultiplier,
                 beatSyncMode = beatSyncEnabled,
-                animateWhenPaused = animateAlways
+                animateWhenPaused = animateAlways,
+                hasLiveSignal = liveSignal
             )
             if (!animateAlways && !track.isPlaying && live == null) {
                 break

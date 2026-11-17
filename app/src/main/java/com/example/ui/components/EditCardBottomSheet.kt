@@ -80,6 +80,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -1428,6 +1429,8 @@ fun EditCardBottomSheet(
 
                     if (styleConfig.useTransparentBackground) {
                         Spacer(modifier = Modifier.height(8.dp))
+                        val gifModeActive = styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
+                            styleConfig.enableWaveform
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = Color(0x331DB954),
@@ -1435,7 +1438,11 @@ fun EditCardBottomSheet(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "Transparent Alpha PNG active: Saves/exports your card with 100% transparent background (works with all 4 card layouts for video/photo editors).",
+                                text = if (gifModeActive) {
+                                    "Transparent Animated GIF active: Saves/shares an infinitely looping 9:16 transparent GIF sticker with live 4-bar waveform!"
+                                } else {
+                                    "Transparent Alpha PNG active: Saves/exports your card with 100% transparent background (works with all 4 card layouts for video/photo editors)."
+                                },
                                 color = Color(0xFFC8F7D6),
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1785,7 +1792,11 @@ fun EditCardBottomSheet(
                                                 fontWeight = FontWeight.SemiBold
                                             )
                                             Text(
-                                                text = "Animated 4 bars on glass card • Exports as 8s MP4 loop video over photo/gradient",
+                                                text = if (styleConfig.useTransparentBackground) {
+                                                    "Animated 4 bars on glass card • Saves as transparent looping GIF sticker"
+                                                } else {
+                                                    "Animated 4 bars on glass card • Exports as 8s MP4 loop video over photo/gradient"
+                                                },
                                                 color = Color.White.copy(alpha = 0.60f),
                                                 fontSize = 11.sp
                                             )
@@ -1803,7 +1814,7 @@ fun EditCardBottomSheet(
                                         )
                                     }
 
-                                    if (styleConfig.enableWaveform) {
+                                    if (styleConfig.enableWaveform || styleConfig.waveformBeatSync) {
                                         Spacer(modifier = Modifier.height(12.dp))
                                         Text(
                                             text = "Waveform Bar Color",
@@ -1819,17 +1830,21 @@ fun EditCardBottomSheet(
                                             "Red" to Color(0xFFFF2B44),
                                             "Cyan" to Color(0xFF38E8FF),
                                             "Amber" to Color(0xFFFFB830),
+                                            "Violet" to Color(0xFFA855F7),
+                                            "Pink" to Color(0xFFFF4D9E),
                                             "Accent" to palette.vibrantColor
                                         )
-                                        Row(
+                                        FlowRow(
                                             modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
                                             swatchOptions.forEach { (label, color) ->
-                                                val isPicked = styleConfig.waveformColor == color
+                                                val isPicked = styleConfig.waveformColor.toArgb() == color.toArgb()
+                                                val isLightSwatch = color == Color.White || color == Color(0xFF38E8FF) || color == Color(0xFFFFB830)
                                                 Box(
                                                     modifier = Modifier
-                                                        .size(34.dp)
+                                                        .size(42.dp)
                                                         .clip(CircleShape)
                                                         .background(color)
                                                         .border(
@@ -1838,7 +1853,12 @@ fun EditCardBottomSheet(
                                                             shape = CircleShape
                                                         )
                                                         .clickable {
-                                                            onStyleChange(styleConfig.copy(waveformColor = color))
+                                                            onStyleChange(
+                                                                styleConfig.copy(
+                                                                    enableWaveform = true,
+                                                                    waveformColor = color
+                                                                )
+                                                            )
                                                         }
                                                         .testTag("waveform_color_$label"),
                                                     contentAlignment = Alignment.Center
@@ -1847,8 +1867,8 @@ fun EditCardBottomSheet(
                                                         Icon(
                                                             imageVector = Icons.Default.Check,
                                                             contentDescription = label,
-                                                            tint = if (color == Color.White || color == Color(0xFF38E8FF) || color == Color(0xFFFFB830)) Color.Black else Color.White,
-                                                            modifier = Modifier.size(16.dp)
+                                                            tint = if (isLightSwatch) Color.Black else Color.White,
+                                                            modifier = Modifier.size(18.dp)
                                                         )
                                                     }
                                                 }
@@ -1869,7 +1889,7 @@ fun EditCardBottomSheet(
                                                     fontWeight = FontWeight.SemiBold
                                                 )
                                                 Text(
-                                                    text = "Reacts to playing music beats, or switch off for Default Wave Speed",
+                                                    text = "Zero-latency response to playing beats, or switch off for Default Speed",
                                                     color = Color.White.copy(alpha = 0.58f),
                                                     fontSize = 10.5.sp
                                                 )
@@ -1889,6 +1909,9 @@ fun EditCardBottomSheet(
 
                                         if (!styleConfig.waveformBeatSync) {
                                             Spacer(modifier = Modifier.height(10.dp))
+                                            var localEditWaveSpeed by remember(styleConfig.waveformSpeedMultiplier) {
+                                                mutableFloatStateOf(styleConfig.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f))
+                                            }
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1901,17 +1924,19 @@ fun EditCardBottomSheet(
                                                     fontWeight = FontWeight.Medium
                                                 )
                                                 Text(
-                                                    text = String.format(Locale.US, "%.1fx", styleConfig.waveformSpeedMultiplier),
+                                                    text = String.format(Locale.US, "%.1fx", localEditWaveSpeed),
                                                     color = Color(0xFFFF8A96),
                                                     fontSize = 12.sp,
                                                     fontWeight = FontWeight.Bold
                                                 )
                                             }
                                             Slider(
-                                                value = styleConfig.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f),
+                                                value = localEditWaveSpeed,
                                                 onValueChange = { next ->
-                                                    val snapped = ((next * 10f).toInt() / 10f).coerceIn(0.4f, 2.5f)
-                                                    onStyleChange(styleConfig.copy(waveformSpeedMultiplier = snapped))
+                                                    localEditWaveSpeed = ((next * 10f).toInt() / 10f).coerceIn(0.4f, 2.5f)
+                                                },
+                                                onValueChangeFinished = {
+                                                    onStyleChange(styleConfig.copy(waveformSpeedMultiplier = localEditWaveSpeed))
                                                 },
                                                 valueRange = 0.4f..2.5f,
                                                 colors = SliderDefaults.colors(
@@ -2067,7 +2092,7 @@ fun EditCardBottomSheet(
                                         color = Color.White
                                     )
                                     Text(
-                                        text = "LRCLIB, Genius, Lyrics.ovh, NetEase, Musixmatch, MusiXmatch-Alt, Genius-Web, MegaLyrics & more",
+                                        text = "Genius (Primary), LRCLIB Synced, Lyrics.ovh, Musixmatch, NetEase, Kugou & 10+ more",
                                         fontSize = 10.5.sp,
                                         color = Color.White.copy(alpha = 0.58f),
                                         modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -2082,7 +2107,7 @@ fun EditCardBottomSheet(
                                             value = lyricsSearchQuery,
                                             onValueChange = { lyricsSearchQuery = it },
                                             singleLine = true,
-                                            placeholder = { Text("Song & artist for lyrics", fontSize = 12.sp) },
+                                            placeholder = { Text("Song - Artist or Title", fontSize = 12.sp) },
                                             colors = OutlinedTextFieldDefaults.colors(
                                                 focusedBorderColor = Color(0xFFFF2B44),
                                                 unfocusedBorderColor = GlassBorderColor,
@@ -2172,11 +2197,9 @@ fun EditCardBottomSheet(
                                     val manualLines = remember(styleConfig.customLyrics) {
                                         styleConfig.customLyrics.lines().map { it.trim() }.filter { it.isNotEmpty() }
                                     }
+                                    val activeCand = lyricsCandidates.getOrNull(selectedProviderIndex)
                                     val pickerLines: List<String> = when {
-                                        lyricsCandidates.isNotEmpty() -> {
-                                            val activeCand = lyricsCandidates.getOrNull(selectedProviderIndex)
-                                            activeCand?.lines ?: emptyList()
-                                        }
+                                        lyricsCandidates.isNotEmpty() -> activeCand?.lines ?: emptyList()
                                         styleConfig.lyricsWordSelectionMode && manualLines.isNotEmpty() -> manualLines
                                         else -> emptyList()
                                     }
@@ -2198,6 +2221,50 @@ fun EditCardBottomSheet(
                                                         fontSize = 11.sp,
                                                         fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        activeCand?.let { cand ->
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = Color.White.copy(alpha = 0.08f),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("lyrics_active_match_badge")
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = buildString {
+                                                            append(cand.title)
+                                                            if (cand.artist.isNotBlank()) {
+                                                                append(" — ")
+                                                                append(cand.artist)
+                                                            }
+                                                        },
+                                                        color = Color.White.copy(alpha = 0.90f),
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        maxLines = 1,
+                                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    val tagLabel = when {
+                                                        cand.provider == "Genius" -> "GENIUS"
+                                                        cand.isSynced -> "SYNCED"
+                                                        else -> "VERIFIED"
+                                                    }
+                                                    Text(
+                                                        text = tagLabel,
+                                                        color = if (cand.provider == "Genius") Color(0xFFFFEE58) else Color(0xFF4ADE80),
+                                                        fontSize = 9.5.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(start = 8.dp)
                                                     )
                                                 }
                                             }

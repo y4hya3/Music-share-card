@@ -17,10 +17,14 @@ import com.example.repository.CardStylePreferences
 import com.example.repository.SavedMediaLibrary
 import com.example.service.AnimatedCanvasCandidate
 import com.example.service.AnimatedCanvasSearchService
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.toArgb
 import com.example.service.LyricsSearchService
+import com.example.util.AnimatedGifExporter
 import com.example.util.AudioBeatMonitor
 import com.example.util.BitmapBlurUtils
 import com.example.util.CardShareManager
+import com.example.util.WaveformExportSpec
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -543,5 +547,284 @@ class ExampleRobolectricTest {
     bmp20.recycle()
     bmp40.recycle()
     art.recycle()
+  }
+
+  @Test
+  fun `audio beat tracker reacts with zero attack latency to bass kick and treble and decays smoothly`() {
+    val tracker = AudioBeatMonitor.BeatEnvelopeTracker()
+    val fftBass = ByteArray(256)
+    // Inject strong ~90Hz impulse in bin 1
+    fftBass[2] = 115
+    fftBass[3] = 40
+
+    val t0 = 1_000_000_000L
+    val levelsAfterFirstCallback = tracker.ingestFft(fftBass, samplingRateMilliHz = 48_000_000, nowNanos = t0)
+    assertTrue(
+      "Expected instant 0ms attack on bass bar (got ${levelsAfterFirstCallback[0]})",
+      levelsAfterFirstCallback[0] >= 0.70f
+    )
+    assertTrue(
+      "Expected bass bar higher than treble bar on low-frequency kick",
+      levelsAfterFirstCallback[0] > levelsAfterFirstCallback[3]
+    )
+    assertTrue(tracker.hasRecentSignal(t0 + 20_000_000L))
+
+    // Decay check at +120ms without new input
+    val decayed = tracker.snapshotAt(t0 + 120_000_000L)
+    assertNotNull(decayed)
+    assertTrue(
+      "Expected smooth decay after 120ms (${decayed!![0]} < ${levelsAfterFirstCallback[0]})",
+      decayed[0] < levelsAfterFirstCallback[0]
+    )
+
+    // PCM transient waveform ingest (unsigned centered around 128)
+    val pcmBurst = ByteArray(256) { idx ->
+      if (idx % 2 == 0) 245.toByte() else 12.toByte()
+    }
+    val afterBurst = tracker.ingestWaveform(pcmBurst, nowNanos = t0 + 140_000_000L)
+    assertTrue(
+      "Expected PCM kick transient to immediately jump bar 0 (${afterBurst[0]})",
+      afterBurst[0] >= 0.75f
+    )
+
+    // Quiet pause dip between beats still follows live bands when hasLiveSignal == true
+    val liveQuietBands = floatArrayOf(0.19f, 0.19f, 0.19f, 0.19f)
+    val computed = AudioBeatMonitor.computeBarLevels(
+      trackTitle = "Test Song",
+      trackArtist = "Tester",
+      isPlaying = true,
+      timeSec = 1.0f,
+      liveAudioBands = liveQuietBands,
+      beatSyncMode = true,
+      hasLiveSignal = true
+    )
+    assertEquals(0.19f, computed[0], 0.001f)
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `transparent background with waveform enabled routes to looping transparent GIF89a export`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    assertTrue(
+      CardShareManager.isGifExportActive(
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = true,
+          enableWaveform = true
+        )
+      )
+    )
+    assertFalse(
+      CardShareManager.isGifExportActive(
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = true,
+          enableWaveform = false
+        )
+      )
+    )
+    assertFalse(
+      CardShareManager.isGifExportActive(
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = false,
+          enableWaveform = true
+        )
+      )
+    )
+
+    val art = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+    Canvas(art).drawColor(AndroidColor.rgb(45, 200, 120))
+    val track = MediaTrackInfo(
+      title = "Sticker Beat",
+      artist = "EchoSnap",
+      album = "Single",
+      appName = "YouTube Music",
+      packageName = "com.google.android.apps.youtube.music",
+      albumArt = art,
+      isPlaying = true,
+      isSample = false
+    )
+    val style = CardStyleConfig(
+      cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+      useTransparentBackground = true,
+      enableWaveform = true,
+      waveformBeatSync = true,
+      waveformColor = Color(0xFF38E8FF)
+    )
+
+    val overlay = runBlocking {
+      CardShareManager.generateTransparentCardOverlayBitmap(
+        context = context,
+        track = track,
+        palette = CardPalette.Default,
+        styleConfig = style,
+        targetWidth = AnimatedGifExporter.GIF_WIDTH,
+        targetHeight = AnimatedGifExporter.GIF_HEIGHT,
+        includeWaveform = false
+      )
+    }
+    val wfRect = CardShareManager.computeFloatingGlassWaveformRect(
+      targetWidth = AnimatedGifExporter.GIF_WIDTH,
+      targetHeight = AnimatedGifExporter.GIF_HEIGHT,
+      track = track,
+      styleConfig = style
+    )
+    val spec = WaveformExportSpec(
+      rectIn720x1280 = wfRect,
+      waveformColorArgb = Color(0xFF38E8FF).toArgb(),
+      cardOpacity = style.cardOpacity,
+      trackTitle = track.title,
+      trackArtist = track.artist,
+      isPlaying = true,
+      speedMultiplier = style.waveformSpeedMultiplier,
+      beatSyncEnabled = style.waveformBeatSync
+    )
+
+    val gifBytes = AnimatedGifExporter.encodeTransparentWaveformGifToBytes(
+      overlayWithoutWaveform = overlay,
+      waveformSpec = spec,
+      wfRectInOutput = wfRect,
+      durationSec = 1.0f,
+      fps = 10
+    )
+    val ascii = String(gifBytes.take(512).toByteArray(), Charsets.ISO_8859_1)
+    assertTrue("Expected GIF89a signature", ascii.startsWith("GIF89a"))
+    assertTrue("Expected NETSCAPE2.0 loop extension", ascii.contains("NETSCAPE2.0") || String(gifBytes, Charsets.ISO_8859_1).contains("NETSCAPE2.0"))
+    assertEquals("Expected GIF trailer 0x3B", 0x3B.toByte(), gifBytes.last())
+
+    // Verify GCE has disposal=2 and transparentColorFlag=1 (0x21 0xF9 0x04 0x09)
+    val gceFound = (0 until gifBytes.size - 4).any { i ->
+      gifBytes[i] == 0x21.toByte() &&
+        gifBytes[i + 1] == 0xF9.toByte() &&
+        gifBytes[i + 2] == 0x04.toByte() &&
+        gifBytes[i + 3] == 0x09.toByte()
+    }
+    assertTrue("Expected Graphic Control Extension with transparent flag & restore disposal", gceFound)
+
+    val decodedFirstFrame = BitmapFactory.decodeByteArray(gifBytes, 0, gifBytes.size)
+    assertNotNull("Expected valid decodable GIF bytes", decodedFirstFrame)
+    assertEquals(AnimatedGifExporter.GIF_WIDTH, decodedFirstFrame!!.width)
+    assertEquals(AnimatedGifExporter.GIF_HEIGHT, decodedFirstFrame.height)
+    assertEquals(
+      "Expected corner pixel in decoded GIF to remain transparent",
+      AndroidColor.TRANSPARENT,
+      decodedFirstFrame.getPixel(5, 5)
+    )
+
+    decodedFirstFrame.recycle()
+    overlay.recycle()
+    art.recycle()
+  }
+
+  @Test
+  fun `waveform color changes persist cleanly while beat sync is active`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val cfg = CardStyleConfig(
+      cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+      enableWaveform = true,
+      waveformBeatSync = true,
+      waveformColor = Color(0xFFA855F7)
+    )
+    CardStylePreferences.save(context, cfg)
+    val loaded = CardStylePreferences.load(context)
+    assertTrue(loaded.waveformBeatSync)
+    assertTrue(loaded.enableWaveform)
+    assertEquals(Color(0xFFA855F7).toArgb(), loaded.waveformColor.toArgb())
+  }
+
+  @Test
+  fun `lyrics engine lists Genius first among 16+ providers and parses smart queries`() {
+    assertTrue(LyricsSearchService.PROVIDERS.size >= 16)
+    assertEquals("Genius", LyricsSearchService.PROVIDERS.first())
+
+    val dashQuery = LyricsSearchService.parseSmartQuery("The Weeknd - Blinding Lights", "")
+    assertEquals("Blinding Lights", dashQuery.title)
+    assertEquals("The Weeknd", dashQuery.artist)
+
+    val byQuery = LyricsSearchService.parseSmartQuery("Blinding Lights by The Weeknd", "YouTube Music")
+    assertEquals("Blinding Lights", byQuery.title)
+    assertEquals("The Weeknd", byQuery.artist)
+
+    val fileQuery = LyricsSearchService.parseSmartQuery("01 - Starboy (Official Music Video).mp3", "<unknown>")
+    assertEquals("Starboy", fileQuery.title)
+    assertEquals("", fileQuery.artist)
+  }
+
+  @Test
+  fun `lyrics match verification rejects wrong artist and karaoke covers`() {
+    val exact = LyricsSearchService.evaluateLyricsMatch(
+      candidateTitle = "Creep",
+      candidateArtist = "Radiohead",
+      targetTitle = "Creep",
+      targetArtist = "Radiohead"
+    )
+    assertTrue("Expected exact Radiohead match to verify", LyricsSearchService.isVerifiedLyricsMatch(exact, hasTargetArtist = true))
+
+    val wrongArtistSameTitle = LyricsSearchService.evaluateLyricsMatch(
+      candidateTitle = "Creep",
+      candidateArtist = "Stone Temple Pilots",
+      targetTitle = "Creep",
+      targetArtist = "Radiohead"
+    )
+    assertFalse("Expected wrong artist with identical title to be rejected", LyricsSearchService.isVerifiedLyricsMatch(wrongArtistSameTitle, hasTargetArtist = true))
+
+    val karaokeMismatch = LyricsSearchService.evaluateLyricsMatch(
+      candidateTitle = "Creep (Karaoke Version)",
+      candidateArtist = "Radiohead Tribute Band",
+      targetTitle = "Creep",
+      targetArtist = "Radiohead"
+    )
+    assertFalse("Expected karaoke/tribute cover to be rejected", LyricsSearchService.isVerifiedLyricsMatch(karaokeMismatch, hasTargetArtist = true))
+  }
+
+  @Test
+  fun `genius extractor handles nested divs contributor headers and preloaded json fallback`() {
+    val modernGeniusHtml = """
+      <html><body>
+        <div data-lyrics-container="true" class="Lyrics__Container-sc-1">
+          <div data-exclude-from-selection="true">
+            <div><span>12 Contributors</span><span>Translations</span></div>
+            <div><button>Share</button></div>
+          </div>
+          [Verse 1]<br/>
+          <div><span>I said, ooh, I'm blinded by the lights</span></div>
+          No, I can't sleep until I feel your touch<br/>
+        </div>
+        <div data-lyrics-container="true" class="Lyrics__Container-sc-2">
+          [Chorus]<br/>
+          I said, ooh, I'm drowning in the night<br/>
+          Oh, when I'm like this, you're the one I trust
+          <div>You might also like</div>
+          <div>Embed</div>
+        </div>
+      </body></html>
+    """.trimIndent()
+
+    val extracted = LyricsSearchService.extractGeniusLyricsFromHtml(modernGeniusHtml)
+    assertEquals(
+      listOf(
+        "I said, ooh, I'm blinded by the lights",
+        "No, I can't sleep until I feel your touch",
+        "I said, ooh, I'm drowning in the night",
+        "Oh, when I'm like this, you're the one I trust"
+      ),
+      extracted
+    )
+
+    val preloadedFallbackHtml = """
+      <script>
+        window.__PRELOADED_STATE__ = {"songPage":{"lyricsData":{"body":{"html":"<p>First line from state<br>Second line from state<br>Third line from state</p>"}}}};
+      </script>
+    """.trimIndent()
+    val fallbackLines = LyricsSearchService.extractGeniusLyricsFromHtml(preloadedFallbackHtml)
+    assertEquals(
+      listOf(
+        "First line from state",
+        "Second line from state",
+        "Third line from state"
+      ),
+      fallbackLines
+    )
   }
 }

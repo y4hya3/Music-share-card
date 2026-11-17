@@ -21,6 +21,10 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/gif" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
             <data android:mimeType="video/mp4" />
         </intent>
     </queries>

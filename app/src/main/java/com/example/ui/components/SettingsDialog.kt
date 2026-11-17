@@ -21,7 +21,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,6 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.graphics.toArgb
+import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.service.MusicNotificationListenerService
@@ -69,6 +73,7 @@ private val SettingsGlassBorder = Color(0x28FFFFFF)
 fun SettingsDialog(
     styleConfig: CardStyleConfig,
     currentTrack: MediaTrackInfo,
+    palette: CardPalette = CardPalette.Default,
     isAccessGranted: Boolean,
     onStyleChange: (CardStyleConfig) -> Unit,
     onRequestAudioBeatSync: (Boolean) -> Unit,
@@ -314,14 +319,73 @@ fun SettingsDialog(
                             ) {
                                 Text(
                                     text = if (hasMicPerm) {
-                                        "Live audio FFT beat sync is active — bars pulse to the music you are playing, and 8s exports sync to track beat transients."
+                                        "Zero-latency Music Beats active — 4-band spectrum + PCM kick detection reacts instantly to playing audio."
                                     } else {
-                                        "Tempo Beat Sync active — grant microphone permission for real-time audio FFT spectrum capture."
+                                        "Tempo Beat Sync active — grant microphone permission for real-time audio spectrum capture."
                                     },
                                     color = Color(0xFFC5F7D5),
                                     fontSize = 11.sp,
                                     modifier = Modifier.padding(10.dp)
                                 )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Waveform Bar Color",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        val swatchOptions = listOf(
+                            "White" to Color.White,
+                            "Green" to Color(0xFF1DB954),
+                            "Red" to Color(0xFFFF2B44),
+                            "Cyan" to Color(0xFF38E8FF),
+                            "Amber" to Color(0xFFFFB830),
+                            "Violet" to Color(0xFFA855F7),
+                            "Pink" to Color(0xFFFF4D9E),
+                            "Accent" to palette.vibrantColor
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            swatchOptions.forEach { (label, color) ->
+                                val isPicked = styleConfig.waveformColor.toArgb() == color.toArgb()
+                                val isLightSwatch = color == Color.White || color == Color(0xFF38E8FF) || color == Color(0xFFFFB830)
+                                Box(
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(CircleShape)
+                                        .background(color)
+                                        .border(
+                                            width = if (isPicked) 2.5.dp else 1.dp,
+                                            color = if (isPicked) Color.White else SettingsGlassBorder,
+                                            shape = CircleShape
+                                        )
+                                        .clickable {
+                                            onStyleChange(
+                                                styleConfig.copy(
+                                                    enableWaveform = true,
+                                                    waveformColor = color
+                                                )
+                                            )
+                                        }
+                                        .testTag("settings_waveform_color_$label"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (isPicked) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = label,
+                                            tint = if (isLightSwatch) Color.Black else Color.White,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

@@ -1293,6 +1293,12 @@ object CardShareManager {
         )
     }
 
+    fun isGifExportActive(styleConfig: CardStyleConfig): Boolean {
+        return styleConfig.useTransparentBackground &&
+            styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
+            styleConfig.enableWaveform
+    }
+
     suspend fun saveCardToGallery(
         context: Context,
         track: MediaTrackInfo,
@@ -1300,6 +1306,19 @@ object CardShareManager {
         styleConfig: CardStyleConfig,
         activeCanvasVideoUrl: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
+        val gifFile = exportTransparentGifIfActive(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            prefix = "${styleConfig.brandMode.wordmark}_sticker"
+        )
+        if (gifFile != null) {
+            val savedGif = saveGifFileToGallery(context, track, styleConfig, gifFile)
+            gifFile.delete()
+            if (savedGif) return@withContext true
+        }
+
         val videoFile = exportAnimatedVideoIfActive(
             context = context,
             track = track,
@@ -1375,6 +1394,64 @@ object CardShareManager {
             if (bitmap != null && !bitmap.isRecycled) {
                 bitmap.recycle()
             }
+        }
+    }
+
+    private suspend fun saveGifFileToGallery(
+        context: Context,
+        track: MediaTrackInfo,
+        styleConfig: CardStyleConfig,
+        gifFile: File
+    ): Boolean {
+        return try {
+            val safeTitle = track.title.replace("[^A-Za-z0-9_-]".toRegex(), "_").take(32)
+            val fileName = "${styleConfig.brandMode.wordmark}_${safeTitle}_${System.currentTimeMillis()}.gif"
+            val contentResolver = context.contentResolver
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/gif")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/EchoSnap")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val gifUri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (gifUri != null) {
+                    contentResolver.openOutputStream(gifUri).use { out ->
+                        if (out != null) {
+                            gifFile.inputStream().use { input ->
+                                input.copyTo(out)
+                                out.flush()
+                            }
+                        }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    contentResolver.update(gifUri, values, null, null)
+                }
+            } else {
+                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val echoSnapDir = File(picturesDir, "EchoSnap").apply { mkdirs() }
+                val dest = File(echoSnapDir, fileName)
+                gifFile.copyTo(dest, overwrite = true)
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DATA, dest.absolutePath)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/gif")
+                }
+                contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    context,
+                    "Saved Transparent Animated GIF (Pictures/EchoSnap)!",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
         }
     }
 
@@ -1456,6 +1533,19 @@ object CardShareManager {
         activeCanvasVideoUrl: String?,
         filePrefix: String
     ): Pair<Uri, String> {
+        val gifFile = exportTransparentGifIfActive(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            prefix = filePrefix
+        )
+        if (gifFile != null) {
+            val authority = "${context.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(context, authority, gifFile)
+            return Pair(uri, "image/gif")
+        }
+
         val videoFile = exportAnimatedVideoIfActive(
             context = context,
             track = track,
@@ -1474,6 +1564,62 @@ object CardShareManager {
         return Pair(uri, "image/png")
     }
 
+    private suspend fun exportTransparentGifIfActive(
+        context: Context,
+        track: MediaTrackInfo,
+        palette: CardPalette,
+        styleConfig: CardStyleConfig,
+        prefix: String
+    ): File? {
+        if (!isGifExportActive(styleConfig)) return null
+
+        val gifW = AnimatedGifExporter.GIF_WIDTH
+        val gifH = AnimatedGifExporter.GIF_HEIGHT
+        val cacheDir = File(context.cacheDir, "cards").apply {
+            mkdirs()
+            listFiles()
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop(4)
+                ?.forEach { it.delete() }
+        }
+        val outFile = File(cacheDir, "${prefix}_sticker_${System.currentTimeMillis()}.gif")
+        val wfRect = computeFloatingGlassWaveformRect(
+            targetWidth = gifW,
+            targetHeight = gifH,
+            track = track,
+            styleConfig = styleConfig
+        )
+        val waveformSpec = WaveformExportSpec(
+            rectIn720x1280 = wfRect,
+            waveformColorArgb = styleConfig.waveformColor.toArgb(),
+            cardOpacity = styleConfig.cardOpacity,
+            trackTitle = track.title,
+            trackArtist = track.artist,
+            isPlaying = true,
+            speedMultiplier = styleConfig.waveformSpeedMultiplier,
+            beatSyncEnabled = styleConfig.waveformBeatSync
+        )
+        val overlay = generateTransparentCardOverlayBitmap(
+            context = context,
+            track = track,
+            palette = palette,
+            styleConfig = styleConfig,
+            targetWidth = gifW,
+            targetHeight = gifH,
+            includeWaveform = false
+        )
+        return try {
+            AnimatedGifExporter.exportTransparentWaveformGif(
+                overlayWithoutWaveform = overlay,
+                waveformSpec = waveformSpec,
+                wfRectInOutput = wfRect,
+                outputFile = outFile
+            )
+        } finally {
+            if (!overlay.isRecycled) overlay.recycle()
+        }
+    }
+
     private suspend fun exportAnimatedVideoIfActive(
         context: Context,
         track: MediaTrackInfo,
@@ -1482,7 +1628,7 @@ object CardShareManager {
         activeCanvasVideoUrl: String?,
         prefix: String
     ): File? {
-        // Transparent "No Background" exports must preserve full ARGB alpha PNG (MP4 lacks alpha channel)
+        // Transparent "No Background" exports output either transparent PNG or transparent animated GIF
         if (styleConfig.useTransparentBackground) return null
 
         val hasWaveformMotion = styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
