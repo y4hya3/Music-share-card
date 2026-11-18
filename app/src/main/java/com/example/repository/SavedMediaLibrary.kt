@@ -45,7 +45,10 @@ data class SavedCoverItem(
     val artist: String,
     val localImagePath: String,
     val resolutionLabel: String,
-    val createdAtMs: Long
+    val createdAtMs: Long,
+    val linkedAlbumName: String = "",
+    val linkedAlbumArtist: String = "",
+    val linkedTrackTitles: List<String> = emptyList()
 )
 
 /**
@@ -231,6 +234,51 @@ object SavedMediaLibrary {
         items: List<SavedCanvasItem> = _savedCanvases.value,
         verifyFileExists: Boolean = true
     ): SavedCanvasItem? {
+        return findBestAlbumLinkedMatch(
+            title = title,
+            album = album,
+            artist = artist,
+            items = items,
+            getLinkedAlbum = { it.linkedAlbumName },
+            getLinkedArtist = { it.linkedAlbumArtist },
+            getLinkedTracks = { it.linkedTrackTitles },
+            verifyExists = { !verifyFileExists || File(it.localVideoPath).exists() }
+        )
+    }
+
+    /**
+     * Finds a locally saved Cover Art linked to an Album (or any of its song names).
+     * Works 100% offline using cached linkedAlbumName & linkedTrackTitles stored on SavedCoverItem.
+     */
+    fun findMatchingSavedCoverForTrack(
+        title: String,
+        album: String,
+        artist: String,
+        items: List<SavedCoverItem> = _savedCovers.value,
+        verifyFileExists: Boolean = true
+    ): SavedCoverItem? {
+        return findBestAlbumLinkedMatch(
+            title = title,
+            album = album,
+            artist = artist,
+            items = items,
+            getLinkedAlbum = { it.linkedAlbumName },
+            getLinkedArtist = { it.linkedAlbumArtist },
+            getLinkedTracks = { it.linkedTrackTitles },
+            verifyExists = { !verifyFileExists || File(it.localImagePath).exists() }
+        )
+    }
+
+    private inline fun <T> findBestAlbumLinkedMatch(
+        title: String,
+        album: String,
+        artist: String,
+        items: List<T>,
+        getLinkedAlbum: (T) -> String,
+        getLinkedArtist: (T) -> String,
+        getLinkedTracks: (T) -> List<String>,
+        verifyExists: (T) -> Boolean
+    ): T? {
         val normTitle = AlbumTracklistSearchService.normalizeMatchKey(title)
         val coreTitle = AlbumTracklistSearchService.normalizeCoreTitleKey(title)
         val normAlbum = AlbumTracklistSearchService.normalizeMatchKey(album)
@@ -239,20 +287,23 @@ object SavedMediaLibrary {
             com.example.service.AnimatedCanvasSearchService.normalizeArtistText(artist)
         )
         if (normTitle.isEmpty() && normAlbum.isEmpty()) return null
+        val compactArtist = (primaryArtist.ifEmpty { normArtist }).replace(" ", "")
 
-        var bestItem: SavedCanvasItem? = null
+        var bestItem: T? = null
         var bestScore = 0
 
         for (item in items) {
-            if (item.linkedAlbumName.isBlank() && item.linkedTrackTitles.isEmpty()) continue
-            if (verifyFileExists && !File(item.localVideoPath).exists()) continue
+            val linkedAlbumName = getLinkedAlbum(item)
+            val linkedAlbumArtist = getLinkedArtist(item)
+            val linkedTrackTitles = getLinkedTracks(item)
+            if (linkedAlbumName.isBlank() && linkedTrackTitles.isEmpty()) continue
+            if (!verifyExists(item)) continue
 
-            val normLinkedAlbum = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumName)
-            val normLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumArtist)
+            val normLinkedAlbum = AlbumTracklistSearchService.normalizeMatchKey(linkedAlbumName)
+            val normLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(linkedAlbumArtist)
             val primaryLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(
-                com.example.service.AnimatedCanvasSearchService.normalizeArtistText(item.linkedAlbumArtist)
+                com.example.service.AnimatedCanvasSearchService.normalizeArtistText(linkedAlbumArtist)
             )
-            val compactArtist = (primaryArtist.ifEmpty { normArtist }).replace(" ", "")
             val compactLinkedArtist = (primaryLinkedArtist.ifEmpty { normLinkedArtist }).replace(" ", "")
 
             val artistCompatible = normArtist.isEmpty() ||
@@ -269,7 +320,7 @@ object SavedMediaLibrary {
                 normAlbum.length >= 4 && normLinkedAlbum.length >= 4 &&
                 (normAlbum.contains(normLinkedAlbum) || normLinkedAlbum.contains(normAlbum))
 
-            val matchedTrack = normTitle.isNotEmpty() && item.linkedTrackTitles.any { savedSong ->
+            val matchedTrack = normTitle.isNotEmpty() && linkedTrackTitles.any { savedSong ->
                 val normSavedSong = AlbumTracklistSearchService.normalizeMatchKey(savedSong)
                 val coreSavedSong = AlbumTracklistSearchService.normalizeCoreTitleKey(savedSong)
                 (normSavedSong.isNotEmpty() && (
@@ -286,7 +337,6 @@ object SavedMediaLibrary {
             if (albumExactMatch) score += 70 else if (albumLooseMatch) score += 40
             if (artistCompatible) score += 25 else if (!albumExactMatch) continue
 
-            // Require either album match OR explicit track match backed by compatible artist
             val isQualified = albumExactMatch ||
                 (matchedTrack && artistCompatible) ||
                 (albumLooseMatch && artistCompatible)
@@ -390,6 +440,35 @@ object SavedMediaLibrary {
         if (clean.isEmpty()) return
         val ctx = context.applicationContext
         val next = readCoverIndex(ctx).map { if (it.id == id) it.copy(name = clean) else it }
+        writeCoverIndex(ctx, next)
+        _savedCovers.value = next
+    }
+
+    fun updateCoverMetadata(
+        context: Context,
+        id: String,
+        newName: String,
+        linkedAlbumName: String,
+        linkedAlbumArtist: String,
+        linkedTrackTitles: List<String>
+    ) {
+        val ctx = context.applicationContext
+        val cleanName = newName.trim()
+        val cleanAlbum = linkedAlbumName.trim()
+        val cleanArtist = linkedAlbumArtist.trim()
+        val cleanTracks = linkedTrackTitles.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val next = readCoverIndex(ctx).map { item ->
+            if (item.id == id) {
+                item.copy(
+                    name = cleanName.ifEmpty { item.name },
+                    linkedAlbumName = cleanAlbum,
+                    linkedAlbumArtist = cleanArtist,
+                    linkedTrackTitles = cleanTracks
+                )
+            } else {
+                item
+            }
+        }
         writeCoverIndex(ctx, next)
         _savedCovers.value = next
     }
@@ -597,6 +676,17 @@ object SavedMediaLibrary {
                     val id = o.optString("id")
                     val path = o.optString("localImagePath")
                     if (id.isNotBlank() && path.isNotBlank()) {
+                        val tracksJson = o.optJSONArray("linkedTrackTitles")
+                        val tracks = if (tracksJson != null) {
+                            buildList {
+                                for (t in 0 until tracksJson.length()) {
+                                    val song = tracksJson.optString(t).trim()
+                                    if (song.isNotEmpty()) add(song)
+                                }
+                            }
+                        } else {
+                            emptyList()
+                        }
                         add(
                             SavedCoverItem(
                                 id = id,
@@ -604,7 +694,10 @@ object SavedMediaLibrary {
                                 artist = o.optString("artist", ""),
                                 localImagePath = path,
                                 resolutionLabel = o.optString("resolutionLabel", "HD"),
-                                createdAtMs = o.optLong("createdAtMs", 0L)
+                                createdAtMs = o.optLong("createdAtMs", 0L),
+                                linkedAlbumName = o.optString("linkedAlbumName", ""),
+                                linkedAlbumArtist = o.optString("linkedAlbumArtist", ""),
+                                linkedTrackTitles = tracks
                             )
                         )
                     }
@@ -628,6 +721,9 @@ object SavedMediaLibrary {
                     put("localImagePath", item.localImagePath)
                     put("resolutionLabel", item.resolutionLabel)
                     put("createdAtMs", item.createdAtMs)
+                    put("linkedAlbumName", item.linkedAlbumName)
+                    put("linkedAlbumArtist", item.linkedAlbumArtist)
+                    put("linkedTrackTitles", JSONArray(item.linkedTrackTitles))
                 }
             )
         }

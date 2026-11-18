@@ -169,21 +169,103 @@ fun EditSavedCanvasDialog(
         linkedTrackTitles: List<String>
     ) -> Unit
 ) {
-    val coroutineScope = rememberCoroutineScope()
-    var nameInput by remember(item.id) { mutableStateOf(item.name) }
-    var albumQueryInput by remember(item.id) { mutableStateOf(item.linkedAlbumName) }
-    var artistQueryInput by remember(item.id) { mutableStateOf(item.linkedAlbumArtist) }
-    var linkedAlbumName by remember(item.id) { mutableStateOf(item.linkedAlbumName) }
-    var linkedAlbumArtist by remember(item.id) { mutableStateOf(item.linkedAlbumArtist) }
-    var linkedTracks by remember(item.id) { mutableStateOf(item.linkedTrackTitles) }
-    var manualSongInput by remember(item.id) { mutableStateOf("") }
+    EditSavedMediaDialogContent(
+        dialogTitle = "Edit Saved Canvas",
+        nameFieldLabel = "Canvas Name",
+        itemId = item.id,
+        itemName = item.name,
+        itemArtist = item.artist,
+        resolutionLabel = item.resolutionLabel,
+        initialLinkedAlbumName = item.linkedAlbumName,
+        initialLinkedAlbumArtist = item.linkedAlbumArtist,
+        initialLinkedTracks = item.linkedTrackTitles,
+        accentColor = Color(0xFF1DB954),
+        accentButtonTextColor = Color(0xFF0A0C0B),
+        badgeColor = Color(0xFF9BE7B3),
+        selectedChipBgColor = Color(0xFF1F3B27),
+        tagPrefix = "saved_canvas",
+        onDismiss = onDismiss,
+        onConfirm = onConfirm
+    )
+}
 
-    var albumResults by remember(item.id) { mutableStateOf<List<AlbumTracklistCandidate>>(emptyList()) }
-    var isSearchingAlbum by remember(item.id) { mutableStateOf(false) }
-    var albumSearchMessage by remember(item.id) { mutableStateOf<String?>(null) }
+@Composable
+fun EditSavedCoverDialog(
+    item: SavedCoverItem,
+    onDismiss: () -> Unit,
+    onConfirm: (
+        newName: String,
+        linkedAlbumName: String,
+        linkedAlbumArtist: String,
+        linkedTrackTitles: List<String>
+    ) -> Unit
+) {
+    EditSavedMediaDialogContent(
+        dialogTitle = "Edit Saved Cover",
+        nameFieldLabel = "Cover Name",
+        itemId = item.id,
+        itemName = item.name,
+        itemArtist = item.artist,
+        resolutionLabel = item.resolutionLabel,
+        initialLinkedAlbumName = item.linkedAlbumName,
+        initialLinkedAlbumArtist = item.linkedAlbumArtist,
+        initialLinkedTracks = item.linkedTrackTitles,
+        accentColor = Color(0xFFFF2B44),
+        accentButtonTextColor = Color.White,
+        badgeColor = Color(0xFFFFB0B9),
+        selectedChipBgColor = Color(0xFF3A1D24),
+        tagPrefix = "saved_cover",
+        onDismiss = onDismiss,
+        onConfirm = onConfirm
+    )
+}
+
+@Composable
+private fun EditSavedMediaDialogContent(
+    dialogTitle: String,
+    nameFieldLabel: String,
+    itemId: String,
+    itemName: String,
+    itemArtist: String,
+    resolutionLabel: String,
+    initialLinkedAlbumName: String,
+    initialLinkedAlbumArtist: String,
+    initialLinkedTracks: List<String>,
+    accentColor: Color,
+    accentButtonTextColor: Color,
+    badgeColor: Color,
+    selectedChipBgColor: Color,
+    tagPrefix: String,
+    onDismiss: () -> Unit,
+    onConfirm: (
+        newName: String,
+        linkedAlbumName: String,
+        linkedAlbumArtist: String,
+        linkedTrackTitles: List<String>
+    ) -> Unit
+) {
+    val coroutineScope = rememberCoroutineScope()
+    val prefill = remember(itemId, itemName, itemArtist, initialLinkedAlbumName, initialLinkedAlbumArtist) {
+        AlbumTracklistSearchService.parseSavedItemInitialAlbumAndArtist(
+            itemName = itemName,
+            itemArtist = itemArtist,
+            linkedAlbumName = initialLinkedAlbumName,
+            linkedAlbumArtist = initialLinkedAlbumArtist
+        )
+    }
+    var nameInput by remember(itemId) { mutableStateOf(itemName) }
+    var albumQueryInput by remember(itemId) { mutableStateOf(prefill.album) }
+    var artistQueryInput by remember(itemId) { mutableStateOf(prefill.artist) }
+    var linkedAlbumName by remember(itemId) { mutableStateOf(initialLinkedAlbumName) }
+    var linkedAlbumArtist by remember(itemId) { mutableStateOf(initialLinkedAlbumArtist) }
+    var linkedTracks by remember(itemId) { mutableStateOf(initialLinkedTracks) }
+    var manualSongInput by remember(itemId) { mutableStateOf("") }
+
+    var albumResults by remember(itemId) { mutableStateOf<List<AlbumTracklistCandidate>>(emptyList()) }
+    var isSearchingAlbum by remember(itemId) { mutableStateOf(false) }
+    var albumSearchMessage by remember(itemId) { mutableStateOf<String?>(null) }
 
     val glassShape = RoundedCornerShape(22.dp)
-    val accentColor = Color(0xFF1DB954)
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -198,7 +280,7 @@ fun EditSavedCanvasDialog(
                     shape = glassShape
                 )
                 .border(1.dp, Color.White.copy(alpha = 0.18f), glassShape)
-                .testTag("edit_saved_canvas_dialog")
+                .testTag("edit_${tagPrefix}_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -206,14 +288,14 @@ fun EditSavedCanvasDialog(
                     .verticalScroll(rememberScrollState())
             ) {
                 Text(
-                    text = "Edit Saved Canvas",
+                    text = dialogTitle,
                     color = Color.White,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = item.resolutionLabel,
+                    text = resolutionLabel,
                     color = Color.White.copy(alpha = 0.62f),
                     fontSize = 11.sp
                 )
@@ -223,7 +305,7 @@ fun EditSavedCanvasDialog(
                     value = nameInput,
                     onValueChange = { nameInput = it },
                     singleLine = true,
-                    label = { Text("Canvas Name", fontSize = 12.sp) },
+                    label = { Text(nameFieldLabel, fontSize = 12.sp) },
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = accentColor,
                         unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
@@ -234,7 +316,7 @@ fun EditSavedCanvasDialog(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("edit_saved_canvas_name_input")
+                        .testTag("edit_${tagPrefix}_name_input")
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -257,7 +339,11 @@ fun EditSavedCanvasDialog(
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            if (linkedAlbumName.isNotBlank() || linkedTracks.isNotEmpty() || artistQueryInput.isNotBlank()) {
+                            if (linkedAlbumName.isNotBlank() ||
+                                linkedTracks.isNotEmpty() ||
+                                albumQueryInput.isNotBlank() ||
+                                artistQueryInput.isNotBlank()
+                            ) {
                                 Surface(
                                     onClick = {
                                         linkedAlbumName = ""
@@ -271,7 +357,7 @@ fun EditSavedCanvasDialog(
                                     },
                                     shape = RoundedCornerShape(8.dp),
                                     color = Color(0x44FF5A6B),
-                                    modifier = Modifier.testTag("clear_saved_canvas_album_button")
+                                    modifier = Modifier.testTag("clear_${tagPrefix}_album_button")
                                 ) {
                                     Text(
                                         text = "Unlink",
@@ -285,7 +371,7 @@ fun EditSavedCanvasDialog(
                         }
                         Spacer(modifier = Modifier.height(3.dp))
                         Text(
-                            text = "Enter an album (e.g. \"27\" or \"27 by ElGrandeToto\"), check the songs, add any songs manually, and Save. Auto-applies even offline.",
+                            text = "Edit album/artist below, tap Search to fetch songs or add songs manually, then Save. Auto-applies offline.",
                             color = Color.White.copy(alpha = 0.62f),
                             fontSize = 11.sp
                         )
@@ -307,7 +393,7 @@ fun EditSavedCanvasDialog(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("edit_saved_canvas_artist_input")
+                                .testTag("edit_${tagPrefix}_artist_input")
                         )
 
                         Spacer(modifier = Modifier.height(8.dp))
@@ -333,7 +419,7 @@ fun EditSavedCanvasDialog(
                                 ),
                                 modifier = Modifier
                                     .weight(1f)
-                                    .testTag("edit_saved_canvas_album_input")
+                                    .testTag("edit_${tagPrefix}_album_input")
                             )
 
                             Button(
@@ -378,15 +464,15 @@ fun EditSavedCanvasDialog(
                                 enabled = !isSearchingAlbum && albumQueryInput.isNotBlank(),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = accentColor,
-                                    contentColor = Color(0xFF0A0C0B)
+                                    contentColor = accentButtonTextColor
                                 ),
                                 shape = RoundedCornerShape(10.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 14.dp),
-                                modifier = Modifier.testTag("search_saved_canvas_album_button")
+                                modifier = Modifier.testTag("search_${tagPrefix}_album_button")
                             ) {
                                 if (isSearchingAlbum) {
                                     CircularProgressIndicator(
-                                        color = Color(0xFF0A0C0B),
+                                        color = accentButtonTextColor,
                                         strokeWidth = 2.dp,
                                         modifier = Modifier.size(16.dp)
                                     )
@@ -424,7 +510,7 @@ fun EditSavedCanvasDialog(
                                             albumSearchMessage = "${cand.albumName} • ${cand.trackTitles.size} songs selected"
                                         },
                                         shape = RoundedCornerShape(10.dp),
-                                        color = if (active) Color(0xFF1F3B27) else Color.White.copy(alpha = 0.08f),
+                                        color = if (active) selectedChipBgColor else Color.White.copy(alpha = 0.08f),
                                         border = BorderStroke(
                                             width = 1.dp,
                                             color = if (active) accentColor else Color.White.copy(alpha = 0.14f)
@@ -447,7 +533,7 @@ fun EditSavedCanvasDialog(
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 text = msg,
-                                color = Color(0xFF9BE7B3),
+                                color = badgeColor,
                                 fontSize = 11.sp
                             )
                         }
@@ -538,7 +624,7 @@ fun EditSavedCanvasDialog(
                                             if (effectiveArtistDisplay.isNotBlank()) append(" — $effectiveArtistDisplay")
                                             if (linkedTracks.isNotEmpty()) append(" (${linkedTracks.size})")
                                         },
-                                        color = Color(0xFF9BE7B3),
+                                        color = badgeColor,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 1,
@@ -616,7 +702,7 @@ fun EditSavedCanvasDialog(
                                 linkedTracks
                             }
                             onConfirm(
-                                nameInput.trim().ifEmpty { item.name },
+                                nameInput.trim().ifEmpty { itemName },
                                 rawAlbumFallback,
                                 resolvedArtist,
                                 finalTracks
@@ -624,10 +710,10 @@ fun EditSavedCanvasDialog(
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = accentColor,
-                            contentColor = Color(0xFF0A0C0B)
+                            contentColor = accentButtonTextColor
                         ),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.testTag("confirm_edit_saved_canvas_button")
+                        modifier = Modifier.testTag("confirm_edit_${tagPrefix}_button")
                     ) {
                         Text("Save", fontWeight = FontWeight.Bold)
                     }
@@ -792,14 +878,15 @@ fun SavedCanvasesBrowserDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    if (item.linkedAlbumName.isNotBlank()) {
+                                    if (item.linkedAlbumName.isNotBlank() || item.linkedTrackTitles.isNotEmpty()) {
+                                        val labelAlbum = item.linkedAlbumName.ifBlank { "Linked songs" }
                                         val songCountSuffix = if (item.linkedTrackTitles.isNotEmpty()) {
                                             " (${item.linkedTrackTitles.size} songs)"
                                         } else {
                                             ""
                                         }
                                         Text(
-                                            text = "Album: ${item.linkedAlbumName}$songCountSuffix",
+                                            text = "Album: $labelAlbum$songCountSuffix",
                                             color = Color(0xFF9BE7B3),
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Medium,
@@ -862,10 +949,16 @@ fun SavedCoversBrowserDialog(
     onDismiss: () -> Unit,
     onAddFromDevice: () -> Unit,
     onSelect: (SavedCoverItem) -> Unit,
-    onRename: (SavedCoverItem, String) -> Unit,
+    onUpdateCover: (
+        item: SavedCoverItem,
+        newName: String,
+        linkedAlbumName: String,
+        linkedAlbumArtist: String,
+        linkedTrackTitles: List<String>
+    ) -> Unit,
     onDelete: (SavedCoverItem) -> Unit
 ) {
-    var renamingItem by remember { mutableStateOf<SavedCoverItem?>(null) }
+    var editingItem by remember { mutableStateOf<SavedCoverItem?>(null) }
     val glassShape = RoundedCornerShape(24.dp)
 
     Dialog(onDismissRequest = onDismiss) {
@@ -895,7 +988,7 @@ fun SavedCoversBrowserDialog(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Max-resolution cover art saved locally",
+                            text = "Tap Edit to link an album for offline auto-apply",
                             color = Color.White.copy(alpha = 0.62f),
                             fontSize = 11.sp
                         )
@@ -995,6 +1088,22 @@ fun SavedCoversBrowserDialog(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (item.linkedAlbumName.isNotBlank() || item.linkedTrackTitles.isNotEmpty()) {
+                                        val labelAlbum = item.linkedAlbumName.ifBlank { "Linked songs" }
+                                        val songCountSuffix = if (item.linkedTrackTitles.isNotEmpty()) {
+                                            " (${item.linkedTrackTitles.size} songs)"
+                                        } else {
+                                            ""
+                                        }
+                                        Text(
+                                            text = "Album: $labelAlbum$songCountSuffix",
+                                            color = Color(0xFFFFB0B9),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                                 if (selected) {
                                     Icon(
@@ -1004,10 +1113,13 @@ fun SavedCoversBrowserDialog(
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
-                                IconButton(onClick = { renamingItem = item }) {
+                                IconButton(
+                                    onClick = { editingItem = item },
+                                    modifier = Modifier.testTag("edit_saved_cover_${item.id}")
+                                ) {
                                     Icon(
                                         Icons.Default.Edit,
-                                        contentDescription = "Rename cover",
+                                        contentDescription = "Edit cover",
                                         tint = Color.White.copy(alpha = 0.72f),
                                         modifier = Modifier.size(18.dp)
                                     )
@@ -1028,17 +1140,13 @@ fun SavedCoversBrowserDialog(
         }
     }
 
-    renamingItem?.let { target ->
-        SaveMediaNameDialog(
-            title = "Rename Saved Cover",
-            subtitle = target.resolutionLabel,
-            initialName = target.name,
-            confirmLabel = "Save Name",
-            accentColor = Color(0xFFFF2B44),
-            onDismiss = { renamingItem = null },
-            onConfirm = { newName ->
-                onRename(target, newName)
-                renamingItem = null
+    editingItem?.let { target ->
+        EditSavedCoverDialog(
+            item = target,
+            onDismiss = { editingItem = null },
+            onConfirm = { newName, albumName, albumArtist, tracks ->
+                onUpdateCover(target, newName, albumName, albumArtist, tracks)
+                editingItem = null
             }
         )
     }

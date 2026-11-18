@@ -126,6 +126,8 @@ object AudioBeatMonitor {
         private val prevRaw = FloatArray(4)
         private var rollingPeak = 0.36f
         private var lastCallbackNanos = 0L
+        private var lastCaptureCallbackNanos = 0L
+        private var silentSinceNanos = 0L
         @Volatile
         var lastSignalNanos: Long = 0L
             private set
@@ -136,6 +138,8 @@ object AudioBeatMonitor {
             prevRaw.fill(0f)
             rollingPeak = 0.36f
             lastCallbackNanos = 0L
+            lastCaptureCallbackNanos = 0L
+            silentSinceNanos = 0L
             lastSignalNanos = 0L
         }
 
@@ -143,20 +147,40 @@ object AudioBeatMonitor {
         fun ingestFft(fft: ByteArray, samplingRateMilliHz: Int, nowNanos: Long): FloatArray {
             val raw = computeBandsFromFft(fft, samplingRateMilliHz)
             val totalEnergy = raw[0] + raw[1] + raw[2] + raw[3]
-            if (totalEnergy <= 0.012f) {
-                decayToNow(nowNanos)
+            decayToNow(nowNanos)
+            lastCaptureCallbackNanos = nowNanos
+
+            if (totalEnergy <= 0.014f) {
+                if (silentSinceNanos == 0L) {
+                    silentSinceNanos = nowNanos
+                }
+                // Hold AGC rollingPeak steady during volume-0 / silence so unmuting never over-amplifies
+                rollingPeak = max(0.36f, rollingPeak)
+                if (nowNanos - silentSinceNanos > 120_000_000L) {
+                    prevRaw.fill(0f)
+                }
                 return env.copyOf()
             }
+
+            val wasSilent = (silentSinceNanos > 0L && nowNanos - silentSinceNanos > 180_000_000L) ||
+                (lastSignalNanos > 0L && nowNanos - lastSignalNanos > 250_000_000L)
+            silentSinceNanos = 0L
             lastSignalNanos = nowNanos
-            decayToNow(nowNanos)
 
             val frameMax = max(raw[0], max(raw[1], max(raw[2], raw[3]))).coerceAtMost(2.5f)
-            rollingPeak = if (frameMax > rollingPeak) {
-                rollingPeak * 0.45f + frameMax * 0.55f
+            if (wasSilent) {
+                rollingPeak = max(0.42f, max(rollingPeak, frameMax))
+                for (b in 0..3) {
+                    prevRaw[b] = raw[b]
+                }
             } else {
-                max(0.14f, rollingPeak * 0.965f)
+                rollingPeak = if (frameMax > rollingPeak) {
+                    rollingPeak * 0.45f + frameMax * 0.55f
+                } else {
+                    max(0.18f, rollingPeak * 0.968f)
+                }
             }
-            val normScale = 1.0f / rollingPeak.coerceAtLeast(0.14f)
+            val normScale = 1.0f / rollingPeak.coerceAtLeast(0.18f)
 
             for (b in 0..3) {
                 val flux = max(0f, raw[b] - prevRaw[b]) * 1.45f
@@ -171,25 +195,41 @@ object AudioBeatMonitor {
                     env[b] = target
                 }
             }
-            lastCallbackNanos = nowNanos
             return env.copyOf()
         }
 
         @Synchronized
         fun ingestWaveform(waveform: ByteArray, nowNanos: Long): FloatArray {
             val energy = computePcmTransientEnergy(waveform).coerceAtMost(2.0f)
-            if (energy <= 0.018f) {
+            decayToNow(nowNanos)
+            lastCaptureCallbackNanos = nowNanos
+
+            if (energy <= 0.020f) {
+                if (silentSinceNanos == 0L) {
+                    silentSinceNanos = nowNanos
+                }
+                rollingPeak = max(0.36f, rollingPeak)
+                if (nowNanos - silentSinceNanos > 120_000_000L) {
+                    prevRaw.fill(0f)
+                }
                 return env.copyOf()
             }
-            lastSignalNanos = nowNanos
-            decayToNow(nowNanos)
 
-            rollingPeak = if (energy > rollingPeak) {
-                rollingPeak * 0.45f + energy * 0.55f
+            val wasSilent = (silentSinceNanos > 0L && nowNanos - silentSinceNanos > 180_000_000L) ||
+                (lastSignalNanos > 0L && nowNanos - lastSignalNanos > 250_000_000L)
+            silentSinceNanos = 0L
+            lastSignalNanos = nowNanos
+
+            if (wasSilent) {
+                rollingPeak = max(0.42f, max(rollingPeak, energy))
             } else {
-                max(0.14f, rollingPeak * 0.975f)
+                rollingPeak = if (energy > rollingPeak) {
+                    rollingPeak * 0.45f + energy * 0.55f
+                } else {
+                    max(0.18f, rollingPeak * 0.975f)
+                }
             }
-            val norm = (energy / rollingPeak.coerceAtLeast(0.14f)).coerceIn(0f, 1.35f)
+            val norm = (energy / rollingPeak.coerceAtLeast(0.18f)).coerceIn(0f, 1.35f)
             val shapedNorm = kotlin.math.sqrt(norm.coerceIn(0f, 1f))
             // Distribute crisp time-domain transient boost skewed slightly toward low/mid punch
             val weights = floatArrayOf(1.0f, 0.95f, 0.86f, 0.78f)
@@ -200,26 +240,31 @@ object AudioBeatMonitor {
                     env[b] = target
                 }
             }
-            lastCallbackNanos = nowNanos
             return env.copyOf()
         }
 
         @Synchronized
         fun snapshotAt(nowNanos: Long): FloatArray? {
-            if (lastSignalNanos == 0L) return null
-            if (nowNanos - lastSignalNanos > SIGNAL_ACTIVE_WINDOW_NS) {
-                // Signal ended/paused: let bars smoothly fall to idle floor
-                decayToNow(nowNanos)
-                if (env.all { it <= MIN_LEVEL + 0.015f }) return null
-                return env.copyOf()
-            }
+            if (lastCaptureCallbackNanos == 0L && lastSignalNanos == 0L) return null
             decayToNow(nowNanos)
+            val captureAlive = lastCaptureCallbackNanos > 0L &&
+                (nowNanos - lastCaptureCallbackNanos) <= SIGNAL_ACTIVE_WINDOW_NS
+            val signalRecent = lastSignalNanos > 0L &&
+                (nowNanos - lastSignalNanos) <= SIGNAL_ACTIVE_WINDOW_NS
+            if (!captureAlive && !signalRecent && env.all { it <= MIN_LEVEL + 0.015f }) {
+                return null
+            }
             return env.copyOf()
         }
 
         fun hasRecentSignal(nowNanos: Long): Boolean {
             val sig = lastSignalNanos
             return sig > 0L && (nowNanos - sig) <= SIGNAL_ACTIVE_WINDOW_NS
+        }
+
+        fun hasActiveCaptureFeed(nowNanos: Long): Boolean {
+            val cap = lastCaptureCallbackNanos
+            return cap > 0L && (nowNanos - cap) <= SIGNAL_ACTIVE_WINDOW_NS
         }
 
         private fun decayToNow(nowNanos: Long) {
@@ -448,6 +493,12 @@ object AudioBeatMonitor {
 
         fun hasLiveSignal(): Boolean =
             SharedAudioVisualizer.tracker.hasRecentSignal(SystemClock.elapsedRealtimeNanos())
+
+        fun hasLiveFeed(): Boolean {
+            val now = SystemClock.elapsedRealtimeNanos()
+            return SharedAudioVisualizer.tracker.hasActiveCaptureFeed(now) ||
+                SharedAudioVisualizer.tracker.hasRecentSignal(now)
+        }
 
         fun currentBands(): FloatArray? {
             if (!acquired) return null

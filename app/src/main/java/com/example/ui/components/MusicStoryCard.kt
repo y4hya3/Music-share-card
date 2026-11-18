@@ -653,7 +653,9 @@ fun DynamicIslandWaveformBars(
     LaunchedEffect(Unit) {
         var lastFrameNanos = 0L
         var lastEnsureNanos = 0L
-        var phaseTimeSec = 0f
+        var phaseTimeSec = 0.0
+        var prevWasUsingLiveFeed = false
+        var modeBlendRemainingSec = 0f
         while (true) {
             val frameNanos = withFrameNanos { it }
             val dtSec = if (lastFrameNanos == 0L) {
@@ -665,7 +667,7 @@ fun DynamicIslandWaveformBars(
 
             val sync = latestBeatSync
             val speed = latestSpeed.coerceIn(0.4f, 2.5f)
-            phaseTimeSec += dtSec * (if (sync) 1.0f else speed)
+            phaseTimeSec = (phaseTimeSec + dtSec * (if (sync) 1.0 else speed.toDouble())) % 3600.0
 
             if (sync && frameNanos - lastEnsureNanos >= 800_000_000L) {
                 lastEnsureNanos = frameNanos
@@ -673,30 +675,44 @@ fun DynamicIslandWaveformBars(
             }
 
             val live = if (sync) sampler.currentBands() else null
-            val liveSignal = sync && sampler.hasLiveSignal()
-            val shouldAnimate = latestAnimateAlways || latestPlaying || liveSignal
+            val liveFeed = sync && live != null && sampler.hasLiveFeed()
+            if (liveFeed != prevWasUsingLiveFeed) {
+                prevWasUsingLiveFeed = liveFeed
+                modeBlendRemainingSec = 0.14f
+            }
+            val shouldAnimate = latestAnimateAlways || latestPlaying || liveFeed
 
             if (shouldAnimate) {
                 val computed = AudioBeatMonitor.computeBarLevels(
                     trackTitle = latestTitle,
                     trackArtist = latestArtist,
                     isPlaying = if (latestAnimateAlways) true else latestPlaying,
-                    timeSec = phaseTimeSec,
+                    timeSec = phaseTimeSec.toFloat(),
                     liveAudioBands = live,
                     speedMultiplier = 1.0f, // speed already smoothly integrated into phaseTimeSec
                     beatSyncMode = sync,
                     animateWhenPaused = latestAnimateAlways,
-                    hasLiveSignal = liveSignal,
+                    hasLiveSignal = liveFeed,
                     forceMultiplier = latestForce
                 )
+                val fallAlpha = (1f - kotlin.math.exp(-13f * dtSec)).coerceIn(0.04f, 1f)
+                val isTransitioning = modeBlendRemainingSec > 0f
+                if (isTransitioning) {
+                    modeBlendRemainingSec = (modeBlendRemainingSec - dtSec).coerceAtLeast(0f)
+                }
+                val attackAlpha = if (isTransitioning) {
+                    (1f - kotlin.math.exp(-22f * dtSec)).coerceIn(0.18f, 1f)
+                } else {
+                    1f
+                }
                 for (i in 0..3) {
                     val current = barLevels[i]
                     val target = computed[i]
-                    // 0ms instant attack when rising so beats punch immediately; silky release smoothing on fall
+                    // 0ms instant attack during steady Beat Sync / manual groove; damped across mode transitions
                     barLevels[i] = if (target >= current) {
-                        target
+                        if (attackAlpha >= 0.99f) target else current + (target - current) * attackAlpha
                     } else {
-                        current + (target - current) * (dtSec * 14f).coerceIn(0.18f, 1.0f)
+                        current + (target - current) * fallAlpha
                     }
                 }
                 frameCounter++

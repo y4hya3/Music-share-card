@@ -124,6 +124,47 @@ object AlbumTracklistSearchService {
         return ParsedAlbumQuery(album = cleanAlbum.ifBlank { albumQuery.trim() }, artist = cleanArtist)
     }
 
+    private val CATALOG_SUFFIX_REGEX = Regex(
+        "\\s*[-–—]\\s*(?:spotify(?:\\s+canvas)?|apple\\s+motion|itunes(?:\\s+hd)?|deezer(?:\\s+hd)?|musicbrainz)\\s*$",
+        RegexOption.IGNORE_CASE
+    )
+    private val GENERIC_MEDIA_LABELS = setOf(
+        "device media", "device photo", "<unknown>", "unknown artist", "unknown", ""
+    )
+
+    /**
+     * Pre-fills Album Name & Artist Name when opening Edit on a Saved Canvas or Saved Cover
+     * (e.g. "27 - Elgrande toto" -> album="27", artist="Elgrande toto") WITHOUT running any search.
+     */
+    fun parseSavedItemInitialAlbumAndArtist(
+        itemName: String,
+        itemArtist: String,
+        linkedAlbumName: String = "",
+        linkedAlbumArtist: String = ""
+    ): ParsedAlbumQuery {
+        if (linkedAlbumName.isNotBlank() || linkedAlbumArtist.isNotBlank()) {
+            return ParsedAlbumQuery(
+                album = linkedAlbumName.trim(),
+                artist = linkedAlbumArtist.trim()
+            )
+        }
+        val cleanFallbackArtist = itemArtist.trim().let { raw ->
+            if (raw.lowercase(Locale.US) in GENERIC_MEDIA_LABELS) "" else raw
+        }
+        val strippedCatalogName = CATALOG_SUFFIX_REGEX.replace(itemName.trim(), "").trim()
+            .replace(" – ", " - ")
+            .replace(" — ", " - ")
+        if (strippedCatalogName.isEmpty()) {
+            return ParsedAlbumQuery(album = "", artist = cleanFallbackArtist)
+        }
+        val parsedFromNameOnly = parseSmartAlbumQuery(strippedCatalogName, artistHint = "")
+        return if (parsedFromNameOnly.artist.isNotBlank()) {
+            parsedFromNameOnly
+        } else {
+            parseSmartAlbumQuery(strippedCatalogName, artistHint = cleanFallbackArtist)
+        }
+    }
+
     /**
      * Parses manually entered or pasted song names — supporting both multi-line / semicolon lists
      * AND single-line numbered lists such as "1- Song A 2- Song B 3- Song C" or "1. A 2. B",

@@ -197,6 +197,23 @@ fun BitChordShareScreen(
         )
     }
 
+    val showBgBlurTab = !effectiveStyleConfig.useTransparentBackground &&
+        (effectiveStyleConfig.useBlurredAlbumBackground || !activeCanvasUrl.isNullOrBlank())
+    val showCardBlurTab = effectiveStyleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD
+    val visibleQuickTabs = remember(showBgBlurTab, showCardBlurTab) {
+        buildList {
+            if (showBgBlurTab) add(QuickControlTab.BLUR)
+            if (showCardBlurTab) add(QuickControlTab.CARD_BLUR)
+            add(QuickControlTab.SIZE)
+            add(QuickControlTab.OPACITY)
+        }
+    }
+    LaunchedEffect(visibleQuickTabs) {
+        if (quickControlTab !in visibleQuickTabs) {
+            quickControlTab = visibleQuickTabs.firstOrNull() ?: QuickControlTab.SIZE
+        }
+    }
+
     val isLiveScrubbingCard = liveScrubTarget != LiveScrubTarget.NONE
     val chromeAlpha by animateFloatAsState(
         targetValue = if (isLiveScrubbingCard) 0f else 1f,
@@ -236,7 +253,7 @@ fun BitChordShareScreen(
     ) { granted ->
         if (granted) {
             MediaNotificationRepository.updateStyleConfig(saveImmediately = true) {
-                it.copy(enableWaveform = true, waveformBeatSync = true)
+                it.copy(waveformBeatSync = true)
             }
             Toast.makeText(context, "Live audio beat sync enabled", Toast.LENGTH_SHORT).show()
         } else {
@@ -259,7 +276,7 @@ fun BitChordShareScreen(
             ) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 MediaNotificationRepository.updateStyleConfig(saveImmediately = true) {
-                    it.copy(enableWaveform = true, waveformBeatSync = true)
+                    it.copy(waveformBeatSync = true)
                 }
             } else {
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -647,6 +664,7 @@ fun BitChordShareScreen(
                             Spacer(modifier = Modifier.height(12.dp))
 
                             QuickControlSliderPill(
+                                visibleTabs = visibleQuickTabs,
                                 activeTab = quickControlTab,
                                 onTabSelect = { quickControlTab = it },
                                 blurRadiusPx = effectiveStyleConfig.backgroundBlurRadius,
@@ -666,11 +684,7 @@ fun BitChordShareScreen(
                                     val committed = (dragBlurRadius ?: persistedStyleConfig.backgroundBlurRadius).coerceIn(0f, 40f)
                                     dragBlurRadius = null
                                     MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { current ->
-                                        current.copy(
-                                            useBlurredAlbumBackground = true,
-                                            useTransparentBackground = false,
-                                            backgroundBlurRadius = committed
-                                        )
+                                        current.copy(backgroundBlurRadius = committed)
                                     }
                                 },
                                 onCardBlurChange = { newBlur ->
@@ -855,6 +869,7 @@ fun BitChordShareScreen(
                         // ANCHORED BOTTOM QUICK SLIDER PILL (BG Blur / Glass Blur / Size / Glass Opacity)
                         // All tabs use Live Scrubbing Preview: surrounding chrome fades smoothly (200ms) while active slider stays locked in place
                         QuickControlSliderPill(
+                            visibleTabs = visibleQuickTabs,
                             activeTab = quickControlTab,
                             onTabSelect = { quickControlTab = it },
                             blurRadiusPx = effectiveStyleConfig.backgroundBlurRadius,
@@ -874,11 +889,7 @@ fun BitChordShareScreen(
                                 val committed = (dragBlurRadius ?: persistedStyleConfig.backgroundBlurRadius).coerceIn(0f, 40f)
                                 dragBlurRadius = null
                                 MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { current ->
-                                    current.copy(
-                                        useBlurredAlbumBackground = true,
-                                        useTransparentBackground = false,
-                                        backgroundBlurRadius = committed
-                                    )
+                                    current.copy(backgroundBlurRadius = committed)
                                 }
                             },
                             onCardBlurChange = { newBlur ->
@@ -1568,6 +1579,7 @@ private fun ProcessingOverlay(statusText: String) {
  */
 @Composable
 private fun QuickControlSliderPill(
+    visibleTabs: List<QuickControlTab>,
     activeTab: QuickControlTab,
     onTabSelect: (QuickControlTab) -> Unit,
     blurRadiusPx: Float,
@@ -1591,6 +1603,7 @@ private fun QuickControlSliderPill(
     modifier: Modifier = Modifier
 ) {
     val isScrubbing = activeScrubTarget != LiveScrubTarget.NONE
+    val effectiveTab = if (activeTab in visibleTabs) activeTab else (visibleTabs.firstOrNull() ?: QuickControlTab.SIZE)
 
     val pillShape = RoundedCornerShape(18.dp)
     val pillBgAlpha by animateFloatAsState(
@@ -1598,13 +1611,13 @@ private fun QuickControlSliderPill(
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "quick_pill_bg_alpha"
     )
-    val labelText = when (activeTab) {
+    val labelText = when (effectiveTab) {
         QuickControlTab.BLUR -> "BG Blur"
         QuickControlTab.CARD_BLUR -> "Glass Blur"
         QuickControlTab.SIZE -> "Card Size"
         QuickControlTab.OPACITY -> "Glass Opacity"
     }
-    val valueText = when (activeTab) {
+    val valueText = when (effectiveTab) {
         QuickControlTab.BLUR -> "${blurRadiusPx.roundToInt()}px"
         QuickControlTab.CARD_BLUR -> "${cardBlurRadiusPx.roundToInt()}px"
         QuickControlTab.SIZE -> "${(cardScale * 100f).roundToInt()}%"
@@ -1625,8 +1638,8 @@ private fun QuickControlSliderPill(
     val opacityDragged by opacityInteraction.collectIsDraggedAsState()
     val opacityPressed by opacityInteraction.collectIsPressedAsState()
 
-    LaunchedEffect(activeTab, blurDragged, blurPressed, cardBlurDragged, cardBlurPressed, sizeDragged, sizePressed, opacityDragged, opacityPressed) {
-        when (activeTab) {
+    LaunchedEffect(effectiveTab, blurDragged, blurPressed, cardBlurDragged, cardBlurPressed, sizeDragged, sizePressed, opacityDragged, opacityPressed) {
+        when (effectiveTab) {
             QuickControlTab.BLUR -> onBlurScrubChange(blurDragged || blurPressed)
             QuickControlTab.CARD_BLUR -> onCardBlurScrubChange(cardBlurDragged || cardBlurPressed)
             QuickControlTab.SIZE -> onCardScaleScrubChange(sizeDragged || sizePressed)
@@ -1657,8 +1670,8 @@ private fun QuickControlSliderPill(
                     .weight(1f, fill = false)
                     .graphicsLayer { alpha = chromeAlpha }
             ) {
-                QuickControlTab.values().forEach { tab ->
-                    val selected = tab == activeTab
+                visibleTabs.forEach { tab ->
+                    val selected = tab == effectiveTab
                     Surface(
                         onClick = { onTabSelect(tab) },
                         shape = RoundedCornerShape(50),
@@ -1699,7 +1712,7 @@ private fun QuickControlSliderPill(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        when (activeTab) {
+        when (effectiveTab) {
             QuickControlTab.BLUR -> {
                 Slider(
                     value = blurRadiusPx.coerceIn(0f, 40f),

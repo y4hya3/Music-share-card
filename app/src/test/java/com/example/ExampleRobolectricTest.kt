@@ -1187,4 +1187,136 @@ class ExampleRobolectricTest {
     val firstBeat = tracker.ingestFft(moderateBassFft, samplingRateMilliHz = 48_000_000, nowNanos = 2_000_000_000L)
     assertTrue("Expected responsive beat height >= 0.85f on moderate/loud kick (got ${firstBeat[0]})", firstBeat[0] >= 0.85f)
   }
+
+  @Test
+  fun `saved cover album linking prefill parser and offline auto-matching work seamlessly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    SavedMediaLibrary.initialize(context)
+
+    // 1. Smart edit pre-fill splits "27 - Elgrande toto" cleanly without searching
+    val parsedFromName = com.example.service.AlbumTracklistSearchService.parseSavedItemInitialAlbumAndArtist(
+      itemName = "27 - Elgrande toto",
+      itemArtist = "iTunes HD",
+      linkedAlbumName = "",
+      linkedAlbumArtist = ""
+    )
+    assertEquals("27", parsedFromName.album)
+    assertEquals("Elgrande toto", parsedFromName.artist)
+
+    // Catalog suffix stripped & existing linked album preserved
+    val parsedFromCatalog = com.example.service.AlbumTracklistSearchService.parseSavedItemInitialAlbumAndArtist(
+      itemName = "UTOPIA - Spotify",
+      itemArtist = "Travis Scott",
+      linkedAlbumName = "",
+      linkedAlbumArtist = ""
+    )
+    assertEquals("UTOPIA", parsedFromCatalog.album)
+    assertEquals("Travis Scott", parsedFromCatalog.artist)
+
+    // 2. Save a cover image, update its metadata via updateCoverMetadata, and verify persistence + offline matching
+    val coverBmp = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888)
+    Canvas(coverBmp).drawColor(AndroidColor.rgb(40, 180, 90))
+    val saved = runBlocking {
+      SavedMediaLibrary.saveCoverFromBitmap(
+        context = context,
+        bitmap = coverBmp,
+        customName = "27 - Elgrande toto",
+        artist = "Device Photo"
+      )
+    }
+    coverBmp.recycle()
+    assertNotNull(saved)
+
+    SavedMediaLibrary.updateCoverMetadata(
+      context = context,
+      id = saved!!.id,
+      newName = "27 - Elgrande toto",
+      linkedAlbumName = parsedFromName.album,
+      linkedAlbumArtist = parsedFromName.artist,
+      linkedTrackTitles = listOf("lol (feat.toto)", "Dellali", "Mghayer")
+    )
+    val updated = SavedMediaLibrary.savedCovers.value.firstOrNull { it.id == saved.id }
+    assertNotNull(updated)
+    assertEquals("27", updated!!.linkedAlbumName)
+    assertEquals("Elgrande toto", updated.linkedAlbumArtist)
+    assertEquals(listOf("lol (feat.toto)", "Dellali", "Mghayer"), updated.linkedTrackTitles)
+
+    // Reload from SharedPreferences to verify persistence
+    SavedMediaLibrary.initialize(context)
+    val reloadedCover = SavedMediaLibrary.savedCovers.value.firstOrNull { it.id == saved.id }
+    assertNotNull(reloadedCover)
+    assertEquals("27", reloadedCover!!.linkedAlbumName)
+    assertEquals("Elgrande toto", reloadedCover.linkedAlbumArtist)
+
+    // Offline matching with album "27" & spaced artist, AND manual song list with French "avec" variant
+    val matchByAlbum = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+      title = "Bonus Track",
+      album = "27",
+      artist = "El Grande Toto",
+      items = listOf(reloadedCover)
+    )
+    assertNotNull("Expected offline cover match by album '27'", matchByAlbum)
+    assertEquals(saved.id, matchByAlbum?.id)
+
+    val matchByAvecTrack = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+      title = "lol (avec toto)",
+      album = "",
+      artist = "El Grande Toto",
+      items = listOf(reloadedCover)
+    )
+    assertNotNull("Expected offline cover match for 'lol (avec toto)'", matchByAvecTrack)
+    assertEquals(saved.id, matchByAvecTrack?.id)
+
+    SavedMediaLibrary.deleteCover(context, saved.id)
+  }
+
+  @Test
+  fun `beat envelope tracker decays cleanly at volume 0 and resumes without glitching`() {
+    val tracker = AudioBeatMonitor.BeatEnvelopeTracker()
+    val loudFft = ByteArray(256).apply {
+      this[2] = 60
+      this[3] = 45
+      this[8] = 35
+      this[9] = 25
+    }
+    var tNs = 1_000_000_000L
+    val kickLevels = tracker.ingestFft(loudFft, 48_000_000, nowNanos = tNs)
+    assertTrue("Expected initial loud beat >= 0.80f (got ${kickLevels[0]})", kickLevels[0] >= 0.80f)
+
+    // Simulate volume turned to 0 for 2.5 seconds (silent capture frames every 50ms -> past old 1.5s cutoff)
+    val silentFft = ByteArray(256)
+    var latestSilent = FloatArray(4)
+    repeat(50) {
+      tNs += 50_000_000L
+      latestSilent = tracker.ingestFft(silentFft, 48_000_000, nowNanos = tNs)
+    }
+
+    // Feed must still report active capture so UI doesn't switch to synthetic fallback at volume 0
+    assertTrue("Expected capture feed to stay active while receiving silent frames", tracker.hasActiveCaptureFeed(tNs))
+    for (i in 0..3) {
+      assertTrue(
+        "Expected bar $i settled near resting floor at volume 0 (got ${latestSilent[i]})",
+        latestSilent[i] <= 0.22f
+      )
+    }
+
+    // Snapshot while paused/volume-0 stays smoothly at resting level (no random fallback jump)
+    val snap = tracker.snapshotAt(tNs)
+    assertNotNull("Expected non-null snapshot while capture feed is active at volume 0", snap)
+    for (i in 0..3) {
+      assertTrue("Expected snapshot bar $i resting <= 0.22f (got ${snap!![i]})", snap[i] <= 0.22f)
+    }
+
+    // Resume quiet audio after volume 0: must not over-amplify or jump straight to 1.0
+    val softResumeFft = ByteArray(256).apply {
+      this[2] = 8
+      this[3] = 6
+    }
+    tNs += 50_000_000L
+    val resumedSoft = tracker.ingestFft(softResumeFft, 48_000_000, nowNanos = tNs)
+    assertTrue(
+      "Expected gentle resume on soft audio after silence without spiking to 1.0 (got ${resumedSoft[0]})",
+      resumedSoft[0] < 0.75f
+    )
+  }
 }

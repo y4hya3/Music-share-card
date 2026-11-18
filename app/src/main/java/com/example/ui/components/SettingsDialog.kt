@@ -203,6 +203,43 @@ fun SettingsDialog(
                             }
                         }
 
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Show Waveform on Card",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = if (styleConfig.enableWaveform) {
+                                        "Visible on Floating Glass card (exports MP4 / transparent GIF)"
+                                    } else {
+                                        "Hidden — configure speed, beats & color without turning it on"
+                                    },
+                                    color = Color.White.copy(alpha = 0.60f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.enableWaveform,
+                                onCheckedChange = { enabled ->
+                                    onStyleChange(styleConfig.copy(enableWaveform = enabled))
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFFFF2B44)
+                                ),
+                                modifier = Modifier.testTag("settings_enable_waveform_switch")
+                            )
+                        }
+
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Row(
@@ -443,10 +480,7 @@ fun SettingsDialog(
                                         )
                                         .clickable {
                                             onStyleChange(
-                                                styleConfig.copy(
-                                                    enableWaveform = true,
-                                                    waveformColor = color
-                                                )
+                                                styleConfig.copy(waveformColor = color)
                                             )
                                         }
                                         .testTag("settings_waveform_color_$label"),

@@ -81,11 +81,17 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Velocity
+import java.util.concurrent.atomic.AtomicBoolean
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -148,7 +154,12 @@ fun EditCardBottomSheet(
     onTrackSelect: (MediaTrackInfo) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var activeScrub by remember { mutableStateOf(SheetLiveScrub.NONE) }
+    val isScrubTouchActive = remember { AtomicBoolean(false) }
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { activeScrub == SheetLiveScrub.NONE && !isScrubTouchActive.get() }
+    )
     val scrollState = rememberScrollState()
     val context = LocalContext.current
 
@@ -205,13 +216,27 @@ fun EditCardBottomSheet(
         mutableStateOf<Set<Pair<Int, Int>>>(emptySet())
     }
 
-    // Live scrubbing state inside Edit sheet (works for Card Size, Glass Opacity, BG Blur, Card Blur, Lyrics Blur)
-    var activeScrub by remember { mutableStateOf(SheetLiveScrub.NONE) }
+    // Live scrubbing state values inside Edit sheet (works for Card Size, Glass Opacity, BG Blur, Card Blur, Lyrics Blur)
     var latestCardScale by remember(styleConfig.cardScale) { mutableFloatStateOf(styleConfig.cardScale) }
     var latestCardOpacity by remember(styleConfig.cardOpacity) { mutableFloatStateOf(styleConfig.cardOpacity) }
     var latestBgBlur by remember(styleConfig.backgroundBlurRadius) { mutableFloatStateOf(styleConfig.backgroundBlurRadius) }
     var latestCardBlur by remember(styleConfig.cardBlurRadius) { mutableFloatStateOf(styleConfig.cardBlurRadius) }
     var latestLyricsBlur by remember(styleConfig.lyricsArtBlurRadius) { mutableFloatStateOf(styleConfig.lyricsArtBlurRadius) }
+    val scrubNestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                return if (activeScrub != SheetLiveScrub.NONE || isScrubTouchActive.get()) available else Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                return if (activeScrub != SheetLiveScrub.NONE || isScrubTouchActive.get()) available else Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                return if (activeScrub != SheetLiveScrub.NONE || isScrubTouchActive.get()) available else Velocity.Zero
+            }
+        }
+    }
 
     val chromeAlpha by animateFloatAsState(
         targetValue = if (activeScrub != SheetLiveScrub.NONE) 0f else 1f,
@@ -280,13 +305,32 @@ fun EditCardBottomSheet(
         contentColor = Color.White,
         modifier = modifier.testTag("edit_card_bottom_sheet")
     ) {
-        Box(modifier = sheetSurfaceModifier) {
+        Box(
+            modifier = sheetSurfaceModifier
+                .nestedScroll(scrubNestedScrollConnection)
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Main)
+                        do {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            if (isScrubTouchActive.get() || activeScrub != SheetLiveScrub.NONE) {
+                                event.changes.forEach { change ->
+                                    val dy = change.position.y - change.previousPosition.y
+                                    if (kotlin.math.abs(dy) > 0f && !change.isConsumed) {
+                                        change.consume()
+                                    }
+                                }
+                            }
+                        } while (event.changes.any { it.pressed })
+                    }
+                }
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 22.dp)
                     .padding(top = 12.dp, bottom = 36.dp)
-                    .verticalScroll(scrollState)
+                    .verticalScroll(scrollState, enabled = activeScrub == SheetLiveScrub.NONE)
             ) {
                 // Frosted Glass Drag Handle
                 Box(
@@ -1236,6 +1280,7 @@ fun EditCardBottomSheet(
                             onLiveCardScalePreview(clamped)
                         },
                         onValueChangeFinished = {
+                            isScrubTouchActive.set(false)
                             activeScrub = SheetLiveScrub.NONE
                             onStyleChange(styleConfig.copy(cardScale = latestCardScale.coerceIn(0.60f, 1.20f)))
                             onLiveCardScalePreview(null)
@@ -1251,12 +1296,14 @@ fun EditCardBottomSheet(
                             .pointerInput(Unit) {
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    isScrubTouchActive.set(true)
                                     activeScrub = SheetLiveScrub.CARD_SIZE
                                     try {
                                         do {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
                                         } while (event.changes.any { it.pressed })
                                     } finally {
+                                        isScrubTouchActive.set(false)
                                         if (activeScrub == SheetLiveScrub.CARD_SIZE) {
                                             activeScrub = SheetLiveScrub.NONE
                                         }
@@ -1316,6 +1363,7 @@ fun EditCardBottomSheet(
                             onLiveCardOpacityPreview(clamped)
                         },
                         onValueChangeFinished = {
+                            isScrubTouchActive.set(false)
                             activeScrub = SheetLiveScrub.NONE
                             onStyleChange(styleConfig.copy(cardOpacity = latestCardOpacity.coerceIn(0.0f, 1.0f)))
                             onLiveCardOpacityPreview(null)
@@ -1331,12 +1379,14 @@ fun EditCardBottomSheet(
                             .pointerInput(Unit) {
                                 awaitEachGesture {
                                     awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    isScrubTouchActive.set(true)
                                     activeScrub = SheetLiveScrub.CARD_OPACITY
                                     try {
                                         do {
                                             val event = awaitPointerEvent(PointerEventPass.Initial)
                                         } while (event.changes.any { it.pressed })
                                     } finally {
+                                        isScrubTouchActive.set(false)
                                         if (activeScrub == SheetLiveScrub.CARD_OPACITY) {
                                             activeScrub = SheetLiveScrub.NONE
                                         }
@@ -1570,11 +1620,10 @@ fun EditCardBottomSheet(
                                 onLiveBlurPreview(clamped)
                             },
                             onValueChangeFinished = {
+                                isScrubTouchActive.set(false)
                                 activeScrub = SheetLiveScrub.NONE
                                 onStyleChange(
                                     styleConfig.copy(
-                                        useBlurredAlbumBackground = if (activeCanvasUrl.isNullOrBlank()) true else styleConfig.useBlurredAlbumBackground,
-                                        useTransparentBackground = false,
                                         backgroundBlurRadius = latestBgBlur.coerceIn(0f, 40f)
                                     )
                                 )
@@ -1591,12 +1640,14 @@ fun EditCardBottomSheet(
                                 .pointerInput(Unit) {
                                     awaitEachGesture {
                                         awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                        isScrubTouchActive.set(true)
                                         activeScrub = SheetLiveScrub.BG_BLUR
                                         try {
                                             do {
                                                 val event = awaitPointerEvent(PointerEventPass.Initial)
                                             } while (event.changes.any { it.pressed })
                                         } finally {
+                                            isScrubTouchActive.set(false)
                                             if (activeScrub == SheetLiveScrub.BG_BLUR) {
                                                 activeScrub = SheetLiveScrub.NONE
                                             }
@@ -1610,7 +1661,7 @@ fun EditCardBottomSheet(
 
                 // 5C & 6. GRADIENTS + CARD LAYOUT STYLE
                 Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
-                    if (!styleConfig.useTransparentBackground) {
+                    if (!styleConfig.useTransparentBackground && !styleConfig.useBlurredAlbumBackground) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
                             text = "Adaptive Palette Gradients",
@@ -1752,6 +1803,7 @@ fun EditCardBottomSheet(
                                 onLiveCardBlurPreview(clamped)
                             },
                             onValueChangeFinished = {
+                                isScrubTouchActive.set(false)
                                 activeScrub = SheetLiveScrub.NONE
                                 onStyleChange(styleConfig.copy(cardBlurRadius = latestCardBlur.coerceIn(0f, 40f)))
                                 onLiveCardBlurPreview(null)
@@ -1767,12 +1819,14 @@ fun EditCardBottomSheet(
                                 .pointerInput(Unit) {
                                     awaitEachGesture {
                                         awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                        isScrubTouchActive.set(true)
                                         activeScrub = SheetLiveScrub.CARD_BLUR
                                         try {
                                             do {
                                                 val event = awaitPointerEvent(PointerEventPass.Initial)
                                             } while (event.changes.any { it.pressed })
                                         } finally {
+                                            isScrubTouchActive.set(false)
                                             if (activeScrub == SheetLiveScrub.CARD_BLUR) {
                                                 activeScrub = SheetLiveScrub.NONE
                                             }
@@ -1830,7 +1884,7 @@ fun EditCardBottomSheet(
                                         )
                                     }
 
-                                    if (styleConfig.enableWaveform || styleConfig.waveformBeatSync) {
+                                    if (styleConfig.enableWaveform) {
                                         Spacer(modifier = Modifier.height(12.dp))
                                         Text(
                                             text = "Waveform Bar Color",
@@ -1870,10 +1924,7 @@ fun EditCardBottomSheet(
                                                         )
                                                         .clickable {
                                                             onStyleChange(
-                                                                styleConfig.copy(
-                                                                    enableWaveform = true,
-                                                                    waveformColor = color
-                                                                )
+                                                                styleConfig.copy(waveformColor = color)
                                                             )
                                                         }
                                                         .testTag("waveform_color_$label"),
@@ -2136,6 +2187,7 @@ fun EditCardBottomSheet(
                                         onLiveLyricsBlurPreview(clamped)
                                     },
                                     onValueChangeFinished = {
+                                        isScrubTouchActive.set(false)
                                         activeScrub = SheetLiveScrub.NONE
                                         onStyleChange(styleConfig.copy(lyricsArtBlurRadius = latestLyricsBlur.coerceIn(0f, 40f)))
                                         onLiveLyricsBlurPreview(null)
@@ -2151,12 +2203,14 @@ fun EditCardBottomSheet(
                                         .pointerInput(Unit) {
                                             awaitEachGesture {
                                                 awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                                isScrubTouchActive.set(true)
                                                 activeScrub = SheetLiveScrub.LYRICS_BLUR
                                                 try {
                                                     do {
                                                         val event = awaitPointerEvent(PointerEventPass.Initial)
                                                     } while (event.changes.any { it.pressed })
                                                 } finally {
+                                                    isScrubTouchActive.set(false)
                                                     if (activeScrub == SheetLiveScrub.LYRICS_BLUR) {
                                                         activeScrub = SheetLiveScrub.NONE
                                                     }
@@ -2899,8 +2953,16 @@ fun EditCardBottomSheet(
                 MediaNotificationRepository.selectSavedCover(item)
                 showSavedCoversDialog = false
             },
-            onRename = { item, newName ->
-                SavedMediaLibrary.renameCover(context, item.id, newName)
+            onUpdateCover = { item, newName, albumName, albumArtist, tracks ->
+                SavedMediaLibrary.updateCoverMetadata(
+                    context = context,
+                    id = item.id,
+                    newName = newName,
+                    linkedAlbumName = albumName,
+                    linkedAlbumArtist = albumArtist,
+                    linkedTrackTitles = tracks
+                )
+                MediaNotificationRepository.recheckSavedAlbumCoverForCurrentTrack()
             },
             onDelete = { item ->
                 SavedMediaLibrary.deleteCover(context, item.id)

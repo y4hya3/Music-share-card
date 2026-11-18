@@ -46,6 +46,7 @@ object MediaNotificationRepository {
 
     private var onlineSearchJob: Job? = null
     private var canvasSearchJob: Job? = null
+    private var coverLoadJob: Job? = null
     private var lyricsSearchJob: Job? = null
     private var paletteJob: Job? = null
     private var prefsSaveJob: Job? = null
@@ -57,6 +58,7 @@ object MediaNotificationRepository {
     private var userManuallySelectedCoverTrackKey: String? = null
     private var userManuallySelectedCanvasTrackKey: String? = null
     private var autoAppliedSavedCanvasTrackKey: String? = null
+    private var autoAppliedSavedCoverTrackKey: String? = null
 
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
@@ -233,6 +235,8 @@ object MediaNotificationRepository {
             userManuallySelectedCoverTrackKey = null
             userManuallySelectedCanvasTrackKey = null
             autoAppliedSavedCanvasTrackKey = null
+            autoAppliedSavedCoverTrackKey = null
+            coverLoadJob?.cancel()
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
             val prevPixels = if (prevOrig != null && !prevOrig.isRecycled) prevOrig.width.toLong() * prevOrig.height.toLong() else 0L
@@ -246,8 +250,9 @@ object MediaNotificationRepository {
         val incomingArt = trackInfo.albumArt
 
         val resolvedArt = when {
-            isSameTrack && userManuallySelectedCoverTrackKey == newKey && currentArt != null && !currentArt.isRecycled -> {
-                // Respect user's manual cover art choice for the active song
+            isSameTrack && (userManuallySelectedCoverTrackKey == newKey || autoAppliedSavedCoverTrackKey == newKey) &&
+                currentArt != null && !currentArt.isRecycled -> {
+                // Respect user's manual or linked offline cover art choice for the active song
                 currentArt
             }
             isSameTrack && currentArt != null && !currentArt.isRecycled -> {
@@ -292,13 +297,27 @@ object MediaNotificationRepository {
             }
         }
 
+        // Offline Saved Album / Song Cover Art auto-apply (highest priority & works 100% offline)
+        if (!isSameTrack || (_selectedCoverId.value == "player" && userManuallySelectedCoverTrackKey != newKey)) {
+            val savedCoverMatch = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+                title = finalTrack.title,
+                album = finalTrack.album,
+                artist = finalTrack.artist
+            )
+            if (savedCoverMatch != null) {
+                autoAppliedSavedCoverTrackKey = newKey
+                applySavedCoverForTrackAsync(finalTrack, savedCoverMatch, isAutoApply = true)
+            }
+        }
+
         // If Auto-Search Online HD Cover is enabled, look up HD candidates automatically for new live tracks
+        // (unless a linked offline Saved Album cover already matched for this track)
         if (!finalTrack.isSample &&
             _styleConfig.value.autoSearchOnlineArt &&
             lastAutoSearchedTrackKey != newKey
         ) {
             lastAutoSearchedTrackKey = newKey
-            searchOnlineCovers(autoApplyBest = true)
+            searchOnlineCovers(autoApplyBest = autoAppliedSavedCoverTrackKey != newKey)
         }
 
         // If Auto-Search Animated Canvas is enabled, look up looping canvases automatically for new live tracks
@@ -326,7 +345,7 @@ object MediaNotificationRepository {
             current.artist == artist
         ) {
             _originalPlayerArt.value = albumArt
-            if (userManuallySelectedCoverTrackKey == key) return
+            if (userManuallySelectedCoverTrackKey == key || autoAppliedSavedCoverTrackKey == key) return
 
             val existing = current.albumArt
             val existingPixels = if (existing != null && !existing.isRecycled) {
@@ -358,6 +377,7 @@ object MediaNotificationRepository {
     }
 
     fun selectSampleTrack(track: MediaTrackInfo) {
+        coverLoadJob?.cancel()
         _originalPlayerArt.value = track.albumArt
         _selectedCoverId.value = "player"
         _onlineCoverCandidates.value = emptyList()
@@ -368,22 +388,34 @@ object MediaNotificationRepository {
         userManuallySelectedCoverTrackKey = null
         userManuallySelectedCanvasTrackKey = null
         autoAppliedSavedCanvasTrackKey = null
+        autoAppliedSavedCoverTrackKey = null
         lastAutoSearchedTrackKey = null
         lastAutoCanvasTrackKey = null
 
+        val key = trackKey(track)
         val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
             title = track.title,
             album = track.album,
             artist = track.artist
         )
         if (savedMatch != null) {
-            autoAppliedSavedCanvasTrackKey = trackKey(track)
+            autoAppliedSavedCanvasTrackKey = key
             _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
             _activeCanvasUrl.value = savedMatch.fileUri
         }
 
         _currentTrack.value = track
         extractPaletteForTrack(track)
+
+        val savedCoverMatch = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+            title = track.title,
+            album = track.album,
+            artist = track.artist
+        )
+        if (savedCoverMatch != null) {
+            autoAppliedSavedCoverTrackKey = key
+            applySavedCoverForTrackAsync(track, savedCoverMatch, isAutoApply = true)
+        }
     }
 
     fun recheckSavedAlbumCanvasForCurrentTrack() {
@@ -398,6 +430,48 @@ object MediaNotificationRepository {
             autoAppliedSavedCanvasTrackKey = key
             _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
             _activeCanvasUrl.value = savedMatch.fileUri
+        } else if (autoAppliedSavedCanvasTrackKey == key && _activeCanvasId.value.startsWith("saved_canvas_")) {
+            autoAppliedSavedCanvasTrackKey = null
+            _activeCanvasId.value = "none"
+            _activeCanvasUrl.value = null
+        }
+    }
+
+    fun recheckSavedAlbumCoverForCurrentTrack() {
+        val track = _currentTrack.value
+        val key = trackKey(track)
+        val savedMatch = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+            title = track.title,
+            album = track.album,
+            artist = track.artist
+        )
+        if (savedMatch != null) {
+            autoAppliedSavedCoverTrackKey = key
+            applySavedCoverForTrackAsync(track, savedMatch, isAutoApply = true)
+        } else if (autoAppliedSavedCoverTrackKey == key && _selectedCoverId.value.startsWith("saved_cover_")) {
+            autoAppliedSavedCoverTrackKey = null
+            restoreOriginalPlayerCover()
+        }
+    }
+
+    private fun applySavedCoverForTrackAsync(
+        trackSnapshot: MediaTrackInfo,
+        matchedCover: SavedCoverItem,
+        isAutoApply: Boolean
+    ) {
+        val expectedKey = trackKey(trackSnapshot)
+        coverLoadJob?.cancel()
+        coverLoadJob = repositoryScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                SavedMediaLibrary.loadBitmap(matchedCover.localImagePath, maxDimension = 1600)
+            } ?: return@launch
+            val current = _currentTrack.value
+            if (trackKey(current) != expectedKey) return@launch
+            if (isAutoApply && userManuallySelectedCoverTrackKey == expectedKey) return@launch
+            _selectedCoverId.value = "saved_cover_${matchedCover.id}"
+            val updated = current.copy(albumArt = bmp)
+            _currentTrack.value = updated
+            extractPaletteForTrack(updated)
         }
     }
 
@@ -559,6 +633,8 @@ object MediaNotificationRepository {
     }
 
     fun restoreOriginalPlayerCover() {
+        coverLoadJob?.cancel()
+        autoAppliedSavedCoverTrackKey = null
         val orig = _originalPlayerArt.value ?: return
         val current = _currentTrack.value
         userManuallySelectedCoverTrackKey = null
@@ -576,6 +652,7 @@ object MediaNotificationRepository {
         val current = _currentTrack.value
         if (markAsManual) {
             userManuallySelectedCoverTrackKey = trackKey(current)
+            autoAppliedSavedCoverTrackKey = null
         }
         _selectedCoverId.value = candidate.id
         val updated = current.copy(albumArt = hdBitmap)
@@ -821,12 +898,14 @@ object MediaNotificationRepository {
     }
 
     fun selectSavedCover(item: SavedCoverItem) {
+        coverLoadJob?.cancel()
         repositoryScope.launch {
             val bmp = withContext(Dispatchers.IO) {
                 SavedMediaLibrary.loadBitmap(item.localImagePath, maxDimension = 1600)
             } ?: return@launch
             val current = _currentTrack.value
             userManuallySelectedCoverTrackKey = trackKey(current)
+            autoAppliedSavedCoverTrackKey = null
             _selectedCoverId.value = "saved_cover_${item.id}"
             val updated = current.copy(albumArt = bmp)
             _currentTrack.value = updated
