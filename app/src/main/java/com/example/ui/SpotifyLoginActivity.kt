@@ -450,15 +450,19 @@ class SpotifyLoginActivity : ComponentActivity() {
                         ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
                         ?.value
                     if (!ct.isNullOrBlank()) {
-                        SpotifyAuthManager.latestCapturedClientToken = ct.trim()
+                        SpotifyAuthManager.captureClientToken(ct)
                     }
+                    val isAuthedEndpoint = reqUrl.contains("api-partner.spotify.com") ||
+                        reqUrl.contains("spclient.wg.spotify.com") ||
+                        reqUrl.contains("api.spotify.com")
                     val auth = headers?.entries
                         ?.firstOrNull { it.key.equals("Authorization", ignoreCase = true) }
                         ?.value
-                    if (!auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
+                    if (isAuthedEndpoint && !auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
                         val token = auth.substring(7).trim()
-                        if (token.length >= 20) {
-                            runOnUiThread { handleCapturedToken(token, 0L) }
+                        val spDc = extractSpDcFromCookies()
+                        if (token.length >= 20 && spDc.length >= 20) {
+                            runOnUiThread { handleCapturedToken(token, 0L, spDc) }
                         }
                     }
                 }
@@ -688,29 +692,24 @@ private const val TOKEN_CAPTURE_JS = """
     }
     var sessionEl = document.getElementById('session') || document.getElementById('appServerConfig');
     if (sessionEl && sessionEl.textContent) {
-      try {
-        var parsed = JSON.parse(sessionEl.textContent);
-        if (parsed && parsed.accessToken && !parsed.isAnonymous &&
-            sendTok(parsed.accessToken, parsed.accessTokenExpirationTimestampMs)) {
-          return;
-        }
-      } catch (e) {}
+      var rawTxt = sessionEl.textContent.trim();
+      var candidates = [rawTxt];
+      try { candidates.push(atob(rawTxt)); } catch (e) {}
+      for (var c = 0; c < candidates.length; c++) {
+        try {
+          var parsed = JSON.parse(candidates[c]);
+          if (parsed && parsed.accessToken && !parsed.isAnonymous &&
+              sendTok(parsed.accessToken, parsed.accessTokenExpirationTimestampMs)) {
+            return;
+          }
+        } catch (e) {}
+      }
     }
     if (!window.__echoSnapHookedFetch && window.fetch) {
       window.__echoSnapHookedFetch = true;
       var origFetch = window.fetch;
       window.fetch = function() {
         var args = arguments;
-        try {
-          var init = args[1];
-          if (init && init.headers) {
-            var h = init.headers;
-            var auth = (typeof h.get === 'function') ? h.get('Authorization') : (h['Authorization'] || h['authorization']);
-            if (auth && String(auth).indexOf('Bearer ') === 0) {
-              sendTok(String(auth).substring(7), 0);
-            }
-          }
-        } catch (e) {}
         return origFetch.apply(this, args).then(function(resp) {
           try {
             var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');

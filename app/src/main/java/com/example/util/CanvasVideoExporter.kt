@@ -288,16 +288,21 @@ object CanvasVideoExporter {
         if (videoUrl.startsWith("file://")) {
             val path = Uri.parse(videoUrl).path ?: return null
             val f = File(path)
-            return if (f.exists() && f.length() > 10_240L) f else null
+            return if (f.exists() && f.length() > 4096L) f else null
         }
         val cacheDir = File(context.cacheDir, "canvas_video_cache")
         val cacheKey = videoUrl.hashCode().toUInt().toString(16)
         val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        return if (cached.exists() && cached.length() > 10_240L) cached else null
+        return if (cached.exists() && cached.length() > 4096L) cached else null
     }
 
     suspend fun prefetchVideoToCache(context: Context, videoUrl: String): File? = withContext(Dispatchers.IO) {
         resolveVideoFile(context, videoUrl)
+    }
+
+    suspend fun resolveOrCacheVideoUri(context: Context, videoUrl: String): String? = withContext(Dispatchers.IO) {
+        val file = resolveVideoFile(context, videoUrl) ?: return@withContext null
+        Uri.fromFile(file).toString()
     }
 
     private fun prepareOutputDir(context: Context): File =
@@ -313,7 +318,7 @@ object CanvasVideoExporter {
         if (videoUrl.startsWith("file://")) {
             val path = Uri.parse(videoUrl).path ?: return null
             val localFile = File(path)
-            return if (localFile.exists() && localFile.length() > 10_240L) localFile else null
+            return if (localFile.exists() && localFile.length() > 4096L) localFile else null
         }
         if (videoUrl.startsWith("content://")) {
             val cacheDir = File(context.cacheDir, "canvas_video_cache").apply { mkdirs() }
@@ -325,7 +330,7 @@ object CanvasVideoExporter {
                         out.flush()
                     }
                 }
-                if (dst.exists() && dst.length() > 10_240L) dst else null
+                if (dst.exists() && dst.length() > 4096L) dst else null
             } catch (_: Exception) {
                 dst.delete()
                 null
@@ -338,25 +343,28 @@ object CanvasVideoExporter {
         val cacheDir = File(context.cacheDir, "canvas_video_cache").apply { mkdirs() }
         val cacheKey = videoUrl.hashCode().toUInt().toString(16)
         val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        if (cached.exists() && cached.length() > 10_240L) {
+        if (cached.exists() && cached.length() > 4096L) {
+            cached.setLastModified(System.currentTimeMillis())
             return cached
         }
 
         // Keep cache bounded on low-storage devices like Redmi 9C
         cacheDir.listFiles()
             ?.sortedByDescending { it.lastModified() }
-            ?.drop(4)
+            ?.drop(7)
             ?.forEach { it.delete() }
 
         val tempFile = File(cacheDir, "tmp_$cacheKey.mp4")
+        if (tempFile.exists()) tempFile.delete()
         var currentUrl = videoUrl
         var redirects = 0
-        while (redirects < 4) {
+        while (redirects < 6) {
             val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 15000
+                connectTimeout = 9000
+                readTimeout = 20000
                 instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "EchoSnap/1.3.0 Android")
+                setRequestProperty("User-Agent", com.example.service.SpotifyAuthManager.DESKTOP_BROWSER_UA)
+                setRequestProperty("Accept", "*/*")
             }
             try {
                 val code = conn.responseCode
@@ -374,10 +382,14 @@ object CanvasVideoExporter {
                         output.flush()
                     }
                 }
-                if (tempFile.length() > 10_240L) {
+                if (tempFile.length() > 4096L) {
                     if (cached.exists()) cached.delete()
-                    tempFile.renameTo(cached)
-                    return cached
+                    if (tempFile.renameTo(cached)) {
+                        return cached
+                    }
+                    tempFile.copyTo(cached, overwrite = true)
+                    tempFile.delete()
+                    return if (cached.exists() && cached.length() > 4096L) cached else null
                 }
                 tempFile.delete()
                 return null

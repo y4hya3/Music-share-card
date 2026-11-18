@@ -68,6 +68,7 @@ data class CardStyleConfig(
     val spotifySpDcCookie: String = "",
     val spotifyRefreshToken: String = "",
     val spotifyTokenExpiryMs: Long = 0L,
+    val spotifyTokenLastRefreshedMs: Long = 0L,
     val spotifyClientId: String = "",
     val spotifyAccountLabel: String = "",
     val customLyrics: String = ""

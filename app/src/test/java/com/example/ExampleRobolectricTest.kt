@@ -30,6 +30,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -826,5 +827,142 @@ class ExampleRobolectricTest {
       ),
       fallbackLines
     )
+  }
+
+  @Test
+  fun `spotify token proactive refresh triggers at 12 minutes and client-token invalidates cleanly`() {
+    val now = 1_700_000_000_000L
+    // Fresh session (<12 min and expiry > 5 min away) -> no refresh needed
+    assertFalse(
+      com.example.service.AnimatedCanvasSearchService.shouldRefreshSpotifyToken(
+        hasActiveToken = true,
+        tokenExpiryMs = now + 30 * 60_000L,
+        lastRefreshedAtMs = now - 5 * 60_000L,
+        nowMs = now,
+        hasRefreshCredential = true
+      )
+    )
+    // 12+ minutes elapsed since last refresh -> proactive refresh triggers even if expiry claims longer
+    assertTrue(
+      com.example.service.AnimatedCanvasSearchService.shouldRefreshSpotifyToken(
+        hasActiveToken = true,
+        tokenExpiryMs = now + 40 * 60_000L,
+        lastRefreshedAtMs = now - 13 * 60_000L,
+        nowMs = now,
+        hasRefreshCredential = true
+      )
+    )
+    // Within 5 minutes of expiry -> proactive refresh triggers
+    assertTrue(
+      com.example.service.AnimatedCanvasSearchService.shouldRefreshSpotifyToken(
+        hasActiveToken = true,
+        tokenExpiryMs = now + 2 * 60_000L,
+        lastRefreshedAtMs = now - 1 * 60_000L,
+        nowMs = now,
+        hasRefreshCredential = true
+      )
+    )
+
+    // Captured client-token store + invalidation
+    com.example.service.SpotifyAuthManager.captureClientToken("client-token-abc1234567890")
+    assertEquals("client-token-abc1234567890", com.example.service.SpotifyAuthManager.getValidCapturedClientToken())
+    com.example.service.SpotifyAuthManager.invalidateCapturedClientToken()
+    assertNull(com.example.service.SpotifyAuthManager.getValidCapturedClientToken())
+
+    // spotifyTokenLastRefreshedMs persistence
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val saved = CardStylePreferences.load(context).copy(spotifyTokenLastRefreshedMs = 1_712_345_678_900L)
+    CardStylePreferences.save(context, saved)
+    val reloaded = CardStylePreferences.load(context)
+    assertEquals(1_712_345_678_900L, reloaded.spotifyTokenLastRefreshedMs)
+  }
+
+  @Test
+  fun `saved canvas offline album and song list matching applies cleanly even when album tag is missing`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val dummyMp4 = java.io.File(context.cacheDir, "astro_loop_test.mp4").apply {
+      writeBytes(ByteArray(8192) { 0x42 })
+    }
+    val item = com.example.repository.SavedCanvasItem(
+      id = "sc_test_astro",
+      name = "Astro Loop",
+      artist = "Travis Scott",
+      localVideoPath = dummyMp4.absolutePath,
+      thumbnailPath = null,
+      resolutionLabel = "1080×1920 MP4",
+      createdAtMs = 1_000L,
+      linkedAlbumName = "ASTROWORLD",
+      linkedAlbumArtist = "Travis Scott",
+      linkedTrackTitles = listOf("STARGAZING", "CAROUSEL", "SICKO MODE", "STOP TRYING TO BE GOD")
+    )
+
+    // 1. Matches by album + track
+    val albumMatch = com.example.repository.SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "CAROUSEL",
+      album = "ASTROWORLD",
+      artist = "Travis Scott",
+      items = listOf(item)
+    )
+    assertNotNull("Expected album + track match", albumMatch)
+    assertEquals("sc_test_astro", albumMatch?.id)
+
+    // 2. Matches offline even when player omits album tag or plays a numbered MP3 filename
+    val trackOnlyOfflineMatch = com.example.repository.SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "04 - Stop Trying To Be God.mp3",
+      album = "",
+      artist = "Travis Scott",
+      items = listOf(item)
+    )
+    assertNotNull("Expected offline match by linked song title without album metadata", trackOnlyOfflineMatch)
+    assertEquals("sc_test_astro", trackOnlyOfflineMatch?.id)
+
+    // 3. Does not match unrelated track/album
+    val unrelated = com.example.repository.SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "Blinding Lights",
+      album = "After Hours",
+      artist = "The Weeknd",
+      items = listOf(item)
+    )
+    assertNull("Expected unrelated song/album not to match", unrelated)
+
+    // 4. Persists linkedAlbumName & linkedTrackTitles cleanly into SavedMediaLibrary index and updates repository offline
+    val importedUri = android.net.Uri.fromFile(dummyMp4)
+    val imported = runBlocking {
+      com.example.repository.SavedMediaLibrary.importCanvasFromUri(context, importedUri, "My Offline Astro")
+    }
+    assertNotNull(imported)
+    com.example.repository.SavedMediaLibrary.updateCanvasMetadata(
+      context = context,
+      id = imported!!.id,
+      newName = "My Offline Astro",
+      linkedAlbumName = "ASTROWORLD",
+      linkedAlbumArtist = "Travis Scott",
+      linkedTrackTitles = listOf("STARGAZING", "CAROUSEL", "SICKO MODE")
+    )
+    com.example.repository.SavedMediaLibrary.initialize(context)
+    val persisted = com.example.repository.SavedMediaLibrary.savedCanvases.value.firstOrNull { it.id == imported.id }
+    assertNotNull(persisted)
+    assertEquals("ASTROWORLD", persisted?.linkedAlbumName)
+    assertEquals(3, persisted?.linkedTrackTitles?.size)
+
+    // Verify repository auto-applies offline canvas when playing track from that album
+    com.example.repository.MediaNotificationRepository.initialize(context)
+    com.example.repository.MediaNotificationRepository.updateTrack(
+      MediaTrackInfo(
+        title = "CAROUSEL",
+        artist = "Travis Scott",
+        album = "",
+        appName = "Musicolet",
+        packageName = "in.krosbits.musicolet",
+        albumArt = null,
+        isPlaying = true,
+        isSample = false
+      )
+    )
+    assertEquals("saved_canvas_${imported.id}", com.example.repository.MediaNotificationRepository.activeCanvasId.value)
+    assertEquals(persisted!!.fileUri, com.example.repository.MediaNotificationRepository.activeCanvasUrl.value)
+
+    com.example.repository.SavedMediaLibrary.deleteCanvas(context, imported.id)
+    dummyMp4.delete()
   }
 }

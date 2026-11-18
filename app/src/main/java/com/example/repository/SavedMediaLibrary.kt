@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import com.example.service.AlbumTracklistSearchService
 import com.example.service.AnimatedCanvasCandidate
 import com.example.service.CoverArtSearchService
 import com.example.service.OnlineCoverCandidate
@@ -29,7 +30,10 @@ data class SavedCanvasItem(
     val localVideoPath: String,
     val thumbnailPath: String?,
     val resolutionLabel: String,
-    val createdAtMs: Long
+    val createdAtMs: Long,
+    val linkedAlbumName: String = "",
+    val linkedAlbumArtist: String = "",
+    val linkedTrackTitles: List<String> = emptyList()
 ) {
     val fileUri: String
         get() = Uri.fromFile(File(localVideoPath)).toString()
@@ -185,6 +189,102 @@ object SavedMediaLibrary {
         val next = readCanvasIndex(ctx).map { if (it.id == id) it.copy(name = clean) else it }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+    }
+
+    fun updateCanvasMetadata(
+        context: Context,
+        id: String,
+        newName: String,
+        linkedAlbumName: String,
+        linkedAlbumArtist: String,
+        linkedTrackTitles: List<String>
+    ) {
+        val ctx = context.applicationContext
+        val cleanName = newName.trim()
+        val cleanAlbum = linkedAlbumName.trim()
+        val cleanArtist = linkedAlbumArtist.trim()
+        val cleanTracks = linkedTrackTitles.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val next = readCanvasIndex(ctx).map { item ->
+            if (item.id == id) {
+                item.copy(
+                    name = cleanName.ifEmpty { item.name },
+                    linkedAlbumName = cleanAlbum,
+                    linkedAlbumArtist = cleanArtist,
+                    linkedTrackTitles = cleanTracks
+                )
+            } else {
+                item
+            }
+        }
+        writeCanvasIndex(ctx, next)
+        _savedCanvases.value = next
+    }
+
+    /**
+     * Finds a locally saved Canvas linked to an Album (or any of its fetched song names).
+     * Works 100% offline using cached linkedAlbumName & linkedTrackTitles stored on SavedCanvasItem.
+     */
+    fun findMatchingSavedCanvasForTrack(
+        title: String,
+        album: String,
+        artist: String,
+        items: List<SavedCanvasItem> = _savedCanvases.value,
+        verifyFileExists: Boolean = true
+    ): SavedCanvasItem? {
+        val normTitle = AlbumTracklistSearchService.normalizeMatchKey(title)
+        val normAlbum = AlbumTracklistSearchService.normalizeMatchKey(album)
+        val normArtist = AlbumTracklistSearchService.normalizeMatchKey(artist)
+        if (normTitle.isEmpty() && normAlbum.isEmpty()) return null
+
+        var bestItem: SavedCanvasItem? = null
+        var bestScore = 0
+
+        for (item in items) {
+            if (item.linkedAlbumName.isBlank() && item.linkedTrackTitles.isEmpty()) continue
+            if (verifyFileExists && !File(item.localVideoPath).exists()) continue
+
+            val normLinkedAlbum = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumName)
+            val normLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumArtist)
+
+            val artistCompatible = normArtist.isEmpty() ||
+                normLinkedArtist.isEmpty() ||
+                normArtist == normLinkedArtist ||
+                normArtist.contains(normLinkedArtist) ||
+                normLinkedArtist.contains(normArtist)
+
+            val albumExactMatch = normAlbum.isNotEmpty() && normLinkedAlbum.isNotEmpty() &&
+                normAlbum == normLinkedAlbum
+            val albumLooseMatch = normAlbum.isNotEmpty() && normLinkedAlbum.isNotEmpty() &&
+                normAlbum.length >= 4 && normLinkedAlbum.length >= 4 &&
+                (normAlbum.contains(normLinkedAlbum) || normLinkedAlbum.contains(normAlbum))
+
+            val matchedTrack = normTitle.isNotEmpty() && item.linkedTrackTitles.any { savedSong ->
+                val normSavedSong = AlbumTracklistSearchService.normalizeMatchKey(savedSong)
+                normSavedSong.isNotEmpty() && (
+                    normSavedSong == normTitle ||
+                        (normTitle.length >= 5 && normSavedSong.length >= 5 &&
+                            (normTitle.contains(normSavedSong) || normSavedSong.contains(normTitle)))
+                    )
+            }
+
+            if (!albumExactMatch && !albumLooseMatch && !matchedTrack) continue
+
+            var score = 0
+            if (matchedTrack) score += 80
+            if (albumExactMatch) score += 70 else if (albumLooseMatch) score += 40
+            if (artistCompatible) score += 25 else if (!albumExactMatch) continue
+
+            // Require either album match OR explicit track match backed by compatible artist
+            val isQualified = albumExactMatch ||
+                (matchedTrack && artistCompatible) ||
+                (albumLooseMatch && artistCompatible)
+
+            if (isQualified && score > bestScore) {
+                bestScore = score
+                bestItem = item
+            }
+        }
+        return bestItem
     }
 
     fun deleteCanvas(context: Context, id: String) {
@@ -418,6 +518,17 @@ object SavedMediaLibrary {
                     val id = o.optString("id")
                     val path = o.optString("localVideoPath")
                     if (id.isNotBlank() && path.isNotBlank()) {
+                        val tracksJson = o.optJSONArray("linkedTrackTitles")
+                        val tracks = if (tracksJson != null) {
+                            buildList {
+                                for (t in 0 until tracksJson.length()) {
+                                    val song = tracksJson.optString(t).trim()
+                                    if (song.isNotEmpty()) add(song)
+                                }
+                            }
+                        } else {
+                            emptyList()
+                        }
                         add(
                             SavedCanvasItem(
                                 id = id,
@@ -426,7 +537,10 @@ object SavedMediaLibrary {
                                 localVideoPath = path,
                                 thumbnailPath = o.optString("thumbnailPath", "").ifBlank { null },
                                 resolutionLabel = o.optString("resolutionLabel", "MP4"),
-                                createdAtMs = o.optLong("createdAtMs", 0L)
+                                createdAtMs = o.optLong("createdAtMs", 0L),
+                                linkedAlbumName = o.optString("linkedAlbumName", ""),
+                                linkedAlbumArtist = o.optString("linkedAlbumArtist", ""),
+                                linkedTrackTitles = tracks
                             )
                         )
                     }
@@ -451,6 +565,9 @@ object SavedMediaLibrary {
                     put("thumbnailPath", item.thumbnailPath ?: "")
                     put("resolutionLabel", item.resolutionLabel)
                     put("createdAtMs", item.createdAtMs)
+                    put("linkedAlbumName", item.linkedAlbumName)
+                    put("linkedAlbumArtist", item.linkedAlbumArtist)
+                    put("linkedTrackTitles", JSONArray(item.linkedTrackTitles))
                 }
             )
         }

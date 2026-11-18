@@ -160,6 +160,7 @@ fun EditCardBottomSheet(
     val canvasCandidates by MediaNotificationRepository.animatedCanvasCandidates.collectAsState()
     val isSearchingCanvas by MediaNotificationRepository.isSearchingCanvas.collectAsState()
     val canvasSearchStatus by MediaNotificationRepository.canvasSearchStatus.collectAsState()
+    val spotifyReloginRequired by MediaNotificationRepository.spotifyReloginRequired.collectAsState()
     val activeCanvasId by MediaNotificationRepository.activeCanvasId.collectAsState()
     val activeCanvasUrl by MediaNotificationRepository.activeCanvasUrl.collectAsState()
 
@@ -704,13 +705,20 @@ fun EditCardBottomSheet(
 
                     val isSpotifyConnected = styleConfig.spotifyAccessToken.isNotBlank() ||
                         styleConfig.spotifySpDcCookie.isNotBlank()
+                    val sessionBorderColor = when {
+                        spotifyReloginRequired -> Color(0xFFFFA726).copy(alpha = 0.78f)
+                        isSpotifyConnected -> Color(0xFF1DB954).copy(alpha = 0.55f)
+                        else -> GlassBorderColor
+                    }
+                    val sessionBgColor = when {
+                        spotifyReloginRequired -> Color(0x55422B14)
+                        isSpotifyConnected -> Color(0x55183522)
+                        else -> GlassCardFill
+                    }
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = if (isSpotifyConnected) Color(0x55183522) else GlassCardFill,
-                        border = BorderStroke(
-                            width = 1.dp,
-                            color = if (isSpotifyConnected) Color(0xFF1DB954).copy(alpha = 0.55f) else GlassBorderColor
-                        ),
+                        color = sessionBgColor,
+                        border = BorderStroke(width = 1.dp, color = sessionBorderColor),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
@@ -728,12 +736,16 @@ fun EditCardBottomSheet(
                                             modifier = Modifier
                                                 .size(10.dp)
                                                 .clip(CircleShape)
-                                                .background(Color(0xFF1DB954))
+                                                .background(if (spotifyReloginRequired) Color(0xFFFFA726) else Color(0xFF1DB954))
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Column {
                                             Text(
-                                                text = "Connected: ${styleConfig.spotifyAccountLabel.ifBlank { "Spotify Account" }}",
+                                                text = if (spotifyReloginRequired) {
+                                                    "Session Expired: ${styleConfig.spotifyAccountLabel.ifBlank { "Spotify Account" }}"
+                                                } else {
+                                                    "Connected: ${styleConfig.spotifyAccountLabel.ifBlank { "Spotify Account" }}"
+                                                },
                                                 color = Color.White,
                                                 fontSize = 13.sp,
                                                 fontWeight = FontWeight.Bold,
@@ -742,8 +754,12 @@ fun EditCardBottomSheet(
                                                 modifier = Modifier.testTag("spotify_connected_label")
                                             )
                                             Text(
-                                                text = "Spotify session active for non-Spotify & offline players",
-                                                color = Color(0xFF9BE7B3),
+                                                text = if (spotifyReloginRequired) {
+                                                    "Spotify cookie expired — tap Reconnect Now so Canvas works again"
+                                                } else {
+                                                    "Auto-renew active for non-Spotify & offline players"
+                                                },
+                                                color = if (spotifyReloginRequired) Color(0xFFFFD599) else Color(0xFF9BE7B3),
                                                 fontSize = 11.sp
                                             )
                                         }
@@ -759,14 +775,14 @@ fun EditCardBottomSheet(
                                             context.startActivity(SpotifyLoginActivity.createIntent(context))
                                         },
                                         shape = RoundedCornerShape(10.dp),
-                                        color = Color(0x66253A2C),
+                                        color = if (spotifyReloginRequired) Color(0xFFFFA726) else Color(0x66253A2C),
                                         modifier = Modifier
                                             .weight(1f)
                                             .testTag("spotify_reconnect_button")
                                     ) {
                                         Text(
-                                            text = "Reconnect",
-                                            color = Color(0xFF1DB954),
+                                            text = if (spotifyReloginRequired) "Reconnect Now" else "Reconnect",
+                                            color = if (spotifyReloginRequired) Color(0xFF14110B) else Color(0xFF1DB954),
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
@@ -2829,8 +2845,16 @@ fun EditCardBottomSheet(
                 MediaNotificationRepository.selectSavedCanvas(item)
                 showSavedCanvasesDialog = false
             },
-            onRename = { item, newName ->
-                SavedMediaLibrary.renameCanvas(context, item.id, newName)
+            onUpdateCanvas = { item, newName, albumName, albumArtist, tracks ->
+                SavedMediaLibrary.updateCanvasMetadata(
+                    context = context,
+                    id = item.id,
+                    newName = newName,
+                    linkedAlbumName = albumName,
+                    linkedAlbumArtist = albumArtist,
+                    linkedTrackTitles = tracks
+                )
+                MediaNotificationRepository.recheckSavedAlbumCanvasForCurrentTrack()
             },
             onDelete = { item ->
                 SavedMediaLibrary.deleteCanvas(context, item.id)

@@ -57,34 +57,52 @@ fun AnimatedCanvasVideoBackground(
     isPlaybackPaused: Boolean = false
 ) {
     val context = LocalContext.current
-    var isVideoReady by remember(videoUrl) { mutableStateOf(false) }
-    var isPrepared by remember(videoUrl) { mutableStateOf(false) }
+    val initialPlayUri = remember(videoUrl) {
+        if (videoUrl.startsWith("file://") || videoUrl.startsWith("content://")) {
+            videoUrl
+        } else {
+            CanvasVideoExporter.getCachedVideoFileIfReady(context, videoUrl)
+                ?.let { Uri.fromFile(it).toString() }
+                ?: videoUrl
+        }
+    }
+    var activePlayUri by remember(videoUrl) { mutableStateOf(initialPlayUri) }
+    var streamErrored by remember(videoUrl) { mutableStateOf(false) }
+
+    var isVideoReady by remember(activePlayUri) { mutableStateOf(false) }
+    var isPrepared by remember(activePlayUri) { mutableStateOf(false) }
+
+    // Download remote Canvas MP4 to local cache automatically so playback works reliably on Home even if remote MediaPlayer streaming fails
+    LaunchedEffect(videoUrl) {
+        if (!videoUrl.startsWith("file://") && !videoUrl.startsWith("content://")) {
+            val cached = CanvasVideoExporter.getCachedVideoFileIfReady(context, videoUrl)
+                ?: CanvasVideoExporter.prefetchVideoToCache(context, videoUrl)
+            if (cached != null) {
+                val localUri = Uri.fromFile(cached).toString()
+                if (activePlayUri != localUri && (streamErrored || !isVideoReady)) {
+                    streamErrored = false
+                    activePlayUri = localUri
+                }
+            }
+        }
+    }
     val fadeAlpha by animateFloatAsState(
         targetValue = if (isVideoReady) 1f else 0f,
         animationSpec = tween(durationMillis = 240),
         label = "canvas_video_fade"
     )
 
-    var mediaPlayerRef by remember(videoUrl) { mutableStateOf<MediaPlayer?>(null) }
-    var glRendererRef by remember(videoUrl) { mutableStateOf<PreviewGlRendererController?>(null) }
+    var mediaPlayerRef by remember(activePlayUri) { mutableStateOf<MediaPlayer?>(null) }
+    var glRendererRef by remember(activePlayUri) { mutableStateOf<PreviewGlRendererController?>(null) }
     var isLifecycleResumed by remember { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
-
-    // Prefetch remote Canvas MP4 to cache in the background so Preview & Export start instantaneously
-    LaunchedEffect(videoUrl) {
-        if (!videoUrl.startsWith("file://") &&
-            CanvasVideoExporter.getCachedVideoFileIfReady(context, videoUrl) == null
-        ) {
-            CanvasVideoExporter.prefetchVideoToCache(context, videoUrl)
-        }
-    }
 
     // Propagate blur slider changes immediately at 60fps (even while paused)
     LaunchedEffect(blurRadiusPx, glRendererRef) {
         glRendererRef?.updateBlurRadius(blurRadiusPx)
     }
 
-    DisposableEffect(lifecycleOwner, videoUrl) {
+    DisposableEffect(lifecycleOwner, activePlayUri) {
         isLifecycleResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -112,7 +130,7 @@ fun AnimatedCanvasVideoBackground(
         }
     }
 
-    DisposableEffect(videoUrl) {
+    DisposableEffect(activePlayUri) {
         onDispose {
             isPrepared = false
             isVideoReady = false
@@ -130,7 +148,7 @@ fun AnimatedCanvasVideoBackground(
         }
     }
 
-    key(videoUrl) {
+    key(activePlayUri) {
         AndroidView(
             modifier = modifier
                 .fillMaxSize()
@@ -167,7 +185,7 @@ fun AnimatedCanvasVideoBackground(
                                 post {
                                     setupMediaPlayerForUrl(
                                         context = viewCtx,
-                                        videoUrl = videoUrl,
+                                        videoUrl = activePlayUri,
                                         decoderSurface = decoderSurface,
                                         isPlaybackPaused = { isPlaybackPaused || !isLifecycleResumed },
                                         onVideoSize = { vw, vh -> controller.updateVideoSize(vw, vh) },
@@ -181,6 +199,7 @@ fun AnimatedCanvasVideoBackground(
                                         onError = {
                                             isPrepared = false
                                             isVideoReady = false
+                                            streamErrored = true
                                         }
                                     )
                                 }

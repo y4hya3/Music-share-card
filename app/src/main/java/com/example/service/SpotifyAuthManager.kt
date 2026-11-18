@@ -46,7 +46,16 @@ data class WebViewSpotifyTrack(
 data class WebViewSpotifySearchResult(
     val tracks: List<WebViewSpotifyTrack> = emptyList(),
     val capturedPathfinderHash: String? = null,
-    val capturedClientToken: String? = null
+    val capturedClientToken: String? = null,
+    val capturedBearerToken: String? = null,
+    val capturedBearerExpiryMs: Long = 0L,
+    val capturedSpDcCookie: String? = null,
+    val loginRedirectDetected: Boolean = false
+)
+
+data class SpotifyWebExchangeOutcome(
+    val tokenResult: SpotifyTokenResult? = null,
+    val loginRedirectDetected: Boolean = false
 )
 
 /**
@@ -66,7 +75,53 @@ object SpotifyAuthManager {
     var latestCapturedClientToken: String? = null
 
     @Volatile
+    var latestCapturedClientTokenExpiresAtMs: Long = 0L
+
+    @Volatile
     var latestCapturedSearchHash: String? = null
+
+    fun captureClientToken(token: String?, ttlMs: Long = 15 * 60_000L, nowMs: Long = System.currentTimeMillis()) {
+        val clean = token?.trim().orEmpty()
+        if (clean.length >= 20) {
+            latestCapturedClientToken = clean
+            latestCapturedClientTokenExpiresAtMs = nowMs + ttlMs.coerceIn(60_000L, 30 * 60_000L)
+        }
+    }
+
+    fun getValidCapturedClientToken(nowMs: Long = System.currentTimeMillis()): String? {
+        val tok = latestCapturedClientToken?.trim().orEmpty()
+        if (tok.length < 20) return null
+        val exp = latestCapturedClientTokenExpiresAtMs
+        if (exp > 0L && nowMs >= exp) {
+            latestCapturedClientToken = null
+            latestCapturedClientTokenExpiresAtMs = 0L
+            return null
+        }
+        return tok
+    }
+
+    fun invalidateCapturedClientToken() {
+        latestCapturedClientToken = null
+        latestCapturedClientTokenExpiresAtMs = 0L
+    }
+
+    fun readLiveSpDcFromCookieManager(): String {
+        return try {
+            val cm = CookieManager.getInstance()
+            val domains = listOf(
+                "https://open.spotify.com",
+                "https://accounts.spotify.com",
+                "https://spotify.com"
+            )
+            for (domain in domains) {
+                val spDc = extractSpDcFromCookieHeader(cm.getCookie(domain))
+                if (spDc.length >= 20) return spDc
+            }
+            ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
 
     fun buildPkceAuthorizeIntent(context: Context, clientId: String): Intent? {
         val cleanId = clientId.trim()
@@ -292,42 +347,60 @@ object SpotifyAuthManager {
     }
 
     /**
-     * Silent off-screen WebView fallback that injects `sp_dc` into CookieManager and loads
-     * Spotify Web Player with a Desktop Chrome User-Agent so Spotify's own bundle mints
+     * Silent off-screen WebView fallback that injects `sp_dc` (or reuses existing CookieManager session)
+     * and loads Spotify Web Player with a Desktop Chrome User-Agent so Spotify's own bundle mints
      * a fresh Bearer token via /api/token even if external TOTP secrets rotated.
      */
     suspend fun exchangeSpDcViaWebView(
         context: Context,
         rawSpDc: String
-    ): SpotifyTokenResult? {
-        val spDc = extractSpDcValue(rawSpDc)
-        if (spDc.length < 20) return null
+    ): SpotifyTokenResult? = exchangeSpDcViaWebViewDetailed(context, rawSpDc).tokenResult
+
+    suspend fun exchangeSpDcViaWebViewDetailed(
+        context: Context,
+        rawSpDc: String
+    ): SpotifyWebExchangeOutcome {
+        val liveCookieSpDc = readLiveSpDcFromCookieManager()
+        val spDc = extractSpDcValue(rawSpDc).ifBlank { liveCookieSpDc }
+        if (spDc.length < 20) return SpotifyWebExchangeOutcome()
 
         return withTimeoutOrNull(14_000L) {
             withContext(Dispatchers.Main) {
-                suspendCancellableCoroutine<SpotifyTokenResult?> { cont ->
+                suspendCancellableCoroutine<SpotifyWebExchangeOutcome> { cont ->
                     var wv: WebView? = null
                     var finished = false
-                    fun complete(result: SpotifyTokenResult?) {
+                    var sawLoginRedirect = false
+                    val mainHandler = Handler(Looper.getMainLooper())
+                    var loginRedirectCheckRunnable: Runnable? = null
+
+                    fun complete(outcome: SpotifyWebExchangeOutcome) {
                         if (finished) return
                         finished = true
+                        loginRedirectCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+                        loginRedirectCheckRunnable = null
                         try {
                             wv?.stopLoading()
                             wv?.destroy()
                         } catch (_: Exception) {
                         }
                         wv = null
-                        if (cont.isActive) cont.resume(result)
+                        if (cont.isActive) cont.resume(outcome)
                     }
 
                     try {
                         val cm = CookieManager.getInstance()
                         cm.setAcceptCookie(true)
-                        cm.setCookie(
-                            "https://open.spotify.com",
-                            "sp_dc=$spDc; Domain=.spotify.com; Path=/; Secure"
-                        )
-                        cm.flush()
+                        // Keep freshest sp_dc if CookieManager already rotated it, otherwise inject stored sp_dc
+                        val activeSpDc = if (liveCookieSpDc.length >= 20 && extractSpDcValue(rawSpDc).isEmpty()) {
+                            liveCookieSpDc
+                        } else {
+                            cm.setCookie(
+                                "https://open.spotify.com",
+                                "sp_dc=$spDc; Domain=.spotify.com; Path=/; Secure"
+                            )
+                            cm.flush()
+                            spDc
+                        }
 
                         val webView = WebView(context.applicationContext)
                         wv = webView
@@ -345,12 +418,16 @@ object SpotifyAuthManager {
                                 fun onTokenFound(token: String?, expiryMs: Long) {
                                     val clean = token?.trim().orEmpty()
                                     if (clean.length >= 20) {
+                                        val latestSpDc = readLiveSpDcFromCookieManager().ifBlank { activeSpDc }
                                         webView.post {
                                             complete(
-                                                SpotifyTokenResult(
-                                                    accessToken = clean,
-                                                    expiresAtMs = if (expiryMs > 0L) expiryMs else System.currentTimeMillis() + 3_500_000L,
-                                                    spDcCookie = spDc
+                                                SpotifyWebExchangeOutcome(
+                                                    tokenResult = SpotifyTokenResult(
+                                                        accessToken = clean,
+                                                        expiresAtMs = if (expiryMs > 0L) expiryMs else System.currentTimeMillis() + 3_500_000L,
+                                                        spDcCookie = latestSpDc
+                                                    ),
+                                                    loginRedirectDetected = false
                                                 )
                                             )
                                         }
@@ -361,10 +438,31 @@ object SpotifyAuthManager {
                         )
                         webView.webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                val u = url.orEmpty()
+                                if (u.contains("accounts.spotify.com") && u.contains("/login")) {
+                                    sawLoginRedirect = true
+                                    loginRedirectCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+                                    val r = Runnable {
+                                        if (!finished && sawLoginRedirect) {
+                                            complete(SpotifyWebExchangeOutcome(tokenResult = null, loginRedirectDetected = true))
+                                        }
+                                    }
+                                    loginRedirectCheckRunnable = r
+                                    mainHandler.postDelayed(r, 1200L)
+                                } else if (u.contains("open.spotify.com")) {
+                                    sawLoginRedirect = false
+                                    loginRedirectCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+                                }
                                 view?.evaluateJavascript(WEB_TOKEN_HOOK_JS, null)
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
+                                CookieManager.getInstance().flush()
+                                val u = url.orEmpty()
+                                if (u.contains("accounts.spotify.com") && u.contains("/login")) {
+                                    complete(SpotifyWebExchangeOutcome(tokenResult = null, loginRedirectDetected = true))
+                                    return
+                                }
                                 view?.evaluateJavascript(WEB_TOKEN_HOOK_JS, null)
                             }
 
@@ -379,20 +477,27 @@ object SpotifyAuthManager {
                                         ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
                                         ?.value
                                     if (!ct.isNullOrBlank()) {
-                                        latestCapturedClientToken = ct.trim()
+                                        captureClientToken(ct)
                                     }
+                                    val isAuthedApiCall = reqUrl.contains("api-partner.spotify.com") ||
+                                        reqUrl.contains("spclient.wg.spotify.com") ||
+                                        reqUrl.contains("api.spotify.com")
                                     val auth = headers?.entries
                                         ?.firstOrNull { it.key.equals("Authorization", ignoreCase = true) }
                                         ?.value
-                                    if (!auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
+                                    if (isAuthedApiCall && !auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
                                         val token = auth.substring(7).trim()
-                                        if (token.length >= 20) {
+                                        val latestSpDc = readLiveSpDcFromCookieManager().ifBlank { activeSpDc }
+                                        if (token.length >= 20 && latestSpDc.length >= 20) {
                                             webView.post {
                                                 complete(
-                                                    SpotifyTokenResult(
-                                                        accessToken = token,
-                                                        expiresAtMs = System.currentTimeMillis() + 3_500_000L,
-                                                        spDcCookie = spDc
+                                                    SpotifyWebExchangeOutcome(
+                                                        tokenResult = SpotifyTokenResult(
+                                                            accessToken = token,
+                                                            expiresAtMs = System.currentTimeMillis() + 3_500_000L,
+                                                            spDcCookie = latestSpDc
+                                                        ),
+                                                        loginRedirectDetected = false
                                                     )
                                                 )
                                             }
@@ -404,6 +509,8 @@ object SpotifyAuthManager {
                         }
 
                         cont.invokeOnCancellation {
+                            loginRedirectCheckRunnable?.let { mainHandler.removeCallbacks(it) }
+                            loginRedirectCheckRunnable = null
                             webView.post {
                                 try {
                                     webView.stopLoading()
@@ -415,18 +522,18 @@ object SpotifyAuthManager {
                         webView.resumeTimers()
                         webView.loadUrl("https://open.spotify.com/")
                     } catch (_: Exception) {
-                        complete(null)
+                        complete(SpotifyWebExchangeOutcome())
                     }
                 }
             }
-        }
+        } ?: SpotifyWebExchangeOutcome()
     }
 
     /**
      * Off-screen WebView Spotify search fallback for non-Spotify music players.
-     * Loads https://open.spotify.com/search/<query> with the saved sp_dc session cookie,
-     * captures Spotify's live Pathfinder tracksV2 JSON, DOM track links, sha256Hash, and
-     * client-token — bypassing globally 429-throttled REST /v1/search completely.
+     * Loads https://open.spotify.com/search/<query> with the saved/live sp_dc session cookie,
+     * captures Spotify's live Pathfinder tracksV2 JSON, DOM track links, sha256Hash,
+     * client-token, AND any freshly minted Bearer token / rotated sp_dc cookie.
      */
     suspend fun searchTrackIdsViaWebView(
         context: Context,
@@ -435,7 +542,8 @@ object SpotifyAuthManager {
     ): WebViewSpotifySearchResult? {
         val cleanQuery = query.trim()
         if (cleanQuery.isEmpty()) return null
-        val spDc = extractSpDcValue(rawSpDc)
+        val liveCookieSpDc = readLiveSpDcFromCookieManager()
+        val spDc = extractSpDcValue(rawSpDc).ifBlank { liveCookieSpDc }
 
         return withTimeoutOrNull(14_500L) {
             withContext(Dispatchers.Main) {
@@ -444,8 +552,14 @@ object SpotifyAuthManager {
                     var finished = false
                     var capturedHash: String? = null
                     var capturedClientToken: String? = null
+                    var capturedBearerToken: String? = null
+                    var capturedBearerExpiryMs: Long = 0L
+                    var loginRedirectDetected = false
                     val mainHandler = Handler(Looper.getMainLooper())
                     var pollRunnable: Runnable? = null
+
+                    fun currentBestSpDc(): String? =
+                        readLiveSpDcFromCookieManager().ifBlank { spDc }.takeIf { it.length >= 20 }
 
                     fun complete(result: WebViewSpotifySearchResult?) {
                         if (finished) return
@@ -495,7 +609,18 @@ object SpotifyAuthManager {
                                     val cleanCt = clientToken?.trim().orEmpty()
                                     if (cleanCt.length >= 20) {
                                         capturedClientToken = cleanCt
-                                        latestCapturedClientToken = cleanCt
+                                        captureClientToken(cleanCt)
+                                    }
+                                }
+
+                                @JavascriptInterface
+                                fun onTokenFound(token: String?, expiryMs: Long) {
+                                    val cleanTok = token?.trim().orEmpty()
+                                    if (cleanTok.length >= 20) {
+                                        capturedBearerToken = cleanTok
+                                        if (expiryMs > 0L) {
+                                            capturedBearerExpiryMs = expiryMs
+                                        }
                                     }
                                 }
 
@@ -509,7 +634,11 @@ object SpotifyAuthManager {
                                                 WebViewSpotifySearchResult(
                                                     tracks = parsed,
                                                     capturedPathfinderHash = capturedHash ?: latestCapturedSearchHash,
-                                                    capturedClientToken = capturedClientToken ?: latestCapturedClientToken
+                                                    capturedClientToken = capturedClientToken ?: getValidCapturedClientToken(),
+                                                    capturedBearerToken = capturedBearerToken,
+                                                    capturedBearerExpiryMs = capturedBearerExpiryMs,
+                                                    capturedSpDcCookie = currentBestSpDc(),
+                                                    loginRedirectDetected = loginRedirectDetected
                                                 )
                                             )
                                         }
@@ -526,7 +655,11 @@ object SpotifyAuthManager {
                                                 WebViewSpotifySearchResult(
                                                     tracks = parsed,
                                                     capturedPathfinderHash = capturedHash ?: latestCapturedSearchHash,
-                                                    capturedClientToken = capturedClientToken ?: latestCapturedClientToken
+                                                    capturedClientToken = capturedClientToken ?: getValidCapturedClientToken(),
+                                                    capturedBearerToken = capturedBearerToken,
+                                                    capturedBearerExpiryMs = capturedBearerExpiryMs,
+                                                    capturedSpDcCookie = currentBestSpDc(),
+                                                    loginRedirectDetected = loginRedirectDetected
                                                 )
                                             )
                                         }
@@ -538,6 +671,10 @@ object SpotifyAuthManager {
 
                         webView.webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                val u = url.orEmpty()
+                                if (u.contains("accounts.spotify.com") && u.contains("/login")) {
+                                    loginRedirectDetected = true
+                                }
                                 view?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
                             }
 
@@ -546,6 +683,23 @@ object SpotifyAuthManager {
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
+                                CookieManager.getInstance().flush()
+                                val u = url.orEmpty()
+                                if (u.contains("accounts.spotify.com") && u.contains("/login")) {
+                                    loginRedirectDetected = true
+                                    complete(
+                                        WebViewSpotifySearchResult(
+                                            tracks = emptyList(),
+                                            capturedPathfinderHash = capturedHash ?: latestCapturedSearchHash,
+                                            capturedClientToken = capturedClientToken ?: getValidCapturedClientToken(),
+                                            capturedBearerToken = capturedBearerToken,
+                                            capturedBearerExpiryMs = capturedBearerExpiryMs,
+                                            capturedSpDcCookie = currentBestSpDc(),
+                                            loginRedirectDetected = true
+                                        )
+                                    )
+                                    return
+                                }
                                 view?.evaluateJavascript(WEB_SEARCH_HOOK_JS, null)
                             }
 
@@ -555,12 +709,25 @@ object SpotifyAuthManager {
                             ): WebResourceResponse? {
                                 val reqUrl = request?.url?.toString().orEmpty()
                                 if (reqUrl.contains("spotify.com/")) {
-                                    val ct = request?.requestHeaders?.entries
+                                    val headers = request?.requestHeaders
+                                    val ct = headers?.entries
                                         ?.firstOrNull { it.key.equals("client-token", ignoreCase = true) }
                                         ?.value
                                     if (!ct.isNullOrBlank()) {
                                         capturedClientToken = ct.trim()
-                                        latestCapturedClientToken = ct.trim()
+                                        captureClientToken(ct)
+                                    }
+                                    val auth = headers?.entries
+                                        ?.firstOrNull { it.key.equals("Authorization", ignoreCase = true) }
+                                        ?.value
+                                    if (!auth.isNullOrBlank() && auth.startsWith("Bearer ", ignoreCase = true)) {
+                                        val bearer = auth.substring(7).trim()
+                                        if (bearer.length >= 20 && currentBestSpDc() != null) {
+                                            capturedBearerToken = bearer
+                                            if (capturedBearerExpiryMs == 0L) {
+                                                capturedBearerExpiryMs = System.currentTimeMillis() + 3_500_000L
+                                            }
+                                        }
                                     }
                                     if (reqUrl.contains("pathfinder") && reqUrl.contains("searchDesktop")) {
                                         val hashMatch = "sha256Hash(?:%22|\")%3A(?:%22|\")([a-f0-9]{64})".toRegex(RegexOption.IGNORE_CASE)
@@ -945,29 +1112,24 @@ object SpotifyAuthManager {
     }
     var sessionEl = document.getElementById('session') || document.getElementById('appServerConfig');
     if (sessionEl && sessionEl.textContent) {
-      try {
-        var parsed = JSON.parse(sessionEl.textContent);
-        if (parsed && parsed.accessToken && !parsed.isAnonymous &&
-            sendTok(parsed.accessToken, parsed.accessTokenExpirationTimestampMs)) {
-          return;
-        }
-      } catch (e) {}
+      var rawTxt = sessionEl.textContent.trim();
+      var candidates = [rawTxt];
+      try { candidates.push(atob(rawTxt)); } catch (e) {}
+      for (var c = 0; c < candidates.length; c++) {
+        try {
+          var parsed = JSON.parse(candidates[c]);
+          if (parsed && parsed.accessToken && !parsed.isAnonymous &&
+              sendTok(parsed.accessToken, parsed.accessTokenExpirationTimestampMs)) {
+            return;
+          }
+        } catch (e) {}
+      }
     }
     if (!window.__echoSnapHookedFetch && window.fetch) {
       window.__echoSnapHookedFetch = true;
       var origFetch = window.fetch;
       window.fetch = function() {
         var args = arguments;
-        try {
-          var init = args[1];
-          if (init && init.headers) {
-            var h = init.headers;
-            var auth = (typeof h.get === 'function') ? h.get('Authorization') : (h['Authorization'] || h['authorization']);
-            if (auth && String(auth).indexOf('Bearer ') === 0) {
-              sendTok(String(auth).substring(7), 0);
-            }
-          }
-        } catch (e) {}
         return origFetch.apply(this, args).then(function(resp) {
           try {
             var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');
@@ -1004,6 +1166,21 @@ object SpotifyAuthManager {
         bridge.onPathfinderMeta(hashMatch || '', String(ct || ''));
       }
     }
+    var sessionEl = document.getElementById('session') || document.getElementById('appServerConfig');
+    if (sessionEl && sessionEl.textContent) {
+      var rawTxt = sessionEl.textContent.trim();
+      var candidates = [rawTxt];
+      try { candidates.push(atob(rawTxt)); } catch (e) {}
+      for (var c = 0; c < candidates.length; c++) {
+        try {
+          var parsed = JSON.parse(candidates[c]);
+          if (parsed && parsed.accessToken && !parsed.isAnonymous && parsed.accessToken.length > 20) {
+            bridge.onTokenFound(String(parsed.accessToken), Number(parsed.accessTokenExpirationTimestampMs || 0));
+            break;
+          }
+        } catch (e) {}
+      }
+    }
     if (!window.__echoSnapSearchHookedFetch && window.fetch) {
       window.__echoSnapSearchHookedFetch = true;
       var origFetch = window.fetch;
@@ -1022,6 +1199,13 @@ object SpotifyAuthManager {
         return origFetch.apply(this, args).then(function(resp) {
           try {
             var u = (resp && resp.url) ? String(resp.url) : String(args[0] || '');
+            if (u.indexOf('/api/token') >= 0 || u.indexOf('get_access_token') >= 0) {
+              resp.clone().json().then(function(data) {
+                if (data && data.accessToken && !data.isAnonymous) {
+                  bridge.onTokenFound(String(data.accessToken), Number(data.accessTokenExpirationTimestampMs || 0));
+                }
+              }).catch(function() {});
+            }
             if (u.indexOf('pathfinder') >= 0 || u.indexOf('search') >= 0) {
               resp.clone().text().then(function(txt) {
                 if (txt && (txt.indexOf('spotify:track:') >= 0 || txt.indexOf('tracksV2') >= 0 || txt.indexOf('searchDesktop') >= 0)) {

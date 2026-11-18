@@ -48,6 +48,7 @@ object CardStylePreferences {
     private const val KEY_SPOTIFY_SP_DC_COOKIE = "spotify_sp_dc_cookie"
     private const val KEY_SPOTIFY_REFRESH_TOKEN = "spotify_refresh_token"
     private const val KEY_SPOTIFY_TOKEN_EXPIRY_MS = "spotify_token_expiry_ms"
+    private const val KEY_SPOTIFY_TOKEN_LAST_REFRESHED_MS = "spotify_token_last_refreshed_ms"
     private const val KEY_SPOTIFY_CLIENT_ID = "spotify_client_id"
     private const val KEY_SPOTIFY_ACCOUNT_LABEL = "spotify_account_label"
 
@@ -109,6 +110,7 @@ object CardStylePreferences {
             spotifySpDcCookie = prefs.getString(KEY_SPOTIFY_SP_DC_COOKIE, defaults.spotifySpDcCookie) ?: "",
             spotifyRefreshToken = prefs.getString(KEY_SPOTIFY_REFRESH_TOKEN, defaults.spotifyRefreshToken) ?: "",
             spotifyTokenExpiryMs = prefs.getLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, defaults.spotifyTokenExpiryMs),
+            spotifyTokenLastRefreshedMs = prefs.getLong(KEY_SPOTIFY_TOKEN_LAST_REFRESHED_MS, defaults.spotifyTokenLastRefreshedMs),
             spotifyClientId = prefs.getString(KEY_SPOTIFY_CLIENT_ID, defaults.spotifyClientId) ?: "",
             spotifyAccountLabel = prefs.getString(KEY_SPOTIFY_ACCOUNT_LABEL, defaults.spotifyAccountLabel) ?: "",
             customLyrics = prefs.getString(KEY_CUSTOM_LYRICS, defaults.customLyrics) ?: ""
@@ -155,6 +157,7 @@ object CardStylePreferences {
             .putString(KEY_SPOTIFY_SP_DC_COOKIE, config.spotifySpDcCookie)
             .putString(KEY_SPOTIFY_REFRESH_TOKEN, config.spotifyRefreshToken)
             .putLong(KEY_SPOTIFY_TOKEN_EXPIRY_MS, config.spotifyTokenExpiryMs)
+            .putLong(KEY_SPOTIFY_TOKEN_LAST_REFRESHED_MS, config.spotifyTokenLastRefreshedMs)
             .putString(KEY_SPOTIFY_CLIENT_ID, config.spotifyClientId)
             .putString(KEY_SPOTIFY_ACCOUNT_LABEL, config.spotifyAccountLabel)
             .putString(KEY_CUSTOM_LYRICS, config.customLyrics)

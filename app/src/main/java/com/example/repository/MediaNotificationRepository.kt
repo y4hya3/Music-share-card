@@ -19,7 +19,9 @@ import com.example.service.LyricsCandidate
 import com.example.service.LyricsSearchService
 import com.example.service.MusicNotificationListenerService
 import com.example.service.OnlineCoverCandidate
+import com.example.service.SpotifyAuthManager
 import com.example.util.BitmapBlurUtils
+import com.example.util.CanvasVideoExporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -47,12 +49,14 @@ object MediaNotificationRepository {
     private var lyricsSearchJob: Job? = null
     private var paletteJob: Job? = null
     private var prefsSaveJob: Job? = null
+    private var proactiveSessionRefreshJob: Job? = null
     @Volatile
     private var lastMediaRefreshMs: Long = 0L
     private var lastAutoSearchedTrackKey: String? = null
     private var lastAutoCanvasTrackKey: String? = null
     private var userManuallySelectedCoverTrackKey: String? = null
     private var userManuallySelectedCanvasTrackKey: String? = null
+    private var autoAppliedSavedCanvasTrackKey: String? = null
 
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
@@ -97,6 +101,9 @@ object MediaNotificationRepository {
 
     private val _canvasSearchStatus = MutableStateFlow<String?>(null)
     val canvasSearchStatus: StateFlow<String?> = _canvasSearchStatus.asStateFlow()
+
+    private val _spotifyReloginRequired = MutableStateFlow(false)
+    val spotifyReloginRequired: StateFlow<Boolean> = _spotifyReloginRequired.asStateFlow()
 
     private val _activeCanvasUrl = MutableStateFlow<String?>(null)
     val activeCanvasUrl: StateFlow<String?> = _activeCanvasUrl.asStateFlow()
@@ -225,6 +232,7 @@ object MediaNotificationRepository {
             _activeCanvasId.value = "none"
             userManuallySelectedCoverTrackKey = null
             userManuallySelectedCanvasTrackKey = null
+            autoAppliedSavedCanvasTrackKey = null
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
             val prevPixels = if (prevOrig != null && !prevOrig.isRecycled) prevOrig.width.toLong() * prevOrig.height.toLong() else 0L
@@ -265,6 +273,25 @@ object MediaNotificationRepository {
             extractPaletteForTrack(finalTrack)
         }
 
+        // Offline Saved Album / Song Canvas auto-apply (highest priority & works 100% offline)
+        if (!isSameTrack || (_activeCanvasId.value == "none" && userManuallySelectedCanvasTrackKey != newKey)) {
+            val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+                title = finalTrack.title,
+                album = finalTrack.album,
+                artist = finalTrack.artist
+            )
+            if (savedMatch != null) {
+                autoAppliedSavedCanvasTrackKey = newKey
+                _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
+                _activeCanvasUrl.value = savedMatch.fileUri
+                _canvasSearchStatus.value = if (savedMatch.linkedAlbumName.isNotBlank()) {
+                    "Offline album canvas: ${savedMatch.linkedAlbumName}"
+                } else {
+                    "Saved offline canvas: ${savedMatch.name}"
+                }
+            }
+        }
+
         // If Auto-Search Online HD Cover is enabled, look up HD candidates automatically for new live tracks
         if (!finalTrack.isSample &&
             _styleConfig.value.autoSearchOnlineArt &&
@@ -275,12 +302,13 @@ object MediaNotificationRepository {
         }
 
         // If Auto-Search Animated Canvas is enabled, look up looping canvases automatically for new live tracks
+        // (unless a linked offline Saved Album canvas already matched for this track)
         if (!finalTrack.isSample &&
             _styleConfig.value.autoSearchAnimatedCanvas &&
             lastAutoCanvasTrackKey != newKey
         ) {
             lastAutoCanvasTrackKey = newKey
-            searchAnimatedCanvases(autoApplyBest = true)
+            searchAnimatedCanvases(autoApplyBest = autoAppliedSavedCanvasTrackKey != newKey)
         }
     }
 
@@ -317,6 +345,7 @@ object MediaNotificationRepository {
 
     fun refreshFromActiveMedia(context: Context, force: Boolean = false): Boolean {
         checkNotificationAccess(context)
+        ensureFreshSpotifySessionSilently()
         if (!_isNotificationAccessEnabled.value) {
             return false
         }
@@ -338,10 +367,91 @@ object MediaNotificationRepository {
         _activeCanvasId.value = "none"
         userManuallySelectedCoverTrackKey = null
         userManuallySelectedCanvasTrackKey = null
+        autoAppliedSavedCanvasTrackKey = null
         lastAutoSearchedTrackKey = null
         lastAutoCanvasTrackKey = null
+
+        val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+            title = track.title,
+            album = track.album,
+            artist = track.artist
+        )
+        if (savedMatch != null) {
+            autoAppliedSavedCanvasTrackKey = trackKey(track)
+            _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
+            _activeCanvasUrl.value = savedMatch.fileUri
+        }
+
         _currentTrack.value = track
         extractPaletteForTrack(track)
+    }
+
+    fun recheckSavedAlbumCanvasForCurrentTrack() {
+        val track = _currentTrack.value
+        val key = trackKey(track)
+        val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+            title = track.title,
+            album = track.album,
+            artist = track.artist
+        )
+        if (savedMatch != null) {
+            autoAppliedSavedCanvasTrackKey = key
+            _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
+            _activeCanvasUrl.value = savedMatch.fileUri
+        }
+    }
+
+    fun ensureFreshSpotifySessionSilently() {
+        val cfg = _styleConfig.value
+        val spDc = SpotifyAuthManager.extractSpDcValue(cfg.spotifySpDcCookie)
+            .ifBlank { SpotifyAuthManager.readLiveSpDcFromCookieManager() }
+        val hasRefreshCred = spDc.length >= 20 ||
+            (cfg.spotifyRefreshToken.isNotBlank() && cfg.spotifyClientId.isNotBlank())
+        if (!hasRefreshCred) return
+
+        val needsRefresh = AnimatedCanvasSearchService.shouldRefreshSpotifyToken(
+            hasActiveToken = cfg.spotifyAccessToken.isNotBlank(),
+            tokenExpiryMs = cfg.spotifyTokenExpiryMs,
+            lastRefreshedAtMs = cfg.spotifyTokenLastRefreshedMs,
+            hasRefreshCredential = true
+        )
+        if (!needsRefresh || proactiveSessionRefreshJob?.isActive == true) return
+
+        proactiveSessionRefreshJob = repositoryScope.launch(Dispatchers.IO) {
+            var renewed: com.example.service.SpotifyTokenResult? = null
+            var loginRedirect = false
+            if (spDc.length >= 20) {
+                renewed = SpotifyAuthManager.exchangeSpDcForAccessToken(spDc)
+                if (renewed == null) {
+                    val ctx = appContext
+                    if (ctx != null) {
+                        val detailed = SpotifyAuthManager.exchangeSpDcViaWebViewDetailed(ctx, spDc)
+                        renewed = detailed.tokenResult
+                        loginRedirect = detailed.loginRedirectDetected
+                    }
+                }
+            }
+            if (renewed == null && cfg.spotifyRefreshToken.isNotBlank() && cfg.spotifyClientId.isNotBlank()) {
+                renewed = SpotifyAuthManager.refreshPkceToken(cfg.spotifyClientId, cfg.spotifyRefreshToken)
+            }
+            withContext(Dispatchers.Main) {
+                if (renewed != null) {
+                    val nowMs = System.currentTimeMillis()
+                    updateStyleConfig(saveImmediately = true) { current ->
+                        current.copy(
+                            spotifyAccessToken = renewed.accessToken,
+                            spotifySpDcCookie = renewed.spDcCookie.ifBlank { current.spotifySpDcCookie },
+                            spotifyRefreshToken = renewed.refreshToken.ifBlank { current.spotifyRefreshToken },
+                            spotifyTokenExpiryMs = renewed.expiresAtMs,
+                            spotifyTokenLastRefreshedMs = nowMs
+                        )
+                    }
+                    _spotifyReloginRequired.value = false
+                } else if (loginRedirect) {
+                    _spotifyReloginRequired.value = true
+                }
+            }
+        }
     }
 
     fun getSampleTracks(): List<MediaTrackInfo> = sampleTracksList
@@ -501,6 +611,7 @@ object MediaNotificationRepository {
                     spotifyToken = cfg.spotifyAccessToken,
                     spotifySpDcCookie = cfg.spotifySpDcCookie,
                     spotifyTokenExpiryMs = cfg.spotifyTokenExpiryMs,
+                    spotifyTokenLastRefreshedMs = cfg.spotifyTokenLastRefreshedMs,
                     spotifyRefreshToken = cfg.spotifyRefreshToken,
                     spotifyClientId = cfg.spotifyClientId,
                     targetTitle = if (isCustomOverride) searchTerm else snapshot.title,
@@ -509,6 +620,11 @@ object MediaNotificationRepository {
                     spotifyTrackId = if (isCustomOverride) "" else snapshot.spotifyTrackId,
                     spDcWebFallback = if (ctx != null) {
                         { spDc -> com.example.service.SpotifyAuthManager.exchangeSpDcViaWebView(ctx, spDc) }
+                    } else {
+                        null
+                    },
+                    spDcWebDetailedFallback = if (ctx != null) {
+                        { spDc -> com.example.service.SpotifyAuthManager.exchangeSpDcViaWebViewDetailed(ctx, spDc) }
                     } else {
                         null
                     },
@@ -526,22 +642,26 @@ object MediaNotificationRepository {
                     maxResults = 8
                 )
                 result.refreshedToken?.let { renewed ->
+                    val refreshedAt = System.currentTimeMillis()
                     updateStyleConfig(saveImmediately = true) { current ->
                         current.copy(
                             spotifyAccessToken = renewed.accessToken,
                             spotifySpDcCookie = renewed.spDcCookie.ifBlank { current.spotifySpDcCookie },
                             spotifyRefreshToken = renewed.refreshToken.ifBlank { current.spotifyRefreshToken },
-                            spotifyTokenExpiryMs = renewed.expiresAtMs
+                            spotifyTokenExpiryMs = renewed.expiresAtMs,
+                            spotifyTokenLastRefreshedMs = refreshedAt
                         )
                     }
                 }
+                _spotifyReloginRequired.value = result.requiresInteractiveRelogin
                 _animatedCanvasCandidates.value = result.candidates
                 _canvasSearchStatus.value = result.statusMessage
 
                 if (autoApplyBest &&
                     result.candidates.isNotEmpty() &&
                     trackKey(_currentTrack.value) == trackSnapshotKey &&
-                    userManuallySelectedCanvasTrackKey != trackSnapshotKey
+                    userManuallySelectedCanvasTrackKey != trackSnapshotKey &&
+                    autoAppliedSavedCanvasTrackKey != trackSnapshotKey
                 ) {
                     val best = result.candidates.firstOrNull { it.isLoopingVideo } ?: result.candidates.first()
                     applyAnimatedCanvasCandidate(best, markAsManual = false)
@@ -553,12 +673,15 @@ object MediaNotificationRepository {
     }
 
     fun applySpotifyLoginResult(result: com.example.service.SpotifyTokenResult) {
+        val nowMs = System.currentTimeMillis()
+        _spotifyReloginRequired.value = false
         updateStyleConfig(saveImmediately = true) { current ->
             current.copy(
                 spotifyAccessToken = result.accessToken,
                 spotifySpDcCookie = result.spDcCookie.ifBlank { current.spotifySpDcCookie },
                 spotifyRefreshToken = result.refreshToken.ifBlank { current.spotifyRefreshToken },
                 spotifyTokenExpiryMs = result.expiresAtMs,
+                spotifyTokenLastRefreshedMs = nowMs,
                 spotifyAccountLabel = result.accountLabel.ifBlank { "Spotify Account" }
             )
         }
@@ -615,12 +738,14 @@ object MediaNotificationRepository {
 
     fun disconnectSpotifyAccount() {
         com.example.service.SpotifyAuthManager.clearSpotifyWebCookies()
+        _spotifyReloginRequired.value = false
         updateStyleConfig(saveImmediately = true) { current ->
             current.copy(
                 spotifyAccessToken = "",
                 spotifySpDcCookie = "",
                 spotifyRefreshToken = "",
                 spotifyTokenExpiryMs = 0L,
+                spotifyTokenLastRefreshedMs = 0L,
                 spotifyClientId = current.spotifyClientId,
                 spotifyAccountLabel = ""
             )
@@ -641,6 +766,7 @@ object MediaNotificationRepository {
 
     fun clearAnimatedCanvas() {
         userManuallySelectedCanvasTrackKey = null
+        autoAppliedSavedCanvasTrackKey = null
         _activeCanvasUrl.value = null
         _activeCanvasId.value = "none"
     }
@@ -650,11 +776,36 @@ object MediaNotificationRepository {
         markAsManual: Boolean
     ) {
         val current = _currentTrack.value
+        val applyTrackKey = trackKey(current)
         if (markAsManual) {
-            userManuallySelectedCanvasTrackKey = trackKey(current)
+            userManuallySelectedCanvasTrackKey = applyTrackKey
+            autoAppliedSavedCanvasTrackKey = null
         }
         _activeCanvasId.value = candidate.id
-        _activeCanvasUrl.value = candidate.videoUrl
+
+        val rawUrl = candidate.videoUrl?.trim().orEmpty()
+        val ctx = appContext
+        val cachedReadyUri = if (rawUrl.isNotEmpty() && ctx != null && !rawUrl.startsWith("file://") && !rawUrl.startsWith("content://")) {
+            CanvasVideoExporter.getCachedVideoFileIfReady(ctx, rawUrl)
+                ?.let { Uri.fromFile(it).toString() }
+        } else {
+            null
+        }
+
+        // Resolve remote MP4 to a local cached file:// URI first when possible so Home renders cleanly
+        // without requiring manual Save -> Saved browser selection.
+        val resolvedPlayableUri = when {
+            rawUrl.isEmpty() -> null
+            cachedReadyUri != null -> cachedReadyUri
+            rawUrl.startsWith("file://") || rawUrl.startsWith("content://") -> rawUrl
+            ctx != null -> CanvasVideoExporter.resolveOrCacheVideoUri(ctx, rawUrl) ?: rawUrl
+            else -> rawUrl
+        }
+
+        // Guard against race if user switched tracks while caching video
+        if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
+            _activeCanvasUrl.value = resolvedPlayableUri
+        }
 
         // Like Spotify, keep the song's real album cover inside the card while the Canvas video
         // animates in the background (only populate artwork if none exists or candidate is still art).
@@ -685,6 +836,7 @@ object MediaNotificationRepository {
     fun selectSavedCanvas(item: SavedCanvasItem) {
         val current = _currentTrack.value
         userManuallySelectedCanvasTrackKey = trackKey(current)
+        autoAppliedSavedCanvasTrackKey = null
         _activeCanvasId.value = "saved_canvas_${item.id}"
         _activeCanvasUrl.value = item.fileUri
     }
