@@ -86,6 +86,9 @@ fun SettingsDialog(
     var localSpeed by remember(styleConfig.waveformSpeedMultiplier) {
         mutableFloatStateOf(styleConfig.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f))
     }
+    var localForce by remember(styleConfig.waveformForce) {
+        mutableFloatStateOf(styleConfig.waveformForce.coerceIn(0.5f, 2.2f))
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -174,7 +177,7 @@ fun SettingsDialog(
                                     text = if (styleConfig.waveformBeatSync) {
                                         "Reacts to your playing music beats"
                                     } else {
-                                        "Custom wave speed (${String.format(Locale.US, "%.1fx", localSpeed)})"
+                                        "Speed ${String.format(Locale.US, "%.1fx", localSpeed)} • Force ${String.format(Locale.US, "%.1fx", localForce)}"
                                     },
                                     color = Color.White.copy(alpha = 0.65f),
                                     fontSize = 11.sp
@@ -192,6 +195,7 @@ fun SettingsDialog(
                                         color = styleConfig.waveformColor,
                                         beatSyncEnabled = styleConfig.waveformBeatSync,
                                         speedMultiplier = localSpeed,
+                                        forceMultiplier = localForce,
                                         animateAlways = true,
                                         scale = 1.15f
                                     )
@@ -267,6 +271,8 @@ fun SettingsDialog(
                                 value = localSpeed,
                                 onValueChange = { next ->
                                     localSpeed = ((next * 10f).toInt() / 10f).coerceIn(0.4f, 2.5f)
+                                },
+                                onValueChangeFinished = {
                                     onStyleChange(styleConfig.copy(waveformSpeedMultiplier = localSpeed))
                                 },
                                 valueRange = 0.4f..2.5f,
@@ -302,6 +308,75 @@ fun SettingsDialog(
                                         Text(
                                             text = label,
                                             color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Wave Force (Height)",
+                                    color = Color.White.copy(alpha = 0.88f),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = String.format(Locale.US, "%.1fx", localForce),
+                                    color = Color(0xFF9BE7B3),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.testTag("settings_waveform_force_value")
+                                )
+                            }
+                            Slider(
+                                value = localForce,
+                                onValueChange = { next ->
+                                    localForce = ((next * 10f).toInt() / 10f).coerceIn(0.5f, 2.2f)
+                                },
+                                onValueChangeFinished = {
+                                    onStyleChange(styleConfig.copy(waveformForce = localForce))
+                                },
+                                valueRange = 0.5f..2.2f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFF1DB954),
+                                    activeTrackColor = Color(0xFF1DB954),
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                                ),
+                                modifier = Modifier.testTag("settings_waveform_force_slider")
+                            )
+
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                val forcePresets = listOf(
+                                    0.7f to "Soft (0.7x)",
+                                    1.1f to "Balanced (1.1x)",
+                                    1.5f to "Punchy (1.5x)",
+                                    2.0f to "Max (2.0x)"
+                                )
+                                forcePresets.forEach { (presetForce, label) ->
+                                    val active = kotlin.math.abs(localForce - presetForce) < 0.09f
+                                    Surface(
+                                        onClick = {
+                                            localForce = presetForce
+                                            onStyleChange(styleConfig.copy(waveformForce = presetForce))
+                                        },
+                                        shape = RoundedCornerShape(50),
+                                        color = if (active) Color(0xFF1DB954) else Color.White.copy(alpha = 0.10f),
+                                        modifier = Modifier.testTag("settings_force_preset_$presetForce")
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            color = if (active) Color.Black else Color.White,
                                             fontSize = 11.sp,
                                             fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)

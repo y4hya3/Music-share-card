@@ -225,7 +225,8 @@ object AnimatedGifExporter {
             timeSec = timeSec,
             speedMultiplier = spec.speedMultiplier,
             beatSyncMode = spec.beatSyncEnabled,
-            animateWhenPaused = true
+            animateWhenPaused = true,
+            forceMultiplier = spec.forceMultiplier
         )
         val padX = rect.width() * 0.08f
         val usableW = (rect.width() - padX * 2f).coerceAtLeast(6f)

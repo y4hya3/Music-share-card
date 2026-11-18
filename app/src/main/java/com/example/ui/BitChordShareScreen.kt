@@ -10,9 +10,13 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -148,6 +152,7 @@ private enum class LiveScrubTarget {
  */
 @Composable
 fun BitChordShareScreen(
+    isAppEntered: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -198,6 +203,33 @@ fun BitChordShareScreen(
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "live_scrub_chrome_alpha"
     )
+
+    // Choreographed app entrance transition (runs once when splash yields to Home)
+    val stageEntrance = remember { Animatable(if (isAppEntered) 1f else 0f) }
+    val chromeEntrance = remember { Animatable(if (isAppEntered) 1f else 0f) }
+    LaunchedEffect(isAppEntered) {
+        if (isAppEntered) {
+            launch {
+                stageEntrance.animateTo(
+                    1f,
+                    animationSpec = spring(
+                        dampingRatio = 0.80f,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                )
+            }
+            launch {
+                chromeEntrance.animateTo(
+                    1f,
+                    animationSpec = tween(
+                        durationMillis = 420,
+                        delayMillis = 70,
+                        easing = FastOutSlowInEasing
+                    )
+                )
+            }
+        }
+    }
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -430,8 +462,12 @@ fun BitChordShareScreen(
                         .offset(y = cardOffsetY)
                         .requiredSize(width = 360.dp, height = 640.dp)
                         .graphicsLayer {
-                            scaleX = cardZoom
-                            scaleY = cardZoom
+                            val ent = stageEntrance.value
+                            val entScale = 0.94f + 0.06f * ent
+                            scaleX = cardZoom * entScale
+                            scaleY = cardZoom * entScale
+                            translationY = (1f - ent) * 28.dp.toPx()
+                            alpha = ent
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -503,6 +539,14 @@ fun BitChordShareScreen(
                                 Box(
                                     modifier = Modifier
                                         .size(width = paneFitW, height = paneFitH)
+                                        .graphicsLayer {
+                                            val ent = stageEntrance.value
+                                            val entScale = 0.94f + 0.06f * ent
+                                            scaleX = entScale
+                                            scaleY = entScale
+                                            translationY = (1f - ent) * 24.dp.toPx()
+                                            alpha = ent
+                                        }
                                         .shadow(20.dp, RoundedCornerShape(22.dp))
                                         .clip(RoundedCornerShape(22.dp))
                                         .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(22.dp))
@@ -545,7 +589,16 @@ fun BitChordShareScreen(
                                     styleConfig = effectiveStyleConfig,
                                     maxCardWidth = adaptiveCardMax,
                                     maxArtSize = adaptiveArtMax,
-                                    modifier = Modifier.testTag("center_story_card")
+                                    modifier = Modifier
+                                        .graphicsLayer {
+                                            val ent = stageEntrance.value
+                                            val entScale = 0.94f + 0.06f * ent
+                                            scaleX = entScale
+                                            scaleY = entScale
+                                            translationY = (1f - ent) * 24.dp.toPx()
+                                            alpha = ent
+                                        }
+                                        .testTag("center_story_card")
                                 )
                             }
 
@@ -570,7 +623,11 @@ fun BitChordShareScreen(
                                 onEdit = { showEditSheet = true },
                                 onRefresh = { handleRefreshClick() },
                                 compactTitle = true,
-                                modifier = Modifier.graphicsLayer { alpha = chromeAlpha }
+                                modifier = Modifier.graphicsLayer {
+                                    val cEnt = chromeEntrance.value
+                                    alpha = chromeAlpha * cEnt
+                                    translationY = -(1f - cEnt) * 14.dp.toPx()
+                                }
                             )
 
                             Spacer(modifier = Modifier.height(10.dp))
@@ -581,7 +638,10 @@ fun BitChordShareScreen(
                                     MusicNotificationListenerService.openNotificationAccessSettings(context)
                                 },
                                 onRefreshClick = { handleRefreshClick() },
-                                modifier = Modifier.graphicsLayer { alpha = chromeAlpha }
+                                modifier = Modifier.graphicsLayer {
+                                    val cEnt = chromeEntrance.value
+                                    alpha = chromeAlpha * cEnt
+                                }
                             )
 
                             Spacer(modifier = Modifier.height(12.dp))
@@ -760,7 +820,11 @@ fun BitChordShareScreen(
                                 .widthIn(max = if (isPortraitTablet) 640.dp else 600.dp)
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
-                                .graphicsLayer { alpha = chromeAlpha }
+                                .graphicsLayer {
+                                    val cEnt = chromeEntrance.value
+                                    alpha = chromeAlpha * cEnt
+                                    translationY = -(1f - cEnt) * 14.dp.toPx()
+                                }
                         )
 
                         NotificationStatusBanner(
@@ -772,7 +836,9 @@ fun BitChordShareScreen(
                             modifier = Modifier
                                 .widthIn(max = if (isPortraitTablet) 560.dp else 600.dp)
                                 .padding(horizontal = 20.dp, vertical = 4.dp)
-                                .graphicsLayer { alpha = chromeAlpha }
+                                .graphicsLayer {
+                                    alpha = chromeAlpha * chromeEntrance.value
+                                }
                         )
 
                         Box(
@@ -861,6 +927,11 @@ fun BitChordShareScreen(
                                 .widthIn(max = 540.dp)
                                 .fillMaxWidth()
                                 .padding(horizontal = 20.dp, vertical = 4.dp)
+                                .graphicsLayer {
+                                    val cEnt = chromeEntrance.value
+                                    alpha = cEnt
+                                    translationY = (1f - cEnt) * 20.dp.toPx()
+                                }
                         )
 
                         ShareActionsBar(
@@ -940,7 +1011,11 @@ fun BitChordShareScreen(
                                 }
                             },
                             modifier = Modifier
-                                .graphicsLayer { alpha = chromeAlpha }
+                                .graphicsLayer {
+                                    val cEnt = chromeEntrance.value
+                                    alpha = chromeAlpha * cEnt
+                                    translationY = (1f - cEnt) * 24.dp.toPx()
+                                }
                                 .testTag("bottom_share_actions_bar")
                         )
                     }
@@ -961,9 +1036,10 @@ fun BitChordShareScreen(
                 dragCardBlur = null
                 dragLyricsBlur = null
                 showEditSheet = false
+                MediaNotificationRepository.flushStylePreferences()
             },
             onStyleChange = { newConfig ->
-                MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { newConfig }
+                MediaNotificationRepository.updateStyleConfig(saveImmediately = false) { newConfig }
             },
             onLiveBlurPreview = { dragBlurRadius = it },
             onLiveCardScalePreview = { dragCardScale = it },
@@ -986,12 +1062,15 @@ fun BitChordShareScreen(
             palette = palette,
             isAccessGranted = isAccessGranted,
             onStyleChange = { updated ->
-                MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { updated }
+                MediaNotificationRepository.updateStyleConfig(saveImmediately = false) { updated }
             },
             onRequestAudioBeatSync = { enableSync ->
                 handleAudioBeatSyncRequest(enableSync)
             },
-            onDismiss = { showSettingsDialog = false }
+            onDismiss = {
+                showSettingsDialog = false
+                MediaNotificationRepository.flushStylePreferences()
+            }
         )
     }
 
@@ -1149,6 +1228,7 @@ private fun CleanExportPreviewDialog(
                                     color = styleConfig.waveformColor,
                                     beatSyncEnabled = styleConfig.waveformBeatSync,
                                     speedMultiplier = styleConfig.waveformSpeedMultiplier,
+                                    forceMultiplier = styleConfig.waveformForce,
                                     animateAlways = true,
                                     modifier = Modifier
                                         .offset(x = wfLeft, y = wfTop)

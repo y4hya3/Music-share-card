@@ -466,7 +466,8 @@ object CardShareManager {
                 track = track,
                 timeSec = 1.4f,
                 speedMultiplier = styleConfig.waveformSpeedMultiplier,
-                beatSyncMode = styleConfig.waveformBeatSync
+                beatSyncMode = styleConfig.waveformBeatSync,
+                forceMultiplier = styleConfig.waveformForce
             )
         }
     }
@@ -527,7 +528,8 @@ object CardShareManager {
         track: MediaTrackInfo,
         timeSec: Float,
         speedMultiplier: Float = 1.0f,
-        beatSyncMode: Boolean = false
+        beatSyncMode: Boolean = false,
+        forceMultiplier: Float = 1.35f
     ) {
         val levels = AudioBeatMonitor.computeBarLevels(
             trackTitle = track.title,
@@ -536,7 +538,8 @@ object CardShareManager {
             timeSec = timeSec,
             speedMultiplier = speedMultiplier,
             beatSyncMode = beatSyncMode,
-            animateWhenPaused = true
+            animateWhenPaused = true,
+            forceMultiplier = forceMultiplier
         )
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = colorArgb
@@ -1597,7 +1600,8 @@ object CardShareManager {
             trackArtist = track.artist,
             isPlaying = true,
             speedMultiplier = styleConfig.waveformSpeedMultiplier,
-            beatSyncEnabled = styleConfig.waveformBeatSync
+            beatSyncEnabled = styleConfig.waveformBeatSync,
+            forceMultiplier = styleConfig.waveformForce
         )
         val overlay = generateTransparentCardOverlayBitmap(
             context = context,
@@ -1650,7 +1654,8 @@ object CardShareManager {
                 trackArtist = track.artist,
                 isPlaying = true,
                 speedMultiplier = styleConfig.waveformSpeedMultiplier,
-                beatSyncEnabled = styleConfig.waveformBeatSync
+                beatSyncEnabled = styleConfig.waveformBeatSync,
+                forceMultiplier = styleConfig.waveformForce
             )
         } else {
             null

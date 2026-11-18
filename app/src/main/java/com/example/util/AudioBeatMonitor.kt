@@ -119,12 +119,12 @@ object AudioBeatMonitor {
     /**
      * Updates peak-normalized zero-latency beat envelopes given raw band intensities.
      * - Rising edges apply ZERO lag (instant jump).
-     * - Adaptive rolling peak ensures dynamic punch across quiet and loud songs.
+     * - Responsive rolling AGC keeps heavy kicks hitting 0.90..1.0f even at moderate phone volume.
      */
     internal class BeatEnvelopeTracker {
         private val env = floatArrayOf(MIN_LEVEL, MIN_LEVEL, MIN_LEVEL, MIN_LEVEL)
         private val prevRaw = FloatArray(4)
-        private var rollingPeak = 0.65f
+        private var rollingPeak = 0.36f
         private var lastCallbackNanos = 0L
         @Volatile
         var lastSignalNanos: Long = 0L
@@ -134,7 +134,7 @@ object AudioBeatMonitor {
         fun reset() {
             env.fill(MIN_LEVEL)
             prevRaw.fill(0f)
-            rollingPeak = 0.65f
+            rollingPeak = 0.36f
             lastCallbackNanos = 0L
             lastSignalNanos = 0L
         }
@@ -143,25 +143,28 @@ object AudioBeatMonitor {
         fun ingestFft(fft: ByteArray, samplingRateMilliHz: Int, nowNanos: Long): FloatArray {
             val raw = computeBandsFromFft(fft, samplingRateMilliHz)
             val totalEnergy = raw[0] + raw[1] + raw[2] + raw[3]
-            if (totalEnergy <= 0.015f) {
+            if (totalEnergy <= 0.012f) {
                 decayToNow(nowNanos)
                 return env.copyOf()
             }
             lastSignalNanos = nowNanos
             decayToNow(nowNanos)
 
-            val frameMax = max(raw[0], max(raw[1], max(raw[2], raw[3])))
+            val frameMax = max(raw[0], max(raw[1], max(raw[2], raw[3]))).coerceAtMost(2.5f)
             rollingPeak = if (frameMax > rollingPeak) {
-                rollingPeak * 0.35f + frameMax * 0.65f
+                rollingPeak * 0.45f + frameMax * 0.55f
             } else {
-                max(0.28f, rollingPeak * 0.985f)
+                max(0.14f, rollingPeak * 0.965f)
             }
-            val normScale = 1.0f / rollingPeak.coerceAtLeast(0.28f)
+            val normScale = 1.0f / rollingPeak.coerceAtLeast(0.14f)
 
             for (b in 0..3) {
-                val flux = max(0f, raw[b] - prevRaw[b]) * 1.15f
+                val flux = max(0f, raw[b] - prevRaw[b]) * 1.45f
                 prevRaw[b] = raw[b]
-                val target = (MIN_LEVEL + ((raw[b] * 0.85f + flux) * normScale) * 0.84f)
+                val drive = ((raw[b] * 0.95f + flux) * normScale).coerceIn(0f, 1.35f)
+                // Concave punch curve so real beats push confidently near 1.0 instead of hovering low
+                val shaped = kotlin.math.sqrt(drive.coerceIn(0f, 1f))
+                val target = (MIN_LEVEL + shaped * (1.0f - MIN_LEVEL))
                     .coerceIn(MIN_LEVEL, 1.0f)
                 // ZERO-LATENCY ATTACK: snap upward immediately on beat hit
                 if (target >= env[b]) {
@@ -174,23 +177,25 @@ object AudioBeatMonitor {
 
         @Synchronized
         fun ingestWaveform(waveform: ByteArray, nowNanos: Long): FloatArray {
-            val energy = computePcmTransientEnergy(waveform)
-            if (energy <= 0.025f) {
+            val energy = computePcmTransientEnergy(waveform).coerceAtMost(2.0f)
+            if (energy <= 0.018f) {
                 return env.copyOf()
             }
             lastSignalNanos = nowNanos
             decayToNow(nowNanos)
 
             rollingPeak = if (energy > rollingPeak) {
-                rollingPeak * 0.40f + energy * 0.60f
+                rollingPeak * 0.45f + energy * 0.55f
             } else {
-                max(0.28f, rollingPeak * 0.992f)
+                max(0.14f, rollingPeak * 0.975f)
             }
-            val norm = (energy / rollingPeak.coerceAtLeast(0.28f)).coerceIn(0f, 1.3f)
+            val norm = (energy / rollingPeak.coerceAtLeast(0.14f)).coerceIn(0f, 1.35f)
+            val shapedNorm = kotlin.math.sqrt(norm.coerceIn(0f, 1f))
             // Distribute crisp time-domain transient boost skewed slightly toward low/mid punch
-            val weights = floatArrayOf(1.0f, 0.92f, 0.82f, 0.72f)
+            val weights = floatArrayOf(1.0f, 0.95f, 0.86f, 0.78f)
             for (b in 0..3) {
-                val target = (MIN_LEVEL + norm * weights[b] * 0.78f).coerceIn(MIN_LEVEL, 1.0f)
+                val target = (MIN_LEVEL + shapedNorm * weights[b] * (1.0f - MIN_LEVEL))
+                    .coerceIn(MIN_LEVEL, 1.0f)
                 if (target > env[b]) {
                     env[b] = target
                 }
@@ -225,8 +230,8 @@ object AudioBeatMonitor {
             }
             val dtSec = ((nowNanos - prev) / 1_000_000_000.0).toFloat().coerceIn(0f, 0.25f)
             if (dtSec <= 0f) return
-            // Fast musical release (~8.5/s falloff -> natural spring drop between 120-160 BPM beats)
-            val decayFactor = exp(-8.5f * dtSec)
+            // Crisp musical release (~9.2/s falloff -> tight bounce on fast drops)
+            val decayFactor = exp(-9.2f * dtSec)
             for (b in 0..3) {
                 env[b] = (MIN_LEVEL + (env[b] - MIN_LEVEL) * decayFactor).coerceIn(MIN_LEVEL, 1.0f)
             }
@@ -346,7 +351,8 @@ object AudioBeatMonitor {
      * Deterministic, track-fingerprinted 4-bar waveform heights in [0.18f .. 1.0f].
      * - When live Visualizer FFT/PCM bands are actively streaming (`liveAudioBands != null` & [hasLiveSignal]),
      *   outputs live bands directly with 0ms delay.
-     * - In Default Speed mode ([beatSyncMode] == false), scales smooth wave motion by [speedMultiplier].
+     * - In Manual Speed + Force mode ([beatSyncMode] == false), scales speed by [speedMultiplier] and
+     *   vertical bar punch/amplitude by [forceMultiplier] (`0.5f..2.2f`) so heavy drops reach full height.
      * - Always animates cleanly when [animateWhenPaused] is true so previews and MP4/GIF exports never freeze.
      */
     fun computeBarLevels(
@@ -358,11 +364,18 @@ object AudioBeatMonitor {
         speedMultiplier: Float = 1.0f,
         beatSyncMode: Boolean = false,
         animateWhenPaused: Boolean = true,
-        hasLiveSignal: Boolean = liveAudioBands != null && liveAudioBands.any { it > 0.20f }
+        hasLiveSignal: Boolean = liveAudioBands != null && liveAudioBands.any { it > 0.20f },
+        forceMultiplier: Float = 1.35f
     ): FloatArray {
+        val force = forceMultiplier.coerceIn(0.5f, 2.2f)
         if (beatSyncMode && liveAudioBands != null && hasLiveSignal) {
             return FloatArray(4) { i ->
-                (liveAudioBands.getOrNull(i) ?: MIN_LEVEL).coerceIn(MIN_LEVEL, 1.0f)
+                val raw = (liveAudioBands.getOrNull(i) ?: MIN_LEVEL).coerceIn(MIN_LEVEL, 1.0f)
+                val normalized = ((raw - MIN_LEVEL) / (1.0f - MIN_LEVEL)).coerceIn(0f, 1f)
+                // Boost dynamic response with mild force headroom so beats visibly reach 1.0f
+                val boosted = (normalized * (0.95f + (force - 1.0f) * 0.35f).coerceIn(0.65f, 1.5f))
+                    .coerceIn(0f, 1f)
+                (MIN_LEVEL + boosted * (1.0f - MIN_LEVEL)).coerceIn(MIN_LEVEL, 1.0f)
             }
         }
 
@@ -374,7 +387,7 @@ object AudioBeatMonitor {
         val effectiveTime = timeSec * speed
         val seed = ("$trackTitle|$trackArtist").hashCode()
         val absSeed = abs(seed)
-        val bpm = 92f + (absSeed % 58) // 92..149 BPM unique per track
+        val bpm = 96f + (absSeed % 54) // 96..149 BPM unique per track
         val beatFreq = bpm / 60f
         val phaseShift = (absSeed % 360) * (PI.toFloat() / 180f)
         val swingFactor = 0.85f + ((absSeed shr 4) % 30) / 100f
@@ -382,19 +395,27 @@ object AudioBeatMonitor {
         val out = FloatArray(4)
         for (i in 0..3) {
             val f1 = (beatFreq * (1f + i * 0.19f) * swingFactor)
-            val f2 = (beatFreq * (2.15f - i * 0.22f))
+            val f2 = (beatFreq * (2.10f - i * 0.20f))
             val phase = phaseShift + i * 1.15f
             val wave1 = 0.5f + 0.5f * sin(2f * PI.toFloat() * f1 * effectiveTime + phase)
             val wave2 = 0.5f + 0.5f * sin(2f * PI.toFloat() * f2 * effectiveTime + phase * 1.7f)
-            val harmonic = (0.62f * wave1 + 0.38f * wave2)
-            var shaped = 0.20f + 0.78f * (harmonic * harmonic * (3f - 2f * harmonic))
+            val harmonic = (0.60f * wave1 + 0.40f * wave2).coerceIn(0f, 1f)
 
-            if (beatSyncMode) {
-                val beatPhase = (timeSec * beatFreq + i * 0.12f) % 1f
-                val kick = ((1f - beatPhase) * (1f - beatPhase))
-                shaped = (0.20f + 0.52f * harmonic + 0.28f * kick).coerceIn(MIN_LEVEL, 1.0f)
-            }
-            out[i] = shaped.coerceIn(MIN_LEVEL, 1.0f)
+            // Crisp beat kick pulse so peaks hit higher & drop tighter rather than hovering flat
+            val beatPhase = ((if (beatSyncMode) timeSec else effectiveTime) * beatFreq + i * 0.14f) % 1f
+            val kick = ((1f - beatPhase) * (1f - beatPhase) * (1f - beatPhase))
+            val rawEnvelope = if (beatSyncMode) {
+                (0.54f * harmonic + 0.46f * kick)
+            } else {
+                // Rescale smoothstep slightly above midpoint & blend punchy kick for full-range travel
+                val smooth = (harmonic * harmonic * (3f - 2f * harmonic))
+                (0.68f * smooth + 0.32f * kick)
+            }.coerceIn(0f, 1f)
+
+            // Apply selectable Wave Force: scales excursion above MIN_LEVEL and hits 1.0 cleanly at high force
+            val scaledEnvelope = (rawEnvelope * (if (beatSyncMode) max(1.15f, force) else force))
+                .coerceIn(0f, 1f)
+            out[i] = (MIN_LEVEL + (1.0f - MIN_LEVEL) * scaledEnvelope).coerceIn(MIN_LEVEL, 1.0f)
         }
         return out
     }

@@ -1123,4 +1123,68 @@ class ExampleRobolectricTest {
 
     dummyMp4.delete()
   }
+
+  @Test
+  fun `waveform force control persists in preferences and boosts bar punch when beat sync is off or on`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Default & custom waveformForce persistence + resetStyleValues
+    val defaults = CardStyleConfig()
+    assertEquals(1.35f, defaults.waveformForce, 0.001f)
+
+    val customCfg = defaults.copy(enableWaveform = true, waveformBeatSync = false, waveformForce = 2.0f)
+    CardStylePreferences.save(context, customCfg)
+    val loaded = CardStylePreferences.load(context)
+    assertEquals(2.0f, loaded.waveformForce, 0.001f)
+
+    com.example.repository.MediaNotificationRepository.initialize(context)
+    com.example.repository.MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { customCfg }
+    com.example.repository.MediaNotificationRepository.resetStyleValues()
+    assertEquals(
+      defaults.waveformForce,
+      com.example.repository.MediaNotificationRepository.styleConfig.value.waveformForce,
+      0.001f
+    )
+
+    // 2. When Beat Sync is OFF, higher forceMultiplier raises bar heights cleanly to full peak punch
+    var maxLowForce = 0f
+    var maxHighForce = 0f
+    var sumLowForce = 0f
+    var sumHighForce = 0f
+    for (step in 0 until 24) {
+      val t = step * 0.08f
+      val lowBars = AudioBeatMonitor.computeBarLevels(
+        trackTitle = "Force Test Track",
+        trackArtist = "EchoSnap",
+        isPlaying = true,
+        timeSec = t,
+        beatSyncMode = false,
+        forceMultiplier = 0.6f
+      )
+      val highBars = AudioBeatMonitor.computeBarLevels(
+        trackTitle = "Force Test Track",
+        trackArtist = "EchoSnap",
+        isPlaying = true,
+        timeSec = t,
+        beatSyncMode = false,
+        forceMultiplier = 2.0f
+      )
+      for (b in 0..3) {
+        if (lowBars[b] > maxLowForce) maxLowForce = lowBars[b]
+        if (highBars[b] > maxHighForce) maxHighForce = highBars[b]
+        sumLowForce += lowBars[b]
+        sumHighForce += highBars[b]
+      }
+    }
+    assertTrue("Expected high force peak >= 0.92f (got $maxHighForce)", maxHighForce >= 0.92f)
+    assertTrue("Expected high force mean ($sumHighForce) > low force mean ($sumLowForce)", sumHighForce > sumLowForce + 10f)
+
+    // 3. BeatEnvelopeTracker reaches high dynamic peaks even at moderate FFT signal levels
+    val tracker = AudioBeatMonitor.BeatEnvelopeTracker()
+    val moderateBassFft = ByteArray(256)
+    moderateBassFft[2] = 42
+    moderateBassFft[3] = 28
+    val firstBeat = tracker.ingestFft(moderateBassFft, samplingRateMilliHz = 48_000_000, nowNanos = 2_000_000_000L)
+    assertTrue("Expected responsive beat height >= 0.85f on moderate/loud kick (got ${firstBeat[0]})", firstBeat[0] >= 0.85f)
+  }
 }

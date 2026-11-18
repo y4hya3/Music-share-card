@@ -598,6 +598,7 @@ private fun FloatingGlassShareCard(
                         color = styleConfig.waveformColor,
                         beatSyncEnabled = styleConfig.waveformBeatSync,
                         speedMultiplier = styleConfig.waveformSpeedMultiplier,
+                        forceMultiplier = styleConfig.waveformForce,
                         animateAlways = true,
                         scale = scale
                     )
@@ -609,7 +610,10 @@ private fun FloatingGlassShareCard(
 
 /**
  * 4-bar iOS Dynamic Island style audio equalizer displayed in the Floating Glass Card footer
- * and Settings speed/beat preview.
+ * and Settings speed/beat/force preview.
+ *
+ * Uses continuous phase integration + in-place array updates so adjusting Wave Speed or Wave Force
+ * never resets phase or causes frame jitter.
  */
 @Composable
 fun DynamicIslandWaveformBars(
@@ -617,13 +621,23 @@ fun DynamicIslandWaveformBars(
     color: Color,
     beatSyncEnabled: Boolean,
     speedMultiplier: Float = 1.0f,
+    forceMultiplier: Float = 1.35f,
     animateAlways: Boolean = true,
     scale: Float = 1f,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val sampler = remember { AudioBeatMonitor.LiveSessionSampler() }
-    var levels by remember { mutableStateOf(floatArrayOf(0.45f, 0.85f, 0.58f, 0.72f)) }
+    val barLevels = remember { FloatArray(4) { 0.45f } }
+    var frameCounter by remember { mutableStateOf(0L) }
+
+    val latestTitle by androidx.compose.runtime.rememberUpdatedState(track.title)
+    val latestArtist by androidx.compose.runtime.rememberUpdatedState(track.artist)
+    val latestPlaying by androidx.compose.runtime.rememberUpdatedState(track.isPlaying)
+    val latestBeatSync by androidx.compose.runtime.rememberUpdatedState(beatSyncEnabled)
+    val latestSpeed by androidx.compose.runtime.rememberUpdatedState(speedMultiplier)
+    val latestForce by androidx.compose.runtime.rememberUpdatedState(forceMultiplier)
+    val latestAnimateAlways by androidx.compose.runtime.rememberUpdatedState(animateAlways)
 
     DisposableEffect(beatSyncEnabled) {
         if (beatSyncEnabled) {
@@ -636,31 +650,56 @@ fun DynamicIslandWaveformBars(
         }
     }
 
-    LaunchedEffect(track.title, track.artist, track.isPlaying, beatSyncEnabled, speedMultiplier, animateAlways) {
-        val startNanos = System.nanoTime()
+    LaunchedEffect(Unit) {
+        var lastFrameNanos = 0L
         var lastEnsureNanos = 0L
+        var phaseTimeSec = 0f
         while (true) {
             val frameNanos = withFrameNanos { it }
-            val tSec = ((frameNanos - startNanos).coerceAtLeast(0L)) / 1_000_000_000f
-            if (beatSyncEnabled && frameNanos - lastEnsureNanos >= 800_000_000L) {
+            val dtSec = if (lastFrameNanos == 0L) {
+                0f
+            } else {
+                ((frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)) / 1_000_000_000f
+            }
+            lastFrameNanos = frameNanos
+
+            val sync = latestBeatSync
+            val speed = latestSpeed.coerceIn(0.4f, 2.5f)
+            phaseTimeSec += dtSec * (if (sync) 1.0f else speed)
+
+            if (sync && frameNanos - lastEnsureNanos >= 800_000_000L) {
                 lastEnsureNanos = frameNanos
                 sampler.ensureActive(context)
             }
-            val live = if (beatSyncEnabled) sampler.currentBands() else null
-            val liveSignal = beatSyncEnabled && sampler.hasLiveSignal()
-            levels = AudioBeatMonitor.computeBarLevels(
-                trackTitle = track.title,
-                trackArtist = track.artist,
-                isPlaying = if (animateAlways) true else track.isPlaying,
-                timeSec = tSec,
-                liveAudioBands = live,
-                speedMultiplier = speedMultiplier,
-                beatSyncMode = beatSyncEnabled,
-                animateWhenPaused = animateAlways,
-                hasLiveSignal = liveSignal
-            )
-            if (!animateAlways && !track.isPlaying && live == null) {
-                break
+
+            val live = if (sync) sampler.currentBands() else null
+            val liveSignal = sync && sampler.hasLiveSignal()
+            val shouldAnimate = latestAnimateAlways || latestPlaying || liveSignal
+
+            if (shouldAnimate) {
+                val computed = AudioBeatMonitor.computeBarLevels(
+                    trackTitle = latestTitle,
+                    trackArtist = latestArtist,
+                    isPlaying = if (latestAnimateAlways) true else latestPlaying,
+                    timeSec = phaseTimeSec,
+                    liveAudioBands = live,
+                    speedMultiplier = 1.0f, // speed already smoothly integrated into phaseTimeSec
+                    beatSyncMode = sync,
+                    animateWhenPaused = latestAnimateAlways,
+                    hasLiveSignal = liveSignal,
+                    forceMultiplier = latestForce
+                )
+                for (i in 0..3) {
+                    val current = barLevels[i]
+                    val target = computed[i]
+                    // 0ms instant attack when rising so beats punch immediately; silky release smoothing on fall
+                    barLevels[i] = if (target >= current) {
+                        target
+                    } else {
+                        current + (target - current) * (dtSec * 14f).coerceIn(0.18f, 1.0f)
+                    }
+                }
+                frameCounter++
             }
         }
     }
@@ -673,13 +712,18 @@ fun DynamicIslandWaveformBars(
             .size(width = boxW, height = boxH)
             .testTag("floating_glass_waveform")
     ) {
-        val barWidth = (size.width / 7.2f).coerceAtLeast(2.2f)
-        val gap = (size.width - barWidth * 4f) / 3f
+        // Subscribe purely inside DrawScope so parent rows don't recompose 60-120 times per second
+        frameCounter
+        val padX = size.width * 0.06f
+        val usableW = (size.width - padX * 2f).coerceAtLeast(6f)
+        val gap = usableW * 0.14f
+        val barWidth = ((usableW - gap * 3f) / 4f).coerceAtLeast(2.2f)
         val radius = CornerRadius(barWidth / 2f, barWidth / 2f)
+        val maxBarH = size.height * 0.94f
         for (i in 0..3) {
-            val lvl = levels.getOrElse(i) { 0.35f }.coerceIn(0.18f, 1.0f)
-            val barH = (size.height * lvl).coerceAtLeast(barWidth * 1.15f)
-            val x = i * (barWidth + gap)
+            val lvl = barLevels[i].coerceIn(0.18f, 1.0f)
+            val barH = (maxBarH * lvl).coerceAtLeast(barWidth * 1.15f)
+            val x = padX + i * (barWidth + gap)
             val top = (size.height - barH) / 2f
             drawRoundRect(
                 color = color,

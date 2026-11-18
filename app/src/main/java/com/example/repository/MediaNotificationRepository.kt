@@ -502,6 +502,7 @@ object MediaNotificationRepository {
                 enableWaveform = defaults.enableWaveform,
                 waveformBeatSync = defaults.waveformBeatSync,
                 waveformSpeedMultiplier = defaults.waveformSpeedMultiplier,
+                waveformForce = defaults.waveformForce,
                 waveformColor = defaults.waveformColor
             )
         }

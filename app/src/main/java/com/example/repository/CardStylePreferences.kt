@@ -38,6 +38,7 @@ object CardStylePreferences {
     private const val KEY_WAVEFORM_COLOR = "waveform_color"
     private const val KEY_WAVEFORM_BEAT_SYNC = "waveform_beat_sync"
     private const val KEY_WAVEFORM_SPEED = "waveform_speed_multiplier"
+    private const val KEY_WAVEFORM_FORCE = "waveform_force"
     private const val KEY_LYRICS_WORD_SELECTION = "lyrics_word_selection_mode"
     private const val KEY_SHOW_WORDMARK = "show_wordmark"
     private const val KEY_AUTO_SEARCH_ONLINE_ART = "auto_search_online_art"
@@ -102,6 +103,7 @@ object CardStylePreferences {
             waveformColor = Color(waveformColorArgb),
             waveformBeatSync = prefs.getBoolean(KEY_WAVEFORM_BEAT_SYNC, defaults.waveformBeatSync),
             waveformSpeedMultiplier = prefs.getFloat(KEY_WAVEFORM_SPEED, defaults.waveformSpeedMultiplier).coerceIn(0.4f, 2.5f),
+            waveformForce = prefs.getFloat(KEY_WAVEFORM_FORCE, defaults.waveformForce).coerceIn(0.5f, 2.2f),
             lyricsWordSelectionMode = prefs.getBoolean(KEY_LYRICS_WORD_SELECTION, defaults.lyricsWordSelectionMode),
             showLogoWordmark = prefs.getBoolean(KEY_SHOW_WORDMARK, defaults.showLogoWordmark),
             autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt),
@@ -149,6 +151,7 @@ object CardStylePreferences {
             .putInt(KEY_WAVEFORM_COLOR, config.waveformColor.toArgb())
             .putBoolean(KEY_WAVEFORM_BEAT_SYNC, config.waveformBeatSync)
             .putFloat(KEY_WAVEFORM_SPEED, config.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f))
+            .putFloat(KEY_WAVEFORM_FORCE, config.waveformForce.coerceIn(0.5f, 2.2f))
             .putBoolean(KEY_LYRICS_WORD_SELECTION, config.lyricsWordSelectionMode)
             .putBoolean(KEY_SHOW_WORDMARK, config.showLogoWordmark)
             .putBoolean(KEY_AUTO_SEARCH_ONLINE_ART, config.autoSearchOnlineArt)

@@ -9,9 +9,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -53,7 +55,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme(darkTheme = true) {
                 var showLaunchSplash by remember { mutableStateOf(true) }
-                val logoScale = remember { Animatable(0.88f) }
+                val logoScale = remember { Animatable(0.80f) }
                 val logoAlpha = remember { Animatable(0f) }
 
                 LaunchedEffect(Unit) {
@@ -63,10 +65,13 @@ class MainActivity : ComponentActivity() {
                     launch {
                         logoScale.animateTo(
                             1f,
-                            animationSpec = tween(380, easing = FastOutSlowInEasing)
+                            animationSpec = spring(
+                                dampingRatio = 0.72f,
+                                stiffness = Spring.StiffnessMediumLow
+                            )
                         )
                     }
-                    delay(850)
+                    delay(620)
                     showLaunchSplash = false
                 }
 
@@ -75,12 +80,13 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxSize(),
                         color = Color.Black
                     ) {
-                        BitChordShareScreen()
+                        BitChordShareScreen(isAppEntered = !showLaunchSplash)
                     }
 
                     AnimatedVisibility(
                         visible = showLaunchSplash,
-                        exit = fadeOut(animationSpec = tween(280))
+                        exit = fadeOut(animationSpec = tween(320)) +
+                            scaleOut(targetScale = 1.08f, animationSpec = tween(320))
                     ) {
                         Box(
                             modifier = Modifier

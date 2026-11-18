@@ -58,8 +58,9 @@ data class CardStyleConfig(
     val isFitToScreenPreview: Boolean = false, // false = Full-Screen, true = Fit-to-Screen scaled preview
     val enableWaveform: Boolean = false, // Dynamic Island 4-bar waveform on Glass Card
     val waveformColor: Color = Color.White,
-    val waveformBeatSync: Boolean = false, // true = interact with playing music beats; false = default speed multiplier
+    val waveformBeatSync: Boolean = false, // true = interact with playing music beats; false = default speed + force
     val waveformSpeedMultiplier: Float = 1.0f, // 0.4f..2.5f wave animation speed in default mode
+    val waveformForce: Float = 1.35f, // 0.5f..2.2f bar punch/height force when Beat Sync is off (or extra drive)
     val lyricsWordSelectionMode: Boolean = false, // false = whole lines, true = word-by-word interactive picker
     val showLogoWordmark: Boolean = true,
     val autoSearchOnlineArt: Boolean = false,

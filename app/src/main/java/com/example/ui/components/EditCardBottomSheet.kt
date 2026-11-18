@@ -1928,6 +1928,9 @@ fun EditCardBottomSheet(
                                             var localEditWaveSpeed by remember(styleConfig.waveformSpeedMultiplier) {
                                                 mutableFloatStateOf(styleConfig.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f))
                                             }
+                                            var localEditWaveForce by remember(styleConfig.waveformForce) {
+                                                mutableFloatStateOf(styleConfig.waveformForce.coerceIn(0.5f, 2.2f))
+                                            }
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1949,7 +1952,11 @@ fun EditCardBottomSheet(
                                             Slider(
                                                 value = localEditWaveSpeed,
                                                 onValueChange = { next ->
-                                                    localEditWaveSpeed = ((next * 10f).toInt() / 10f).coerceIn(0.4f, 2.5f)
+                                                    val snapped = ((next * 10f).toInt() / 10f).coerceIn(0.4f, 2.5f)
+                                                    if (snapped != localEditWaveSpeed) {
+                                                        localEditWaveSpeed = snapped
+                                                        onStyleChange(styleConfig.copy(waveformSpeedMultiplier = snapped))
+                                                    }
                                                 },
                                                 onValueChangeFinished = {
                                                     onStyleChange(styleConfig.copy(waveformSpeedMultiplier = localEditWaveSpeed))
@@ -1962,6 +1969,76 @@ fun EditCardBottomSheet(
                                                 ),
                                                 modifier = Modifier.testTag("edit_waveform_speed_slider")
                                             )
+
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    text = "Wave Force (Height)",
+                                                    color = Color.White.copy(alpha = 0.85f),
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = String.format(Locale.US, "%.1fx", localEditWaveForce),
+                                                    color = Color(0xFF9BE7B3),
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            Slider(
+                                                value = localEditWaveForce,
+                                                onValueChange = { next ->
+                                                    val snapped = ((next * 10f).toInt() / 10f).coerceIn(0.5f, 2.2f)
+                                                    if (snapped != localEditWaveForce) {
+                                                        localEditWaveForce = snapped
+                                                        onStyleChange(styleConfig.copy(waveformForce = snapped))
+                                                    }
+                                                },
+                                                onValueChangeFinished = {
+                                                    onStyleChange(styleConfig.copy(waveformForce = localEditWaveForce))
+                                                },
+                                                valueRange = 0.5f..2.2f,
+                                                colors = SliderDefaults.colors(
+                                                    thumbColor = Color(0xFF1DB954),
+                                                    activeTrackColor = Color(0xFF1DB954),
+                                                    inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                                                ),
+                                                modifier = Modifier.testTag("edit_waveform_force_slider")
+                                            )
+                                            FlowRow(
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                listOf(
+                                                    0.7f to "Soft",
+                                                    1.1f to "Normal",
+                                                    1.5f to "Punchy",
+                                                    2.0f to "Max"
+                                                ).forEach { (presetForce, label) ->
+                                                    val active = kotlin.math.abs(localEditWaveForce - presetForce) < 0.09f
+                                                    Surface(
+                                                        onClick = {
+                                                            localEditWaveForce = presetForce
+                                                            onStyleChange(styleConfig.copy(waveformForce = presetForce))
+                                                        },
+                                                        shape = RoundedCornerShape(50),
+                                                        color = if (active) Color(0xFF1DB954) else Color.White.copy(alpha = 0.10f),
+                                                        modifier = Modifier.testTag("edit_force_preset_$presetForce")
+                                                    ) {
+                                                        Text(
+                                                            text = "$label (${String.format(Locale.US, "%.1fx", presetForce)})",
+                                                            color = if (active) Color.Black else Color.White,
+                                                            fontSize = 10.5.sp,
+                                                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

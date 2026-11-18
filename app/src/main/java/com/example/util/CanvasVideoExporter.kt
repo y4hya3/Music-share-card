@@ -47,7 +47,8 @@ data class WaveformExportSpec(
     val trackArtist: String,
     val isPlaying: Boolean,
     val speedMultiplier: Float = 1.0f,
-    val beatSyncEnabled: Boolean = false
+    val beatSyncEnabled: Boolean = false,
+    val forceMultiplier: Float = 1.35f
 )
 
 /**
@@ -954,7 +955,8 @@ object CanvasVideoExporter {
                 timeSec = timeSec,
                 speedMultiplier = spec.speedMultiplier,
                 beatSyncMode = spec.beatSyncEnabled,
-                animateWhenPaused = true
+                animateWhenPaused = true,
+                forceMultiplier = spec.forceMultiplier
             )
             // Keep waveform bars 100% opaque regardless of frosted glass container opacity
             paint.color = spec.waveformColorArgb
