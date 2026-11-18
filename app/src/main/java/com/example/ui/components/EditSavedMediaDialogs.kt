@@ -172,9 +172,11 @@ fun EditSavedCanvasDialog(
     val coroutineScope = rememberCoroutineScope()
     var nameInput by remember(item.id) { mutableStateOf(item.name) }
     var albumQueryInput by remember(item.id) { mutableStateOf(item.linkedAlbumName) }
+    var artistQueryInput by remember(item.id) { mutableStateOf(item.linkedAlbumArtist) }
     var linkedAlbumName by remember(item.id) { mutableStateOf(item.linkedAlbumName) }
     var linkedAlbumArtist by remember(item.id) { mutableStateOf(item.linkedAlbumArtist) }
     var linkedTracks by remember(item.id) { mutableStateOf(item.linkedTrackTitles) }
+    var manualSongInput by remember(item.id) { mutableStateOf("") }
 
     var albumResults by remember(item.id) { mutableStateOf<List<AlbumTracklistCandidate>>(emptyList()) }
     var isSearchingAlbum by remember(item.id) { mutableStateOf(false) }
@@ -255,13 +257,15 @@ fun EditSavedCanvasDialog(
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            if (linkedAlbumName.isNotBlank() || linkedTracks.isNotEmpty()) {
+                            if (linkedAlbumName.isNotBlank() || linkedTracks.isNotEmpty() || artistQueryInput.isNotBlank()) {
                                 Surface(
                                     onClick = {
                                         linkedAlbumName = ""
                                         linkedAlbumArtist = ""
                                         linkedTracks = emptyList()
                                         albumQueryInput = ""
+                                        artistQueryInput = ""
+                                        manualSongInput = ""
                                         albumResults = emptyList()
                                         albumSearchMessage = "Album link cleared"
                                     },
@@ -281,11 +285,32 @@ fun EditSavedCanvasDialog(
                         }
                         Spacer(modifier = Modifier.height(3.dp))
                         Text(
-                            text = "Put any album name to sketch its songs, confirm it's the right album, then Save. Plays this canvas whenever a song from the album plays — even offline.",
+                            text = "Enter an album (e.g. \"27\" or \"27 by ElGrandeToto\"), check the songs, add any songs manually, and Save. Auto-applies even offline.",
                             color = Color.White.copy(alpha = 0.62f),
                             fontSize = 11.sp
                         )
                         Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedTextField(
+                            value = artistQueryInput,
+                            onValueChange = { artistQueryInput = it },
+                            singleLine = true,
+                            label = { Text("Artist Name (Optional)", fontSize = 12.sp) },
+                            placeholder = { Text("e.g. ElGrandeToto, Travis Scott", fontSize = 11.sp) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = accentColor,
+                                unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = accentColor,
+                                unfocusedLabelColor = Color.White.copy(alpha = 0.65f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("edit_saved_canvas_artist_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -297,7 +322,7 @@ fun EditSavedCanvasDialog(
                                 onValueChange = { albumQueryInput = it },
                                 singleLine = true,
                                 label = { Text("Album Name", fontSize = 12.sp) },
-                                placeholder = { Text("e.g. ASTROWORLD, After Hours", fontSize = 11.sp) },
+                                placeholder = { Text("e.g. 27, 27 by ElGrandeToto", fontSize = 11.sp) },
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = accentColor,
                                     unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
@@ -315,12 +340,14 @@ fun EditSavedCanvasDialog(
                                 onClick = {
                                     val q = albumQueryInput.trim()
                                     if (q.isEmpty()) return@Button
+                                    val artistHint = artistQueryInput.trim()
+                                    val parsedQuery = AlbumTracklistSearchService.parseSmartAlbumQuery(q, artistHint)
                                     coroutineScope.launch {
                                         isSearchingAlbum = true
                                         albumSearchMessage = null
                                         val found = AlbumTracklistSearchService.searchAlbumsWithSongs(
                                             albumQuery = q,
-                                            artistHint = item.artist
+                                            artistHint = artistHint
                                         )
                                         isSearchingAlbum = false
                                         albumResults = found
@@ -330,12 +357,21 @@ fun EditSavedCanvasDialog(
                                             linkedAlbumArtist = top.artistName
                                             linkedTracks = top.trackTitles
                                             albumQueryInput = top.albumName
-                                            albumSearchMessage = "Found ${top.trackTitles.size} songs (${top.source}) — check below & Save"
+                                            if (top.artistName.isNotBlank()) {
+                                                artistQueryInput = top.artistName
+                                            }
+                                            albumSearchMessage = "Found ${top.trackTitles.size} songs (${top.source}) — edit below or Save"
                                         } else {
-                                            linkedAlbumName = q
-                                            linkedAlbumArtist = ""
-                                            linkedTracks = emptyList()
-                                            albumSearchMessage = "No online tracklist found — will still match album name \"$q\" offline"
+                                            linkedAlbumName = parsedQuery.album
+                                            if (parsedQuery.artist.isNotBlank()) {
+                                                linkedAlbumArtist = parsedQuery.artist
+                                                artistQueryInput = parsedQuery.artist
+                                            }
+                                            albumSearchMessage = if (linkedTracks.isNotEmpty()) {
+                                                "No online tracklist found — keeping your ${linkedTracks.size} manual songs"
+                                            } else {
+                                                "No online tracklist found — add songs manually below or Save album \"${parsedQuery.album}\""
+                                            }
                                         }
                                     }
                                 },
@@ -382,6 +418,9 @@ fun EditSavedCanvasDialog(
                                             linkedAlbumArtist = cand.artistName
                                             linkedTracks = cand.trackTitles
                                             albumQueryInput = cand.albumName
+                                            if (cand.artistName.isNotBlank()) {
+                                                artistQueryInput = cand.artistName
+                                            }
                                             albumSearchMessage = "${cand.albumName} • ${cand.trackTitles.size} songs selected"
                                         },
                                         shape = RoundedCornerShape(10.dp),
@@ -413,6 +452,71 @@ fun EditSavedCanvasDialog(
                             )
                         }
 
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = manualSongInput,
+                                onValueChange = { manualSongInput = it },
+                                maxLines = 4,
+                                label = { Text("Add Song Name(s) Manually", fontSize = 12.sp) },
+                                placeholder = { Text("e.g. 1- Song A 2- Song B (auto turns vertical)", fontSize = 11.sp) },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = accentColor,
+                                    unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedLabelColor = accentColor,
+                                    unfocusedLabelColor = Color.White.copy(alpha = 0.65f)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("manual_add_songs_input")
+                            )
+
+                            Button(
+                                onClick = {
+                                    val parsedSongs = AlbumTracklistSearchService.parseManualSongNames(manualSongInput)
+                                    if (parsedSongs.isEmpty()) return@Button
+                                    val existingLower = linkedTracks.map { it.lowercase() }.toSet()
+                                    val toAppend = parsedSongs.filter { it.lowercase() !in existingLower }
+                                    linkedTracks = linkedTracks + toAppend
+                                    if (linkedAlbumName.isBlank() && albumQueryInput.isNotBlank()) {
+                                        val pq = AlbumTracklistSearchService.parseSmartAlbumQuery(
+                                            albumQueryInput.trim(),
+                                            artistQueryInput.trim()
+                                        )
+                                        linkedAlbumName = pq.album
+                                        if (linkedAlbumArtist.isBlank() && pq.artist.isNotBlank()) {
+                                            linkedAlbumArtist = pq.artist
+                                        }
+                                    }
+                                    manualSongInput = ""
+                                    albumSearchMessage = "Added ${toAppend.size} manual song(s) (${linkedTracks.size} total)"
+                                },
+                                enabled = manualSongInput.isNotBlank(),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color.White.copy(alpha = 0.14f),
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 14.dp),
+                                modifier = Modifier.testTag("manual_add_songs_button")
+                            ) {
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = "Add manual songs",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(3.dp))
+                                Text("Add", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
                         if (linkedAlbumName.isNotBlank() || linkedTracks.isNotEmpty()) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Surface(
@@ -424,13 +528,15 @@ fun EditSavedCanvasDialog(
                                 Column(
                                     modifier = Modifier
                                         .padding(10.dp)
-                                        .heightIn(max = 155.dp)
+                                        .heightIn(max = 175.dp)
                                         .verticalScroll(rememberScrollState())
                                 ) {
+                                    val effectiveArtistDisplay = artistQueryInput.trim().ifBlank { linkedAlbumArtist.trim() }
                                     Text(
                                         text = buildString {
-                                            append(linkedAlbumName.ifBlank { "Linked Album" })
-                                            if (linkedAlbumArtist.isNotBlank()) append(" — $linkedAlbumArtist")
+                                            append(linkedAlbumName.ifBlank { albumQueryInput.trim().ifBlank { "Manual Song List" } })
+                                            if (effectiveArtistDisplay.isNotBlank()) append(" — $effectiveArtistDisplay")
+                                            if (linkedTracks.isNotEmpty()) append(" (${linkedTracks.size})")
                                         },
                                         color = Color(0xFF9BE7B3),
                                         fontSize = 12.sp,
@@ -441,14 +547,37 @@ fun EditSavedCanvasDialog(
                                     if (linkedTracks.isNotEmpty()) {
                                         Spacer(modifier = Modifier.height(5.dp))
                                         linkedTracks.forEachIndexed { idx, songTitle ->
-                                            Text(
-                                                text = "${idx + 1}. $songTitle",
-                                                color = Color.White.copy(alpha = 0.85f),
-                                                fontSize = 11.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.padding(vertical = 1.dp)
-                                            )
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 2.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Text(
+                                                    text = "${idx + 1}- $songTitle",
+                                                    color = Color.White.copy(alpha = 0.88f),
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f)
+                                                )
+                                                IconButton(
+                                                    onClick = {
+                                                        linkedTracks = linkedTracks.filterIndexed { i, _ -> i != idx }
+                                                    },
+                                                    modifier = Modifier
+                                                        .size(26.dp)
+                                                        .testTag("remove_linked_song_$idx")
+                                                ) {
+                                                    Icon(
+                                                        Icons.Default.Close,
+                                                        contentDescription = "Remove $songTitle",
+                                                        tint = Color(0xFFFF8A96),
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -470,16 +599,27 @@ fun EditSavedCanvasDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = {
-                            val manualAlbumFallback = if (linkedAlbumName.isBlank() && albumQueryInput.isNotBlank()) {
-                                albumQueryInput.trim()
+                            val rawAlbumFallback = if (linkedAlbumName.isBlank() && albumQueryInput.isNotBlank()) {
+                                AlbumTracklistSearchService.parseSmartAlbumQuery(
+                                    albumQueryInput.trim(),
+                                    artistQueryInput.trim()
+                                ).album
                             } else {
                                 linkedAlbumName.trim()
                             }
+                            val resolvedArtist = artistQueryInput.trim().ifBlank { linkedAlbumArtist.trim() }
+                            val pendingManualSongs = AlbumTracklistSearchService.parseManualSongNames(manualSongInput)
+                            val finalTracks = if (pendingManualSongs.isNotEmpty()) {
+                                val existingLower = linkedTracks.map { it.lowercase() }.toSet()
+                                linkedTracks + pendingManualSongs.filter { it.lowercase() !in existingLower }
+                            } else {
+                                linkedTracks
+                            }
                             onConfirm(
                                 nameInput.trim().ifEmpty { item.name },
-                                manualAlbumFallback,
-                                linkedAlbumArtist.trim(),
-                                linkedTracks
+                                rawAlbumFallback,
+                                resolvedArtist,
+                                finalTracks
                             )
                         },
                         colors = ButtonDefaults.buttonColors(

@@ -477,9 +477,10 @@ object AnimatedCanvasSearchService {
         return noDiacritics
             .replace("\\.(mp3|flac|m4a|wav|ogg|aac|opus|wma|alac|aiff)$".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("^\\d{1,3}\\s*[._-]\\s*".toRegex(), "")
-            .replace("\\([^)]*(feat\\.|ft\\.|with\\s+|official|video|audio|lyric|remaster|version|live|edit|mix|acoustic|visualizer|explicit|clean|hd|4k|bonus|deluxe|single|soundtrack|oficial|clip|from\\s+\")[^)]*\\)".toRegex(RegexOption.IGNORE_CASE), " ")
+            .replace("\\([^)]*(?:\\bfeat\\b|\\bft\\b|\\bfeaturing\\b|\\bavec\\b|\\bwith\\s+|official|video|audio|lyric|remaster|version|live|edit|mix|acoustic|visualizer|explicit|clean|hd|4k|bonus|deluxe|single|soundtrack|oficial|clip|from\\s+\")[^)]*\\)".toRegex(RegexOption.IGNORE_CASE), " ")
             .replace("\\[[^\\]]*\\]".toRegex(), " ")
             .replace("\\s+[-–—]\\s+(official|lyric|audio|video|remaster|single|ep|radio\\s+edit).*".toRegex(RegexOption.IGNORE_CASE), " ")
+            .replace("\\s+(?:[-–—]\\s*)?(?:feat\\.|\\bfeat\\b|ft\\.|\\bft\\b|\\bfeaturing\\b).*$".toRegex(RegexOption.IGNORE_CASE), " ")
             .replace("[\"“”'’]".toRegex(), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
@@ -492,7 +493,7 @@ object AnimatedCanvasSearchService {
             .replace("\\s*-\\s*Topic$".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("VEVO$".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("\\s*Official$".toRegex(RegexOption.IGNORE_CASE), "")
-            .replace("\\s*(feat\\.|ft\\.|featuring|with|&|,|•|·|—|–|\\||/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
+            .replace("\\s*(?:feat\\.|\\bfeat\\b|ft\\.|\\bft\\b|\\bfeaturing\\b|\\bavec\\b|\\bwith\\b|&|,|•|·|—|–|\\||/|\\bx\\b)\\s*.*".toRegex(RegexOption.IGNORE_CASE), "")
             .replace("\\s+".toRegex(), " ")
             .trim()
         return if (cleaned.equals("<unknown>", ignoreCase = true) ||

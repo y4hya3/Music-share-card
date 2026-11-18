@@ -232,8 +232,12 @@ object SavedMediaLibrary {
         verifyFileExists: Boolean = true
     ): SavedCanvasItem? {
         val normTitle = AlbumTracklistSearchService.normalizeMatchKey(title)
+        val coreTitle = AlbumTracklistSearchService.normalizeCoreTitleKey(title)
         val normAlbum = AlbumTracklistSearchService.normalizeMatchKey(album)
         val normArtist = AlbumTracklistSearchService.normalizeMatchKey(artist)
+        val primaryArtist = AlbumTracklistSearchService.normalizeMatchKey(
+            com.example.service.AnimatedCanvasSearchService.normalizeArtistText(artist)
+        )
         if (normTitle.isEmpty() && normAlbum.isEmpty()) return null
 
         var bestItem: SavedCanvasItem? = null
@@ -245,10 +249,17 @@ object SavedMediaLibrary {
 
             val normLinkedAlbum = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumName)
             val normLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(item.linkedAlbumArtist)
+            val primaryLinkedArtist = AlbumTracklistSearchService.normalizeMatchKey(
+                com.example.service.AnimatedCanvasSearchService.normalizeArtistText(item.linkedAlbumArtist)
+            )
+            val compactArtist = (primaryArtist.ifEmpty { normArtist }).replace(" ", "")
+            val compactLinkedArtist = (primaryLinkedArtist.ifEmpty { normLinkedArtist }).replace(" ", "")
 
             val artistCompatible = normArtist.isEmpty() ||
                 normLinkedArtist.isEmpty() ||
                 normArtist == normLinkedArtist ||
+                (primaryArtist.isNotEmpty() && primaryArtist == primaryLinkedArtist) ||
+                (compactArtist.isNotEmpty() && compactArtist == compactLinkedArtist) ||
                 normArtist.contains(normLinkedArtist) ||
                 normLinkedArtist.contains(normArtist)
 
@@ -260,11 +271,12 @@ object SavedMediaLibrary {
 
             val matchedTrack = normTitle.isNotEmpty() && item.linkedTrackTitles.any { savedSong ->
                 val normSavedSong = AlbumTracklistSearchService.normalizeMatchKey(savedSong)
-                normSavedSong.isNotEmpty() && (
+                val coreSavedSong = AlbumTracklistSearchService.normalizeCoreTitleKey(savedSong)
+                (normSavedSong.isNotEmpty() && (
                     normSavedSong == normTitle ||
                         (normTitle.length >= 5 && normSavedSong.length >= 5 &&
                             (normTitle.contains(normSavedSong) || normSavedSong.contains(normTitle)))
-                    )
+                    )) || (coreSavedSong.isNotEmpty() && coreTitle.isNotEmpty() && coreSavedSong == coreTitle)
             }
 
             if (!albumExactMatch && !albumLooseMatch && !matchedTrack) continue

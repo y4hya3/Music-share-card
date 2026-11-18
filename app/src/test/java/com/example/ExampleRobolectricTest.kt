@@ -965,4 +965,162 @@ class ExampleRobolectricTest {
     com.example.repository.SavedMediaLibrary.deleteCanvas(context, imported.id)
     dummyMp4.delete()
   }
+
+  @Test
+  fun `smart album search parser scoring manual songs and compact artist offline matching work for 27 by ElGrandeToto`() {
+    val byParsed = com.example.service.AlbumTracklistSearchService.parseSmartAlbumQuery(
+      albumQuery = "album 27 by elgrandetoto",
+      artistHint = ""
+    )
+    assertEquals("27", byParsed.album)
+    assertEquals("elgrandetoto", byParsed.artist)
+
+    val dashParsed = com.example.service.AlbumTracklistSearchService.parseSmartAlbumQuery(
+      albumQuery = "27 - ElGrandeToto",
+      artistHint = ""
+    )
+    assertEquals("27", dashParsed.album)
+    assertEquals("ElGrandeToto", dashParsed.artist)
+
+    val explicitParsed = com.example.service.AlbumTracklistSearchService.parseSmartAlbumQuery(
+      albumQuery = "album 27",
+      artistHint = "ElGrandeToto"
+    )
+    assertEquals("27", explicitParsed.album)
+    assertEquals("ElGrandeToto", explicitParsed.artist)
+
+    // Scoring: exact "27" by "ElGrandeToto" (or spaced "El Grande Toto") must far outscore featured/compilation albums
+    val exactScore = com.example.service.AlbumTracklistSearchService.scoreAlbumCandidateMatch(
+      candidateAlbum = "27",
+      candidateArtist = "El Grande Toto",
+      targetAlbum = "27",
+      targetArtist = "ElGrandeToto",
+      trackCountHint = 17
+    )
+    val compilationScore = com.example.service.AlbumTracklistSearchService.scoreAlbumCandidateMatch(
+      candidateAlbum = "27 Hits",
+      candidateArtist = "Various Artists",
+      targetAlbum = "27",
+      targetArtist = "ElGrandeToto",
+      trackCountHint = 20
+    )
+    val wrongFeaturedAlbumScore = com.example.service.AlbumTracklistSearchService.scoreAlbumCandidateMatch(
+      candidateAlbum = "Toto Signé",
+      candidateArtist = "Other Artist",
+      targetAlbum = "27",
+      targetArtist = "ElGrandeToto",
+      trackCountHint = 15
+    )
+    assertTrue("Expected exact 27 score ($exactScore) > compilation ($compilationScore)", exactScore > compilationScore + 300)
+    assertTrue("Expected exact 27 score ($exactScore) > wrong album ($wrongFeaturedAlbumScore)", exactScore > wrongFeaturedAlbumScore + 500)
+
+    // Manual song list parser handles numbered lines, semicolons, and deduplicates
+    val manualSongs = com.example.service.AlbumTracklistSearchService.parseManualSongNames(
+      "1. Dellali\n02 - Weld Laadoul\n; Mghayer ; dellali\n"
+    )
+    assertEquals(listOf("Dellali", "Weld Laadoul", "Mghayer"), manualSongs)
+
+    // Offline SavedMediaLibrary match works with 2-char album "27", spaced vs unspaced artist, and manual song names
+    val dummyMp4 = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "elgrandetoto_27.mp4").apply {
+      writeBytes(ByteArray(4096) { 0x11 })
+    }
+    val linkedItem = com.example.repository.SavedCanvasItem(
+      id = "sc_27_toto",
+      name = "27 Canvas",
+      artist = "Device Media",
+      localVideoPath = dummyMp4.absolutePath,
+      thumbnailPath = null,
+      resolutionLabel = "1080×1920 MP4",
+      createdAtMs = 2_000L,
+      linkedAlbumName = "27",
+      linkedAlbumArtist = "ElGrandeToto",
+      linkedTrackTitles = manualSongs
+    )
+    val offlineMatchByManualSong = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "Weld Laadoul",
+      album = "",
+      artist = "El Grande Toto",
+      items = listOf(linkedItem)
+    )
+    assertNotNull("Expected offline match by manual song & space-insensitive artist", offlineMatchByManualSong)
+    assertEquals("sc_27_toto", offlineMatchByManualSong?.id)
+
+    val offlineMatchBy2CharAlbum = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "Some Unlisted Bonus Track",
+      album = "27",
+      artist = "El Grande Toto",
+      items = listOf(linkedItem)
+    )
+    assertNotNull("Expected offline match by 2-char album name '27'", offlineMatchBy2CharAlbum)
+    assertEquals("sc_27_toto", offlineMatchBy2CharAlbum?.id)
+
+    dummyMp4.delete()
+  }
+
+  @Test
+  fun `inline 1- 2- song parser and offline feat ft avec title equivalence match across localized players`() {
+    // 1. Single-line numbered song list "1- ... 2- ... 3- ..." splits cleanly into vertical list items
+    val inlineNumbered = com.example.service.AlbumTracklistSearchService.parseManualSongNames(
+      "1- lol (feat.toto) 2- Dellali 3- Mghayer"
+    )
+    assertEquals(listOf("lol (feat.toto)", "Dellali", "Mghayer"), inlineNumbered)
+
+    val inlineTightDash = com.example.service.AlbumTracklistSearchService.parseManualSongNames(
+      "1-Blue 2-Red 3-Green"
+    )
+    assertEquals(listOf("Blue", "Red", "Green"), inlineTightDash)
+
+    // Single song containing a hyphenated number stays intact
+    val hyphenTitle = com.example.service.AlbumTracklistSearchService.parseManualSongNames("7-Eleven")
+    assertEquals(listOf("7-Eleven"), hyphenTitle)
+
+    // 2. Offline SavedMediaLibrary matches "lol (feat.toto)" when played as "lol (avec toto)", "lol (ft toto)", "lol ft. toto", or "lol avec toto"
+    val dummyMp4 = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "feat_avec_test.mp4").apply {
+      writeBytes(ByteArray(4096) { 0x22 })
+    }
+    val item = com.example.repository.SavedCanvasItem(
+      id = "sc_feat_avec",
+      name = "Collab Canvas",
+      artist = "Main Artist",
+      localVideoPath = dummyMp4.absolutePath,
+      thumbnailPath = null,
+      resolutionLabel = "1080×1920 MP4",
+      createdAtMs = 3_000L,
+      linkedAlbumName = "Collab Tape",
+      linkedAlbumArtist = "ElGrandeToto",
+      linkedTrackTitles = inlineNumbered
+    )
+
+    val frenchAvecParen = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "lol (avec toto)",
+      album = "",
+      artist = "El Grande Toto avec Toto",
+      items = listOf(item)
+    )
+    assertNotNull("Expected French '(avec toto)' to match '(feat.toto)' offline", frenchAvecParen)
+    assertEquals("sc_feat_avec", frenchAvecParen?.id)
+
+    val frenchAvecUnbracketed = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "lol avec toto",
+      album = "",
+      artist = "ElGrandeToto",
+      items = listOf(item)
+    )
+    assertNotNull("Expected unbracketed 'lol avec toto' to match 'lol (feat.toto)' offline", frenchAvecUnbracketed)
+
+    val shortFtVariant = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+      title = "lol ft toto",
+      album = "",
+      artist = "ElGrandeToto",
+      items = listOf(item)
+    )
+    assertNotNull("Expected 'lol ft toto' to match 'lol (feat.toto)' offline", shortFtVariant)
+
+    // 3. AnimatedCanvasSearchService normalizes (avec ...) and ft without dot too
+    assertEquals("lol", AnimatedCanvasSearchService.normalizeQueryText("lol (avec toto)"))
+    assertEquals("lol", AnimatedCanvasSearchService.normalizeQueryText("lol ft toto"))
+    assertEquals("ElGrandeToto", AnimatedCanvasSearchService.normalizeArtistText("ElGrandeToto avec Toto"))
+
+    dummyMp4.delete()
+  }
 }
