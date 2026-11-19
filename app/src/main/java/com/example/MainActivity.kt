@@ -27,10 +27,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -55,23 +54,23 @@ class MainActivity : ComponentActivity() {
         setContent {
             MyApplicationTheme(darkTheme = true) {
                 var showLaunchSplash by remember { mutableStateOf(true) }
-                val logoScale = remember { Animatable(0.80f) }
+                val logoScale = remember { Animatable(0.84f) }
                 val logoAlpha = remember { Animatable(0f) }
 
                 LaunchedEffect(Unit) {
                     launch {
-                        logoAlpha.animateTo(1f, animationSpec = tween(260))
+                        logoAlpha.animateTo(1f, animationSpec = tween(220))
                     }
                     launch {
                         logoScale.animateTo(
                             1f,
                             animationSpec = spring(
-                                dampingRatio = 0.72f,
-                                stiffness = Spring.StiffnessMediumLow
+                                dampingRatio = 0.78f,
+                                stiffness = Spring.StiffnessMedium
                             )
                         )
                     }
-                    delay(620)
+                    delay(360)
                     showLaunchSplash = false
                 }
 
@@ -85,8 +84,8 @@ class MainActivity : ComponentActivity() {
 
                     AnimatedVisibility(
                         visible = showLaunchSplash,
-                        exit = fadeOut(animationSpec = tween(320)) +
-                            scaleOut(targetScale = 1.08f, animationSpec = tween(320))
+                        exit = fadeOut(animationSpec = tween(260)) +
+                            scaleOut(targetScale = 1.06f, animationSpec = tween(260))
                     ) {
                         Box(
                             modifier = Modifier
@@ -101,8 +100,12 @@ class MainActivity : ComponentActivity() {
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier
                                     .size(116.dp)
-                                    .scale(logoScale.value)
-                                    .alpha(logoAlpha.value)
+                                    .graphicsLayer {
+                                        val s = logoScale.value
+                                        scaleX = s
+                                        scaleY = s
+                                        alpha = logoAlpha.value
+                                    }
                             )
                         }
                     }

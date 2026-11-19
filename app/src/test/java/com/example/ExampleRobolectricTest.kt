@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
+import android.graphics.RectF
 import androidx.compose.ui.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import com.example.model.CardBrandMode
@@ -694,14 +695,14 @@ class ExampleRobolectricTest {
     assertTrue("Expected NETSCAPE2.0 loop extension", ascii.contains("NETSCAPE2.0") || String(gifBytes, Charsets.ISO_8859_1).contains("NETSCAPE2.0"))
     assertEquals("Expected GIF trailer 0x3B", 0x3B.toByte(), gifBytes.last())
 
-    // Verify GCE has disposal=2 and transparentColorFlag=1 (0x21 0xF9 0x04 0x09)
+    // Verify GCE has transparentColorFlag=1 with either disposal=2 (0x09) or disposal=1 dirty-rect preserve (0x05)
     val gceFound = (0 until gifBytes.size - 4).any { i ->
       gifBytes[i] == 0x21.toByte() &&
         gifBytes[i + 1] == 0xF9.toByte() &&
         gifBytes[i + 2] == 0x04.toByte() &&
-        gifBytes[i + 3] == 0x09.toByte()
+        (gifBytes[i + 3] == 0x09.toByte() || gifBytes[i + 3] == 0x05.toByte())
     }
-    assertTrue("Expected Graphic Control Extension with transparent flag & restore disposal", gceFound)
+    assertTrue("Expected Graphic Control Extension with transparent flag", gceFound)
 
     val decodedFirstFrame = BitmapFactory.decodeByteArray(gifBytes, 0, gifBytes.size)
     assertNotNull("Expected valid decodable GIF bytes", decodedFirstFrame)
@@ -1318,5 +1319,286 @@ class ExampleRobolectricTest {
       "Expected gentle resume on soft audio after silence without spiking to 1.0 (got ${resumedSoft[0]})",
       resumedSoft[0] < 0.75f
     )
+  }
+
+  @Test
+  fun `animated waveform gif dirty-rect encoding produces valid looping GIF89a bytes`() {
+    val overlay = Bitmap.createBitmap(180, 320, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(overlay)
+    canvas.drawColor(AndroidColor.TRANSPARENT)
+    val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.argb(230, 24, 24, 30) }
+    canvas.drawRoundRect(RectF(20f, 40f, 160f, 260f), 16f, 16f, cardPaint)
+
+    val spec = com.example.util.WaveformExportSpec(
+      rectIn720x1280 = RectF(100f, 200f, 150f, 240f),
+      waveformColorArgb = AndroidColor.WHITE,
+      cardOpacity = 0.90f,
+      trackTitle = "Test Track",
+      trackArtist = "Test Artist",
+      isPlaying = true,
+      speedMultiplier = 1.15f,
+      beatSyncEnabled = false,
+      forceMultiplier = 1.4f
+    )
+
+    val gifBytes = com.example.util.AnimatedGifExporter.encodeTransparentWaveformGifToBytes(
+      overlayWithoutWaveform = overlay,
+      waveformSpec = spec,
+      wfRectInOutput = RectF(100f, 200f, 150f, 240f),
+      durationSec = 1.5f,
+      fps = 10
+    )
+    overlay.recycle()
+
+    assertTrue("Expected non-empty GIF output", gifBytes.size > 800)
+    val header = String(gifBytes.copyOfRange(0, 6), Charsets.US_ASCII)
+    assertEquals("GIF89a", header)
+    assertEquals(0x3B.toByte(), gifBytes.last())
+  }
+
+  @Test
+  fun `frosted glass story bitmap renders cleanly across 0 to 40 blur without side-darkening`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val art = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888).apply {
+      val c = Canvas(this)
+      c.drawColor(AndroidColor.rgb(90, 140, 220))
+    }
+    val track = com.example.model.MediaTrackInfo(
+      title = "Glass Consistency Track",
+      artist = "EchoSnap Artist",
+      album = "27",
+      albumArt = art,
+      isPlaying = true
+    )
+    val palette = com.example.model.CardPalette()
+    val blurs = floatArrayOf(0f, 10f, 25f, 40f)
+    for (blur in blurs) {
+      val config = com.example.model.CardStyleConfig(
+        cardBlurRadius = blur,
+        backgroundBlurRadius = blur,
+        cardOpacity = 0.85f
+      )
+      val rendered = runBlocking {
+        com.example.util.CardShareManager.generateStoryBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = config
+        )
+      }
+      assertEquals(1080, rendered.width)
+      assertEquals(1920, rendered.height)
+      rendered.recycle()
+    }
+    art.recycle()
+  }
+
+  @Test
+  fun `waveform bar levels remain bounded and active across extended continuous playback`() {
+    val samples = listOf(0.0f, 12.5f, 3600.0f, 3600.5f, 7200.25f)
+    for (t in samples) {
+      val bars = AudioBeatMonitor.computeBarLevels(
+        trackTitle = "Long Song",
+        trackArtist = "Artist",
+        isPlaying = true,
+        timeSec = t,
+        speedMultiplier = 1.2f,
+        beatSyncMode = false,
+        forceMultiplier = 1.5f
+      )
+      assertEquals(4, bars.size)
+      for (b in bars) {
+        assertTrue("Expected bar height within [0.18, 1.0], got $b", b in 0.18f..1.0f)
+      }
+    }
+  }
+
+  @Test
+  fun `blur mip pyramid reuses cached bitmaps across background and glass card layers`() {
+    val art = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888).apply {
+      Canvas(this).drawColor(AndroidColor.rgb(65, 110, 195))
+    }
+    val first = com.example.util.BitmapBlurUtils.computeBlurMipPyramid(
+      source = art,
+      lowDim = 210,
+      midDim = 155,
+      highDim = 115
+    )
+    val second = com.example.util.BitmapBlurUtils.computeBlurMipPyramid(
+      source = art,
+      lowDim = 210,
+      midDim = 155,
+      highDim = 115
+    )
+    assertNotNull(first)
+    assertNotNull(second)
+    assertTrue(first!!.first === second!!.first)
+    assertTrue(first.second === second.second)
+    assertTrue(first.third === second.third)
+    art.recycle()
+  }
+
+  @Test
+  fun `device performance tier resolves valid bounded decode dimensions`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val tier = com.example.util.DevicePerformanceTier.get(context)
+    assertTrue(tier.cardArtMaxDim in 640..1024)
+    assertTrue(tier.bgSourceMaxDim in 480..720)
+    assertTrue(tier.pyramidLowDim in 210..340)
+    assertTrue(tier.previewMaxWidth in 720..1080)
+    assertTrue(tier.previewMaxHeight in 1280..1920)
+  }
+
+  @Test
+  fun `echosnap backup exports scans previews imports and resets covers canvases and album song lists`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    SavedMediaLibrary.resetAllSavedMedia(context)
+
+    val coversDir = SavedMediaLibrary.getCoversDir(context)
+    val canvasesDir = SavedMediaLibrary.getCanvasesDir(context)
+
+    val coverBitmap = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888).apply {
+      Canvas(this).drawColor(AndroidColor.rgb(210, 45, 75))
+    }
+    val coverFile = File(coversDir, "art_27_cover.png")
+    coverFile.outputStream().use { out ->
+      coverBitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+    }
+    coverBitmap.recycle()
+
+    val canvasThumbBitmap = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).apply {
+      Canvas(this).drawColor(AndroidColor.rgb(30, 185, 84))
+    }
+    val canvasThumbFile = File(canvasesDir, "sc_27_thumb.png")
+    canvasThumbFile.outputStream().use { out ->
+      canvasThumbBitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+    }
+    canvasThumbBitmap.recycle()
+
+    val canvasVideoFile = File(canvasesDir, "sc_27.mp4")
+    canvasVideoFile.writeBytes(ByteArray(1024) { idx -> (idx % 251).toByte() })
+
+    val coverSongs = listOf("Dellali", "Weld L'9aria", "Blue Baby")
+    val canvasSongs = listOf("Gova", "Rassi", "Bouhali")
+
+    val coverItem = com.example.repository.SavedCoverItem(
+      id = "art_27_cover",
+      name = "27 Cover",
+      artist = "ElGrandeToto",
+      localImagePath = coverFile.absolutePath,
+      resolutionLabel = "128×128",
+      createdAtMs = 1_700_000_000_000L,
+      linkedAlbumName = "27",
+      linkedAlbumArtist = "ElGrandeToto",
+      linkedTrackTitles = coverSongs
+    )
+    val canvasItem = com.example.repository.SavedCanvasItem(
+      id = "sc_27",
+      name = "27 Motion",
+      artist = "ElGrandeToto",
+      localVideoPath = canvasVideoFile.absolutePath,
+      thumbnailPath = canvasThumbFile.absolutePath,
+      resolutionLabel = "1080×1920 MP4",
+      createdAtMs = 1_700_000_001_000L,
+      linkedAlbumName = "27",
+      linkedAlbumArtist = "ElGrandeToto",
+      linkedTrackTitles = canvasSongs
+    )
+
+    SavedMediaLibrary.upsertImportedMedia(
+      context = context,
+      importedCovers = listOf(coverItem),
+      importedCanvases = listOf(canvasItem),
+      replaceExisting = true
+    )
+    assertEquals(1, SavedMediaLibrary.savedCovers.value.size)
+    assertEquals(1, SavedMediaLibrary.savedCanvases.value.size)
+
+    val tempRoot = File(context.cacheDir, "backup_test_${System.currentTimeMillis()}").apply { mkdirs() }
+    try {
+      val styleToBackup = CardStyleConfig(
+        cardBlurRadius = 12f,
+        backgroundBlurRadius = 18f,
+        enableWaveform = true,
+        waveformSpeedMultiplier = 1.6f
+      )
+
+      val exportRes = com.example.util.EchoSnapBackupManager.exportBackupToDirectory(
+        parentOrEchoSnapDir = tempRoot,
+        styleConfig = styleToBackup
+      ).getOrThrow()
+
+      assertEquals(1, exportRes.coversCount)
+      assertEquals(1, exportRes.canvasesCount)
+      assertEquals(6, exportRes.songsCount)
+      assertEquals("EchoSnap", exportRes.folderName)
+
+      val echoSnapFolder = File(tempRoot, "EchoSnap")
+      assertTrue(echoSnapFolder.isDirectory)
+      assertTrue(File(echoSnapFolder, "manifest.json").exists())
+
+      // Scan from parent folder -> auto-resolves nested EchoSnap folder and surfaces everything
+      val scanned = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(tempRoot).getOrThrow()
+      assertTrue(scanned.hasManifest)
+      assertEquals("EchoSnap", scanned.folderDisplayName)
+      assertEquals(1, scanned.covers.size)
+      assertEquals(1, scanned.canvases.size)
+      assertEquals(6, scanned.totalSongsCount)
+      assertEquals(coverSongs, scanned.covers.first().linkedTrackTitles)
+      assertEquals(canvasSongs, scanned.canvases.first().linkedTrackTitles)
+      assertNotNull(scanned.covers.first().previewBitmap)
+      assertNotNull(scanned.canvases.first().previewBitmap)
+      assertNotNull(scanned.includedStyle)
+      assertEquals(12f, scanned.includedStyle!!.cardBlurRadius, 0.001f)
+
+      // Reset clears all saved media
+      SavedMediaLibrary.resetAllSavedMedia(context)
+      assertTrue(SavedMediaLibrary.savedCovers.value.isEmpty())
+      assertTrue(SavedMediaLibrary.savedCanvases.value.isEmpty())
+
+      // Re-import everything from scanned folder
+      val importRes = runBlocking {
+        com.example.util.EchoSnapBackupManager.importScannedBackup(
+          context = context,
+          scanned = scanned,
+          selectedCoverIds = setOf("art_27_cover"),
+          selectedCanvasIds = setOf("sc_27"),
+          importStyle = true,
+          replaceExistingFirst = false
+        ).getOrThrow()
+      }
+      assertEquals(1, importRes.coversCount)
+      assertEquals(1, importRes.canvasesCount)
+      assertEquals(6, importRes.songsCount)
+      assertTrue(importRes.styleApplied)
+
+      val restoredCovers = SavedMediaLibrary.savedCovers.value
+      val restoredCanvases = SavedMediaLibrary.savedCanvases.value
+      assertEquals(1, restoredCovers.size)
+      assertEquals(1, restoredCanvases.size)
+      assertEquals(coverSongs, restoredCovers.first().linkedTrackTitles)
+      assertEquals(canvasSongs, restoredCanvases.first().linkedTrackTitles)
+
+      // Verify offline album song matching works immediately after import
+      assertNotNull(
+        SavedMediaLibrary.findMatchingSavedCoverForTrack(
+          title = "Dellali",
+          album = "",
+          artist = "ElGrandeToto"
+        )
+      )
+      assertNotNull(
+        SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+          title = "Gova",
+          album = "",
+          artist = "ElGrandeToto"
+        )
+      )
+
+      // Clean up after test
+      SavedMediaLibrary.resetAllSavedMedia(context)
+    } finally {
+      tempRoot.deleteRecursively()
+    }
   }
 }

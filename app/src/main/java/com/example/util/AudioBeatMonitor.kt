@@ -293,6 +293,8 @@ object AudioBeatMonitor {
         private var visualizer: Visualizer? = null
         private var refCount = 0
         private var lastAttachAttemptMs = 0L
+        private var attachedAtNanos = 0L
+        private var lastStaleRefreshMs = 0L
         val tracker = BeatEnvelopeTracker()
 
         fun acquire(context: Context): Boolean {
@@ -310,9 +312,22 @@ object AudioBeatMonitor {
         }
 
         private fun ensureStartedLocked(context: Context, forceRetry: Boolean): Boolean {
-            if (visualizer != null) return true
             if (!hasRecordAudioPermission(context)) return false
             val nowMs = SystemClock.elapsedRealtime()
+            val nowNs = SystemClock.elapsedRealtimeNanos()
+            if (visualizer != null) {
+                val attachedForNs = nowNs - attachedAtNanos
+                if (attachedForNs > 2_500_000_000L && !tracker.hasActiveCaptureFeed(nowNs)) {
+                    if (forceRetry || nowMs - lastStaleRefreshMs >= 3_000L) {
+                        lastStaleRefreshMs = nowMs
+                        releaseVisualizerLocked()
+                    } else {
+                        return false
+                    }
+                } else {
+                    return true
+                }
+            }
             if (!forceRetry && nowMs - lastAttachAttemptMs < 750L) {
                 return false
             }
@@ -362,6 +377,7 @@ object AudioBeatMonitor {
                     enabled = true
                 }
                 visualizer = vis
+                attachedAtNanos = SystemClock.elapsedRealtimeNanos()
                 true
             } catch (_: Throwable) {
                 releaseVisualizerLocked()

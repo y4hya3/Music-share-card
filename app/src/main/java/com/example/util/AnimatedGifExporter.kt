@@ -157,7 +157,9 @@ object AnimatedGifExporter {
             color = waveformSpec.waveformColorArgb
         }
         val wfLocalPixels = IntArray(wfW * wfH)
-        val frameIndices = ByteArray(w * h)
+        val hasTransparentWfBase = wfBasePixels.any { ((it ushr 24) and 0xFF) < ALPHA_TRANSPARENT_THRESHOLD }
+        val wfFrameIndices = if (!hasTransparentWfBase) ByteArray(wfW * wfH) else ByteArray(0)
+        val frameIndices = if (hasTransparentWfBase) ByteArray(w * h) else ByteArray(0)
         val lzwEncoder = GifLzwEncoder()
 
         val localRect = RectF(
@@ -166,41 +168,116 @@ object AnimatedGifExporter {
             wfRectInOutput.right - wfLeft,
             wfRectInOutput.bottom - wfTop
         )
+        val barRect = RectF()
 
         try {
-            for (frameIdx in 0 until totalFrames) {
-                val timeSec = frameIdx.toFloat() / clampedFps.toFloat()
-                System.arraycopy(baseIndices, 0, frameIndices, 0, baseIndices.size)
-
+            if (!hasTransparentWfBase) {
+                // Frame 0: emit full canvas once, keeping contents on screen (disposal = 1)
+                val firstFrameIndices = baseIndices.copyOf()
                 wfBmp.setPixels(wfBasePixels, 0, wfW, 0, 0, wfW, wfH)
                 drawWaveformBars(
                     canvas = wfCanvas,
                     rect = localRect,
+                    barRect = barRect,
                     paint = wfPaint,
                     spec = waveformSpec,
-                    timeSec = timeSec
+                    timeSec = 0f
                 )
                 wfBmp.getPixels(wfLocalPixels, 0, wfW, 0, 0, wfW, wfH)
-
                 for (row in 0 until wfH) {
                     val dstRowOffset = (wfTop + row) * w + wfLeft
                     val srcRowOffset = row * wfW
                     for (col in 0 until wfW) {
-                        frameIndices[dstRowOffset + col] =
+                        firstFrameIndices[dstRowOffset + col] =
                             quantizeArgbToPaletteIndex(wfLocalPixels[srcRowOffset + col], lut555)
                     }
                 }
-
-                // Graphic Control Extension: disposal = 2 (restore to transparent), transparent = true, idx = 0
-                writeGraphicControlExtension(out, delayCs = delayCs, transparentIndex = TRANSPARENT_INDEX)
-                // Image Descriptor (full frame)
+                writeGraphicControlExtension(
+                    out = out,
+                    delayCs = delayCs,
+                    transparentIndex = TRANSPARENT_INDEX,
+                    disposalMethod = 1,
+                    hasTransparent = true
+                )
                 out.write(0x2C)
                 writeShortLE(out, 0)
                 writeShortLE(out, 0)
                 writeShortLE(out, w)
                 writeShortLE(out, h)
                 out.write(0x00)
-                lzwEncoder.encode(frameIndices, out)
+                lzwEncoder.encode(firstFrameIndices, out)
+
+                // Frames 1..N: encode only the opaque wfW x wfH dirty rectangle (overwrites previous bars cleanly)
+                for (frameIdx in 1 until totalFrames) {
+                    val timeSec = frameIdx.toFloat() / clampedFps.toFloat()
+                    wfBmp.setPixels(wfBasePixels, 0, wfW, 0, 0, wfW, wfH)
+                    drawWaveformBars(
+                        canvas = wfCanvas,
+                        rect = localRect,
+                        barRect = barRect,
+                        paint = wfPaint,
+                        spec = waveformSpec,
+                        timeSec = timeSec
+                    )
+                    wfBmp.getPixels(wfLocalPixels, 0, wfW, 0, 0, wfW, wfH)
+                    for (i in wfLocalPixels.indices) {
+                        wfFrameIndices[i] = quantizeArgbToPaletteIndex(wfLocalPixels[i], lut555)
+                    }
+                    writeGraphicControlExtension(
+                        out = out,
+                        delayCs = delayCs,
+                        transparentIndex = TRANSPARENT_INDEX,
+                        disposalMethod = 1,
+                        hasTransparent = false
+                    )
+                    out.write(0x2C)
+                    writeShortLE(out, wfLeft)
+                    writeShortLE(out, wfTop)
+                    writeShortLE(out, wfW)
+                    writeShortLE(out, wfH)
+                    out.write(0x00)
+                    lzwEncoder.encode(wfFrameIndices, out)
+                }
+            } else {
+                for (frameIdx in 0 until totalFrames) {
+                    val timeSec = frameIdx.toFloat() / clampedFps.toFloat()
+                    System.arraycopy(baseIndices, 0, frameIndices, 0, baseIndices.size)
+
+                    wfBmp.setPixels(wfBasePixels, 0, wfW, 0, 0, wfW, wfH)
+                    drawWaveformBars(
+                        canvas = wfCanvas,
+                        rect = localRect,
+                        barRect = barRect,
+                        paint = wfPaint,
+                        spec = waveformSpec,
+                        timeSec = timeSec
+                    )
+                    wfBmp.getPixels(wfLocalPixels, 0, wfW, 0, 0, wfW, wfH)
+
+                    for (row in 0 until wfH) {
+                        val dstRowOffset = (wfTop + row) * w + wfLeft
+                        val srcRowOffset = row * wfW
+                        for (col in 0 until wfW) {
+                            frameIndices[dstRowOffset + col] =
+                                quantizeArgbToPaletteIndex(wfLocalPixels[srcRowOffset + col], lut555)
+                        }
+                    }
+
+                    writeGraphicControlExtension(
+                        out = out,
+                        delayCs = delayCs,
+                        transparentIndex = TRANSPARENT_INDEX,
+                        disposalMethod = 2,
+                        hasTransparent = true
+                    )
+                    out.write(0x2C)
+                    writeShortLE(out, 0)
+                    writeShortLE(out, 0)
+                    writeShortLE(out, w)
+                    writeShortLE(out, h)
+                    out.write(0x00)
+                    lzwEncoder.encode(frameIndices, out)
+                }
             }
         } finally {
             if (!wfBmp.isRecycled) wfBmp.recycle()
@@ -214,6 +291,7 @@ object AnimatedGifExporter {
     private fun drawWaveformBars(
         canvas: Canvas,
         rect: RectF,
+        barRect: RectF,
         paint: Paint,
         spec: WaveformExportSpec,
         timeSec: Float
@@ -241,8 +319,9 @@ object AnimatedGifExporter {
             val barH = max(barW, maxBarH * frac)
             val left = rect.left + padX + i * (barW + gap)
             val top = cy - barH / 2f
+            barRect.set(left, top, left + barW, top + barH)
             canvas.drawRoundRect(
-                RectF(left, top, left + barW, top + barH),
+                barRect,
                 corner,
                 corner,
                 paint
@@ -545,13 +624,15 @@ object AnimatedGifExporter {
     private fun writeGraphicControlExtension(
         out: OutputStream,
         delayCs: Int,
-        transparentIndex: Int
+        transparentIndex: Int,
+        disposalMethod: Int = 2,
+        hasTransparent: Boolean = true
     ) {
         out.write(0x21)
         out.write(0xF9)
         out.write(0x04)
-        // Packed: disposal = 2 (restore to background/transparent -> bits 2..4 = 010 -> 0x08), transparent flag = 1 -> 0x09
-        out.write(0x09)
+        val packed = ((disposalMethod and 0x07) shl 2) or (if (hasTransparent) 0x01 else 0x00)
+        out.write(packed)
         writeShortLE(out, delayCs)
         out.write(transparentIndex and 0xFF)
         out.write(0x00)

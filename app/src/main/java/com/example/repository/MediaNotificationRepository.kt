@@ -22,6 +22,7 @@ import com.example.service.OnlineCoverCandidate
 import com.example.service.SpotifyAuthManager
 import com.example.util.BitmapBlurUtils
 import com.example.util.CanvasVideoExporter
+import com.example.util.DevicePerformanceTier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -178,11 +179,12 @@ object MediaNotificationRepository {
         _selectedCoverId.value = "player"
 
         // Decode bundled sample artwork & build fallback cards off the main thread so cold launch stays instant
+        val maxCoverDim = DevicePerformanceTier.recommendedCoverMaxDim(ctx)
         repositoryScope.launch(Dispatchers.Default) {
             val travisArt = BitmapBlurUtils.decodeSampledResource(
                 ctx.resources,
                 R.drawable.sample_art_travis,
-                maxDimension = 1024
+                maxDimension = maxCoverDim
             ) ?: createFallbackArt("Travis Scott", 0xFF9E1B32.toInt(), 0xFF191414.toInt())
 
             val theWeekndArt = createFallbackArt("The Weeknd", 0xFFE50914.toInt(), 0xFF0D0D1A.toInt())
@@ -462,8 +464,9 @@ object MediaNotificationRepository {
         val expectedKey = trackKey(trackSnapshot)
         coverLoadJob?.cancel()
         coverLoadJob = repositoryScope.launch {
+            val maxCoverDim = DevicePerformanceTier.recommendedCoverMaxDim(appContext)
             val bmp = withContext(Dispatchers.IO) {
-                SavedMediaLibrary.loadBitmap(matchedCover.localImagePath, maxDimension = 1600)
+                SavedMediaLibrary.loadBitmap(matchedCover.localImagePath, maxDimension = maxCoverDim)
             } ?: return@launch
             val current = _currentTrack.value
             if (trackKey(current) != expectedKey) return@launch
@@ -579,6 +582,37 @@ object MediaNotificationRepository {
                 waveformForce = defaults.waveformForce,
                 waveformColor = defaults.waveformColor
             )
+        }
+    }
+
+    fun onSavedMediaLibraryCleared() {
+        if (_activeCanvasId.value.startsWith("saved_canvas_")) {
+            autoAppliedSavedCanvasTrackKey = null
+            _activeCanvasId.value = "none"
+            _activeCanvasUrl.value = null
+        }
+        if (_selectedCoverId.value.startsWith("saved_cover_")) {
+            autoAppliedSavedCoverTrackKey = null
+            restoreOriginalPlayerCover()
+        }
+    }
+
+    fun onSavedMediaLibraryImported() {
+        recheckSavedAlbumCanvasForCurrentTrack()
+        recheckSavedAlbumCoverForCurrentTrack()
+    }
+
+    fun resetBackupTargets(
+        context: Context,
+        resetSavedLibrary: Boolean,
+        resetCardStyles: Boolean
+    ) {
+        if (resetSavedLibrary) {
+            SavedMediaLibrary.resetAllSavedMedia(context)
+            onSavedMediaLibraryCleared()
+        }
+        if (resetCardStyles) {
+            resetStyleValues()
         }
     }
 

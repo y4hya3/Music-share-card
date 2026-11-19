@@ -3,13 +3,20 @@ package com.example.ui.components
 import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.Paint as AndroidPaint
+import android.graphics.Path as AndroidPath
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -63,6 +70,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
 import com.example.model.CardLayoutType
 import com.example.model.CardPalette
@@ -73,6 +83,7 @@ import com.example.model.LyricsCardBackgroundMode
 import com.example.model.MediaTrackInfo
 import com.example.util.AudioBeatMonitor
 import com.example.util.BitmapBlurUtils
+import com.example.util.DevicePerformanceTier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.ceil
@@ -97,15 +108,18 @@ fun BlurredAlbumBackground(
 ) {
     val blurRadius = styleConfig.backgroundBlurRadius.coerceIn(0f, 40f)
     val albumArt = track.albumArt
+    val tier = DevicePerformanceTier.rememberDeviceTier()
+    val crispFilter = if (tier.isLegacyRenderTier) FilterQuality.Medium else FilterQuality.High
 
-    val sharpOrGpuBgBitmap = remember(albumArt) {
-        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 720) }
+    val sharpOrGpuBgBitmap = remember(albumArt, tier.bgSourceMaxDim) {
+        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.bgSourceMaxDim) }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val stageWidthRatio = (maxWidth.value / 360f).coerceIn(0.65f, 1.45f)
         if (styleConfig.useTransparentBackground) {
             TransparentEditorCheckerboard(modifier = Modifier.fillMaxSize())
-            return@Box
+            return@BoxWithConstraints
         }
 
         if (styleConfig.useBlurredAlbumBackground && sharpOrGpuBgBitmap != null) {
@@ -117,13 +131,13 @@ fun BlurredAlbumBackground(
                     bitmap = bgImageBitmap,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    filterQuality = FilterQuality.High,
+                    filterQuality = crispFilter,
                     modifier = Modifier
                         .fillMaxSize()
                         .then(
                             if (blurRadius > 0.35f) {
                                 Modifier.blur(
-                                    radius = (blurRadius * 0.85f).dp,
+                                    radius = (blurRadius * 0.92f * stageWidthRatio).dp,
                                     edgeTreatment = BlurredEdgeTreatment.Rectangle
                                 )
                             } else {
@@ -132,28 +146,37 @@ fun BlurredAlbumBackground(
                         )
                 )
             } else {
-                // Zero-lag 60fps mip-pyramid crossfade for API 24-30 (no delay, no UI jank during drag)
+                // Zero-lag shared mip-pyramid crossfade for API 24-30 with zero occluded overdraw
                 val mipPyramid by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
                     initialValue = null,
-                    key1 = sharpOrGpuBgBitmap
+                    key1 = albumArt,
+                    key2 = tier.pyramidLowDim
                 ) {
+                    val src = albumArt ?: sharpOrGpuBgBitmap
                     value = withContext(Dispatchers.Default) {
-                        BitmapBlurUtils.computeBlurMipPyramid(sharpOrGpuBgBitmap)?.let { (low, mid, high) ->
+                        BitmapBlurUtils.computeBlurMipPyramid(
+                            source = src,
+                            lowDim = tier.pyramidLowDim,
+                            midDim = tier.pyramidMidDim,
+                            highDim = tier.pyramidHighDim
+                        )?.let { (low, mid, high) ->
                             Triple(low.asImageBitmap(), mid.asImageBitmap(), high.asImageBitmap())
                         }
                     }
                 }
 
-                val baseImg = remember(sharpOrGpuBgBitmap) { sharpOrGpuBgBitmap.asImageBitmap() }
-                Image(
-                    bitmap = baseImg,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    filterQuality = FilterQuality.High,
-                    modifier = Modifier.fillMaxSize()
-                )
-
                 val pyramid = mipPyramid
+                if (pyramid == null || blurRadius < 12f) {
+                    val baseImg = remember(sharpOrGpuBgBitmap) { sharpOrGpuBgBitmap.asImageBitmap() }
+                    Image(
+                        bitmap = baseImg,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        filterQuality = crispFilter,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+
                 if (pyramid != null && blurRadius > 0.2f) {
                     val lowAlpha = (blurRadius / 12f).coerceIn(0f, 1f)
                     val midAlpha = ((blurRadius - 12f) / 12f).coerceIn(0f, 1f)
@@ -164,7 +187,7 @@ fun BlurredAlbumBackground(
                             bitmap = pyramid.first,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.High,
+                            filterQuality = FilterQuality.Low,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer { alpha = lowAlpha }
@@ -175,7 +198,7 @@ fun BlurredAlbumBackground(
                             bitmap = pyramid.second,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.High,
+                            filterQuality = FilterQuality.Low,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer { alpha = midAlpha }
@@ -186,7 +209,7 @@ fun BlurredAlbumBackground(
                             bitmap = pyramid.third,
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.High,
+                            filterQuality = FilterQuality.Low,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .graphicsLayer { alpha = highAlpha }
@@ -221,12 +244,17 @@ fun BlurredAlbumBackground(
             )
         }
 
-        // Subtle dark overlay rgba(0, 0, 0, 0.25) for contrast on bright/white album covers
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = styleConfig.darkOverlayAlpha))
-        )
+        // Subtle dark overlay rgba(0, 0, 0, 0.25) drawn allocation-free for contrast on bright covers
+        val darkOverlay = styleConfig.darkOverlayAlpha.coerceIn(0f, 1f)
+        if (darkOverlay > 0.004f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawBehind {
+                        drawRect(color = Color.Black, alpha = darkOverlay)
+                    }
+            )
+        }
     }
 }
 
@@ -267,6 +295,7 @@ fun MusicStoryCard(
     maxCardWidth: Dp = 330.dp,
     maxArtSize: Dp = 300.dp
 ) {
+    val tier = DevicePerformanceTier.rememberDeviceTier()
     val scale = styleConfig.cardScale.coerceIn(0.60f, 1.20f)
     val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
     val scaledMaxCardWidth = (maxCardWidth * scale).coerceAtLeast(155.dp)
@@ -279,8 +308,10 @@ fun MusicStoryCard(
     val cardShape = remember(scaledCornerDp) {
         RoundedCornerShape(scaledCornerDp.dp)
     }
-    val crispArtImageBitmap = remember(track.albumArt) {
-        track.albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 1024)?.asImageBitmap() }
+    val crispArtImageBitmap = remember(track.albumArt, tier.cardArtMaxDim) {
+        track.albumArt?.let {
+            BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.cardArtMaxDim)?.asImageBitmap()
+        }
     }
 
     when (styleConfig.cardLayoutType) {
@@ -360,89 +391,195 @@ private fun FloatingGlassShareCard(
     modifier: Modifier = Modifier
 ) {
     val glassBlur = styleConfig.cardBlurRadius.coerceIn(0f, 40f)
-    val glassDownFactor = (glassBlur / 20f).coerceIn(0f, 1f)
-    val glassUpFactor = ((glassBlur - 20f) / 20f).coerceIn(0f, 1f)
+    val blurFrac = (glassBlur / 40f).coerceIn(0f, 1f)
 
-    val topAlpha = (if (glassBlur <= 20f) {
-        0.20f + (0.67f * glassDownFactor)
-    } else {
-        0.87f - (0.31f * glassUpFactor)
-    }) * glassOpacity
-    val bottomAlpha = (if (glassBlur <= 20f) {
-        0.30f + (0.62f * glassDownFactor)
-    } else {
-        0.92f - (0.28f * glassUpFactor)
-    }) * glassOpacity
-    val glassBorderAlpha = (if (glassBlur <= 20f) {
-        0.30f - (0.16f * glassDownFactor)
-    } else {
-        0.14f + (0.24f * glassUpFactor)
-    }) * glassOpacity
-    val glassBorderWidth = (1.0f + (1.2f * glassUpFactor)).dp
-    val sideFrostGlowColor = remember(palette.lightVibrantColor) {
-        lerp(Color.White, palette.lightVibrantColor, 0.32f)
+    // Smoothly transition palette colors between tracks without delaying slider drag frames
+    val animDominant by animateColorAsState(
+        targetValue = palette.dominantColor,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "glass_dominant"
+    )
+    val animVibrant by animateColorAsState(
+        targetValue = palette.vibrantColor,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "glass_vibrant"
+    )
+    val animDarkMuted by animateColorAsState(
+        targetValue = palette.darkMutedColor,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "glass_dark_muted"
+    )
+    val animLightVibrant by animateColorAsState(
+        targetValue = palette.lightVibrantColor,
+        animationSpec = tween(durationMillis = 320, easing = FastOutSlowInEasing),
+        label = "glass_light_vibrant"
+    )
+
+    // Classic clear-glass min at 0px (0.20->0.30 tint, 0.30 rim, rich drop shadow) scaling uniformly to deep frost at 40px
+    val topAlpha = (0.20f + 0.50f * blurFrac) * glassOpacity
+    val bottomAlpha = (0.30f + 0.46f * blurFrac) * glassOpacity
+    val glassBorderAlpha = (0.30f + 0.08f * blurFrac) * glassOpacity
+    val glassBorderWidth = (1.1f + 0.8f * blurFrac).dp
+    val sideFrostGlowColor = remember(animLightVibrant) {
+        lerp(Color.White, animLightVibrant, 0.28f)
     }
 
-    val cardBackgroundBrush = remember(
-        palette.vibrantColor,
-        palette.dominantColor,
-        palette.darkMutedColor,
-        topAlpha,
-        bottomAlpha
-    ) {
-        val accentTint = lerp(palette.dominantColor, palette.vibrantColor, 0.18f)
-        val adaptiveTop = lerp(accentTint, Color(0xFF16161C), 0.42f).copy(alpha = topAlpha.coerceIn(0f, 1f))
-        val adaptiveBottom = lerp(palette.darkMutedColor, Color(0xFF0C0C10), 0.40f).copy(alpha = bottomAlpha.coerceIn(0f, 1f))
-        Brush.verticalGradient(colors = listOf(adaptiveTop, adaptiveBottom))
+    val adaptiveTopOpaque = remember(animDominant, animVibrant) {
+        val accentTint = lerp(animDominant, animVibrant, 0.18f)
+        lerp(accentTint, Color(0xFF16161C), 0.44f)
+    }
+    val adaptiveBottomOpaque = remember(animDarkMuted) {
+        lerp(animDarkMuted, Color(0xFF0C0C10), 0.42f)
     }
 
-    val shadowElevation = (24 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale * glassOpacity).dp
+    val glowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f)
+    val shadowAlpha = (0.42f * glowStrength * glassOpacity).coerceIn(0f, 0.52f)
+    val shadowBlurDp = (10f + 8f * blurFrac) * glowStrength * scale
+    val shadowOffsetYDp = 7.dp * scale
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (32 * scale).dp)
     val innerPadding = (16 * scale).dp
     val cornerDpPx = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6).dp
+
+    // Pre-allocated native drawing primitives for zero-GC-allocation 60-120fps slider scrubbing
+    val cardPath = remember { AndroidPath() }
+    val shadowPaint = remember { AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG) }
+    val haloPaint = remember {
+        AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply { style = AndroidPaint.Style.STROKE }
+    }
+    val clearPaint = remember {
+        AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        }
+    }
+    val blurFilterState = remember {
+        object {
+            var lastShadowBlurKey = -1
+            var lastShadowFilter: BlurMaskFilter? = null
+            var lastHaloBlurKey = -1
+            var lastHaloFilter: BlurMaskFilter? = null
+        }
+    }
+    val sheenBrush = remember(sideFrostGlowColor) {
+        Brush.linearGradient(
+            0.0f to sideFrostGlowColor.copy(alpha = 0.14f),
+            0.5f to Color.White.copy(alpha = 0.04f),
+            1.0f to sideFrostGlowColor.copy(alpha = 0.10f)
+        )
+    }
 
     Box(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
             .fillMaxWidth((0.78f * scale).coerceIn(0.44f, 0.94f))
-            .then(
-                if (shadowElevation > 0.5.dp) {
-                    Modifier.shadow(
-                        elevation = shadowElevation,
-                        shape = cardShape,
-                        ambientColor = Color.Black.copy(alpha = 0.65f * glassOpacity),
-                        spotColor = Color.Black.copy(alpha = 0.75f * glassOpacity)
-                    )
-                } else {
-                    Modifier
-                }
-            )
             .drawBehind {
-                if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
-                    val cornerPx = cornerDpPx.toPx()
-                    val haloBlurPx = ((10f + 24f * glassUpFactor) * density).coerceAtLeast(1f)
-                    val spreadPx = (4f * glassUpFactor * density)
+                val cornerPx = cornerDpPx.toPx()
+                cardPath.reset()
+                cardPath.addRoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx, AndroidPath.Direction.CW)
+
+                // Soft outer drop shadow clipped strictly outside the translucent card so sides never stain dark
+                if (shadowAlpha > 0.01f && glassOpacity > 0.01f) {
+                    val blurPx = (shadowBlurDp * density).coerceAtLeast(1f)
+                    val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+                    if (blurKey != blurFilterState.lastShadowBlurKey || blurFilterState.lastShadowFilter == null) {
+                        blurFilterState.lastShadowBlurKey = blurKey
+                        blurFilterState.lastShadowFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+                    }
+                    shadowPaint.color = Color.Black.copy(alpha = shadowAlpha).toArgb()
+                    shadowPaint.maskFilter = blurFilterState.lastShadowFilter
+                    val offsetY = shadowOffsetYDp.toPx()
                     drawIntoCanvas { canvas ->
-                        val haloPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
-                            style = AndroidPaint.Style.STROKE
-                            strokeWidth = (5f + 9f * glassUpFactor) * density
-                            color = sideFrostGlowColor.copy(alpha = 0.36f * glassUpFactor * glassOpacity).toArgb()
-                            maskFilter = BlurMaskFilter(haloBlurPx, BlurMaskFilter.Blur.NORMAL)
+                        val native = canvas.nativeCanvas
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val saved = native.save()
+                            native.clipOutPath(cardPath)
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                shadowPaint
+                            )
+                            native.restoreToCount(saved)
+                        } else {
+                            val pad = blurPx * 2f + offsetY
+                            @Suppress("DEPRECATION")
+                            val savedLayer = native.saveLayer(
+                                -pad,
+                                -pad,
+                                size.width + pad,
+                                size.height + pad,
+                                null,
+                                android.graphics.Canvas.ALL_SAVE_FLAG
+                            )
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                shadowPaint
+                            )
+                            native.drawPath(cardPath, clearPaint)
+                            native.restoreToCount(savedLayer)
                         }
-                        canvas.nativeCanvas.drawRoundRect(
-                            -spreadPx,
-                            -spreadPx,
-                            size.width + spreadPx,
-                            size.height + spreadPx,
-                            cornerPx,
-                            cornerPx,
-                            haloPaint
-                        )
+                    }
+                }
+
+                // Soft frosted outer ambient glow scaling smoothly to 0 when blur decreases
+                if (blurFrac > 0.10f && glassOpacity > 0.01f) {
+                    val haloBlurPx = ((6f + 20f * blurFrac) * density).coerceAtLeast(1f)
+                    val haloKey = (haloBlurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+                    if (haloKey != blurFilterState.lastHaloBlurKey || blurFilterState.lastHaloFilter == null) {
+                        blurFilterState.lastHaloBlurKey = haloKey
+                        blurFilterState.lastHaloFilter = BlurMaskFilter(haloKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+                    }
+                    val spreadPx = 3f * blurFrac * density
+                    haloPaint.strokeWidth = (3f + 7f * blurFrac) * density
+                    haloPaint.color = sideFrostGlowColor.copy(alpha = 0.20f * blurFrac * blurFrac * glassOpacity).toArgb()
+                    haloPaint.maskFilter = blurFilterState.lastHaloFilter
+                    drawIntoCanvas { canvas ->
+                        val native = canvas.nativeCanvas
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val saved = native.save()
+                            native.clipOutPath(cardPath)
+                            native.drawRoundRect(
+                                -spreadPx,
+                                -spreadPx,
+                                size.width + spreadPx,
+                                size.height + spreadPx,
+                                cornerPx,
+                                cornerPx,
+                                haloPaint
+                            )
+                            native.restoreToCount(saved)
+                        } else {
+                            native.drawRoundRect(
+                                -spreadPx,
+                                -spreadPx,
+                                size.width + spreadPx,
+                                size.height + spreadPx,
+                                cornerPx,
+                                cornerPx,
+                                haloPaint
+                            )
+                        }
                     }
                 }
             }
             .clip(cardShape)
-            .background(cardBackgroundBrush)
+            .drawBehind {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            adaptiveTopOpaque.copy(alpha = topAlpha.coerceIn(0f, 1f)),
+                            adaptiveBottomOpaque.copy(alpha = bottomAlpha.coerceIn(0f, 1f))
+                        )
+                    )
+                )
+            }
             .then(
                 if (glassBorderAlpha > 0.01f) {
                     Modifier.border(
@@ -456,58 +593,22 @@ private fun FloatingGlassShareCard(
             )
             .testTag("music_story_card_container")
     ) {
-        if (glassUpFactor > 0.01f && glassOpacity > 0.01f && track.albumArt != null) {
+        if (glassBlur > 0.5f && glassOpacity > 0.01f && (crispArtImageBitmap != null || track.albumArt != null)) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
-                blurRadius = 26f + (14f * glassUpFactor),
-                scrimTopAlpha = 0.62f,
-                scrimMidAlpha = 0.70f,
-                scrimBottomAlpha = 0.78f,
-                layerAlpha = 0.56f * glassUpFactor * glassOpacity,
+                predecodedImageBitmap = crispArtImageBitmap,
+                blurRadius = glassBlur,
+                scrimStrength = blurFrac,
+                layerAlpha = 0.60f * blurFrac * glassOpacity,
                 modifier = Modifier.matchParentSize()
             )
         }
-        if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
+        if (blurFrac > 0.02f && glassOpacity > 0.01f) {
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .background(
-                        Brush.horizontalGradient(
-                            0.0f to sideFrostGlowColor.copy(alpha = 0.28f * glassUpFactor * glassOpacity),
-                            0.18f to sideFrostGlowColor.copy(alpha = 0.05f * glassUpFactor * glassOpacity),
-                            0.82f to sideFrostGlowColor.copy(alpha = 0.05f * glassUpFactor * glassOpacity),
-                            1.0f to sideFrostGlowColor.copy(alpha = 0.28f * glassUpFactor * glassOpacity)
-                        )
-                    )
-                    .background(
-                        Brush.verticalGradient(
-                            0.0f to Color.White.copy(alpha = 0.20f * glassUpFactor * glassOpacity),
-                            0.15f to Color.White.copy(alpha = 0.02f * glassUpFactor * glassOpacity),
-                            0.85f to Color.White.copy(alpha = 0.02f * glassUpFactor * glassOpacity),
-                            1.0f to Color.White.copy(alpha = 0.18f * glassUpFactor * glassOpacity)
-                        )
-                    )
-                    .drawBehind {
-                        val cornerPx = cornerDpPx.toPx()
-                        val innerBlurPx = ((7f + 14f * glassUpFactor) * density).coerceAtLeast(1f)
-                        drawIntoCanvas { canvas ->
-                            val innerRimPaint = AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
-                                style = AndroidPaint.Style.STROKE
-                                strokeWidth = (7f + 11f * glassUpFactor) * density
-                                color = Color.White.copy(alpha = 0.28f * glassUpFactor * glassOpacity).toArgb()
-                                maskFilter = BlurMaskFilter(innerBlurPx, BlurMaskFilter.Blur.NORMAL)
-                            }
-                            canvas.nativeCanvas.drawRoundRect(
-                                0f,
-                                0f,
-                                size.width,
-                                size.height,
-                                cornerPx,
-                                cornerPx,
-                                innerRimPaint
-                            )
-                        }
-                    }
+                    .graphicsLayer { alpha = (blurFrac * glassOpacity).coerceIn(0f, 1f) }
+                    .background(sheenBrush)
             )
         }
         Column(
@@ -600,7 +701,8 @@ private fun FloatingGlassShareCard(
                         speedMultiplier = styleConfig.waveformSpeedMultiplier,
                         forceMultiplier = styleConfig.waveformForce,
                         animateAlways = true,
-                        scale = scale
+                        scale = scale,
+                        modifier = Modifier.graphicsLayer()
                     )
                 }
             }
@@ -612,8 +714,8 @@ private fun FloatingGlassShareCard(
  * 4-bar iOS Dynamic Island style audio equalizer displayed in the Floating Glass Card footer
  * and Settings speed/beat/force preview.
  *
- * Uses continuous phase integration + in-place array updates so adjusting Wave Speed or Wave Force
- * never resets phase or causes frame jitter.
+ * Uses continuous phase integration + GPU layer isolation + device-tier frame pacing so low/mid
+ * SoCs (Helio G35, Exynos 7885) stay smooth without re-drawing the glass backdrop every tick.
  */
 @Composable
 fun DynamicIslandWaveformBars(
@@ -627,6 +729,23 @@ fun DynamicIslandWaveformBars(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val tier = DevicePerformanceTier.rememberDeviceTier()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isLifecycleActive by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> isLifecycleActive = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> isLifecycleActive = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val sampler = remember { AudioBeatMonitor.LiveSessionSampler() }
     val barLevels = remember { FloatArray(4) { 0.45f } }
     var frameCounter by remember { mutableStateOf(0L) }
@@ -638,6 +757,7 @@ fun DynamicIslandWaveformBars(
     val latestSpeed by androidx.compose.runtime.rememberUpdatedState(speedMultiplier)
     val latestForce by androidx.compose.runtime.rememberUpdatedState(forceMultiplier)
     val latestAnimateAlways by androidx.compose.runtime.rememberUpdatedState(animateAlways)
+    val latestActive by androidx.compose.runtime.rememberUpdatedState(isLifecycleActive)
 
     DisposableEffect(beatSyncEnabled) {
         if (beatSyncEnabled) {
@@ -650,24 +770,36 @@ fun DynamicIslandWaveformBars(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(tier.waveformFrameIntervalNs) {
         var lastFrameNanos = 0L
+        var lastEmitNanos = 0L
         var lastEnsureNanos = 0L
         var phaseTimeSec = 0.0
         var prevWasUsingLiveFeed = false
         var modeBlendRemainingSec = 0f
+        val minIntervalNs = tier.waveformFrameIntervalNs
+
         while (true) {
             val frameNanos = withFrameNanos { it }
+            if (!latestActive) {
+                lastFrameNanos = frameNanos
+                lastEmitNanos = frameNanos
+                continue
+            }
+            if (minIntervalNs > 0L && lastEmitNanos != 0L && (frameNanos - lastEmitNanos) < minIntervalNs) {
+                continue
+            }
             val dtSec = if (lastFrameNanos == 0L) {
                 0f
             } else {
-                ((frameNanos - lastFrameNanos).coerceIn(0L, 100_000_000L)) / 1_000_000_000f
+                ((frameNanos - lastFrameNanos).coerceIn(0L, 66_000_000L)) / 1_000_000_000f
             }
             lastFrameNanos = frameNanos
+            lastEmitNanos = frameNanos
 
             val sync = latestBeatSync
             val speed = latestSpeed.coerceIn(0.4f, 2.5f)
-            phaseTimeSec = (phaseTimeSec + dtSec * (if (sync) 1.0 else speed.toDouble())) % 3600.0
+            phaseTimeSec += dtSec * (if (sync) 1.0 else speed.toDouble())
 
             if (sync && frameNanos - lastEnsureNanos >= 800_000_000L) {
                 lastEnsureNanos = frameNanos
@@ -708,7 +840,6 @@ fun DynamicIslandWaveformBars(
                 for (i in 0..3) {
                     val current = barLevels[i]
                     val target = computed[i]
-                    // 0ms instant attack during steady Beat Sync / manual groove; damped across mode transitions
                     barLevels[i] = if (target >= current) {
                         if (attackAlpha >= 0.99f) target else current + (target - current) * attackAlpha
                     } else {
@@ -726,6 +857,7 @@ fun DynamicIslandWaveformBars(
     Canvas(
         modifier = modifier
             .size(width = boxW, height = boxH)
+            .graphicsLayer()
             .testTag("floating_glass_waveform")
     ) {
         // Subscribe purely inside DrawScope so parent rows don't recompose 60-120 times per second
@@ -1024,6 +1156,7 @@ private fun SpotifyLyricsShareCard(
         if (useSongArtBg && crispArtImageBitmap != null && glassOpacity > 0.01f) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
+                predecodedImageBitmap = crispArtImageBitmap,
                 blurRadius = styleConfig.lyricsArtBlurRadius,
                 layerAlpha = glassOpacity,
                 modifier = Modifier.matchParentSize()
@@ -1130,27 +1263,37 @@ private fun BlurredCardCoverLayer(
     albumArt: Bitmap?,
     blurRadius: Float,
     modifier: Modifier = Modifier,
-    scrimTopAlpha: Float = 0.44f,
-    scrimMidAlpha: Float = 0.56f,
-    scrimBottomAlpha: Float = 0.74f,
+    predecodedImageBitmap: ImageBitmap? = null,
+    scrimStrength: Float = 1f,
     layerAlpha: Float = 1f
 ) {
     val clampedRadius = blurRadius.coerceIn(0f, 40f)
-    val safeBitmap = remember(albumArt) {
-        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 720) }
-    } ?: return
+    val tier = DevicePerformanceTier.rememberDeviceTier()
+    val crispFilter = if (tier.isLegacyRenderTier) FilterQuality.Medium else FilterQuality.High
+    val baseScrimBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color.Black.copy(alpha = 0.34f),
+                Color.Black.copy(alpha = 0.42f),
+                Color.Black.copy(alpha = 0.50f)
+            )
+        )
+    }
 
-    Box(modifier = modifier) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val imageBitmap = remember(safeBitmap) { safeBitmap.asImageBitmap() }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        val imageBitmap = predecodedImageBitmap ?: remember(albumArt, tier.bgSourceMaxDim) {
+            albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.bgSourceMaxDim)?.asImageBitmap() }
+        } ?: return
+
+        Box(modifier = modifier) {
             Image(
                 bitmap = imageBitmap,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.High,
-                alpha = layerAlpha.coerceIn(0f, 1f),
+                filterQuality = crispFilter,
                 modifier = Modifier
                     .fillMaxSize()
+                    .graphicsLayer { alpha = layerAlpha.coerceIn(0f, 1f) }
                     .then(
                         if (clampedRadius > 0.35f) {
                             Modifier.blur(
@@ -1162,77 +1305,96 @@ private fun BlurredCardCoverLayer(
                         }
                     )
             )
-        } else {
-            val mipPyramid by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
-                initialValue = null,
-                key1 = safeBitmap
-            ) {
-                value = withContext(Dispatchers.Default) {
-                    BitmapBlurUtils.computeBlurMipPyramid(safeBitmap)?.let { (low, mid, high) ->
-                        Triple(low.asImageBitmap(), mid.asImageBitmap(), high.asImageBitmap())
-                    }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = (scrimStrength * layerAlpha).coerceIn(0f, 1f) }
+                    .background(baseScrimBrush)
+            )
+        }
+        return
+    }
+
+    val fallbackImg = predecodedImageBitmap ?: remember(albumArt, tier.bgSourceMaxDim) {
+        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.bgSourceMaxDim)?.asImageBitmap() }
+    }
+    if (albumArt == null && fallbackImg == null) return
+
+    Box(modifier = modifier) {
+        val mipPyramid by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
+            initialValue = null,
+            key1 = albumArt,
+            key2 = tier.pyramidLowDim
+        ) {
+            val src = albumArt ?: return@produceState
+            value = withContext(Dispatchers.Default) {
+                BitmapBlurUtils.computeBlurMipPyramid(
+                    source = src,
+                    lowDim = tier.pyramidLowDim,
+                    midDim = tier.pyramidMidDim,
+                    highDim = tier.pyramidHighDim
+                )?.let { (low, mid, high) ->
+                    Triple(low.asImageBitmap(), mid.asImageBitmap(), high.asImageBitmap())
                 }
             }
-            val baseImg = remember(safeBitmap) { safeBitmap.asImageBitmap() }
+        }
+        val pyramid = mipPyramid
+        if ((pyramid == null || clampedRadius < 12f) && fallbackImg != null) {
             Image(
-                bitmap = baseImg,
+                bitmap = fallbackImg,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                filterQuality = FilterQuality.High,
-                alpha = layerAlpha.coerceIn(0f, 1f),
-                modifier = Modifier.fillMaxSize()
+                filterQuality = crispFilter,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = layerAlpha.coerceIn(0f, 1f) }
             )
-            val pyramid = mipPyramid
-            if (pyramid != null && clampedRadius > 0.2f) {
-                val lowAlpha = (clampedRadius / 12f).coerceIn(0f, 1f) * layerAlpha
-                val midAlpha = ((clampedRadius - 12f) / 12f).coerceIn(0f, 1f) * layerAlpha
-                val highAlpha = ((clampedRadius - 24f) / 16f).coerceIn(0f, 1f) * layerAlpha
+        }
+        if (pyramid != null && clampedRadius > 0.2f) {
+            val lowAlpha = (clampedRadius / 12f).coerceIn(0f, 1f) * layerAlpha
+            val midAlpha = ((clampedRadius - 12f) / 12f).coerceIn(0f, 1f) * layerAlpha
+            val highAlpha = ((clampedRadius - 24f) / 16f).coerceIn(0f, 1f) * layerAlpha
 
-                if (lowAlpha > 0.01f && midAlpha < 0.99f) {
-                    Image(
-                        bitmap = pyramid.first,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.High,
-                        alpha = lowAlpha.coerceIn(0f, 1f),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-                if (midAlpha > 0.01f && highAlpha < 0.99f) {
-                    Image(
-                        bitmap = pyramid.second,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.High,
-                        alpha = midAlpha.coerceIn(0f, 1f),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-                if (highAlpha > 0.01f) {
-                    Image(
-                        bitmap = pyramid.third,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.High,
-                        alpha = highAlpha.coerceIn(0f, 1f),
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
+            if (lowAlpha > 0.01f && midAlpha < 0.99f) {
+                Image(
+                    bitmap = pyramid.first,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.Low,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = lowAlpha.coerceIn(0f, 1f) }
+                )
+            }
+            if (midAlpha > 0.01f && highAlpha < 0.99f) {
+                Image(
+                    bitmap = pyramid.second,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.Low,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = midAlpha.coerceIn(0f, 1f) }
+                )
+            }
+            if (highAlpha > 0.01f) {
+                Image(
+                    bitmap = pyramid.third,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.Low,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = highAlpha.coerceIn(0f, 1f) }
+                )
             }
         }
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Black.copy(alpha = (scrimTopAlpha * layerAlpha).coerceIn(0f, 1f)),
-                            Color.Black.copy(alpha = (scrimMidAlpha * layerAlpha).coerceIn(0f, 1f)),
-                            Color.Black.copy(alpha = (scrimBottomAlpha * layerAlpha).coerceIn(0f, 1f))
-                        )
-                    )
-                )
+                .graphicsLayer { alpha = (scrimStrength * layerAlpha).coerceIn(0f, 1f) }
+                .background(baseScrimBrush)
         )
     }
 }

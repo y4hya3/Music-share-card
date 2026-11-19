@@ -66,6 +66,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -75,13 +76,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -238,18 +244,18 @@ fun EditCardBottomSheet(
         }
     }
 
-    val chromeAlpha by animateFloatAsState(
+    val chromeAlphaState: State<Float> = animateFloatAsState(
         targetValue = if (activeScrub != SheetLiveScrub.NONE) 0f else 1f,
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "sheet_live_scrub_chrome_alpha"
     )
-    val sheetGlassAlpha by animateFloatAsState(
+    val sheetGlassAlphaState: State<Float> = animateFloatAsState(
         targetValue = if (activeScrub != SheetLiveScrub.NONE) 0f else 1f,
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "sheet_glass_surface_alpha"
     )
     fun scrubVisibilityAlpha(target: SheetLiveScrub): Float {
-        return if (activeScrub == target) 1f else chromeAlpha
+        return if (activeScrub == target) 1f else chromeAlphaState.value
     }
 
     // Zero-permission Photo/Video pickers (Google Play compliant)
@@ -277,30 +283,45 @@ fun EditCardBottomSheet(
         }
     }
 
-    val sheetShape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    val sheetShape = remember { RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp) }
+    val sheetBaseBrush = remember {
+        Brush.verticalGradient(
+            colors = listOf(
+                Color(0xD820222E).copy(alpha = 0.85f),
+                Color(0xEB12131B).copy(alpha = 0.92f)
+            )
+        )
+    }
     val sheetSurfaceModifier = Modifier
         .fillMaxWidth()
         .clip(sheetShape)
-        .background(
-            brush = Brush.verticalGradient(
-                colors = listOf(
-                    Color(0xD820222E).copy(alpha = 0.85f * sheetGlassAlpha),
-                    Color(0xEB12131B).copy(alpha = 0.92f * sheetGlassAlpha)
+        .drawBehind {
+            val a = sheetGlassAlphaState.value.coerceIn(0f, 1f)
+            if (a > 0.005f) {
+                drawRect(brush = sheetBaseBrush, alpha = a)
+            }
+        }
+        .drawWithContent {
+            drawContent()
+            val a = sheetGlassAlphaState.value.coerceIn(0f, 1f)
+            if (a > 0.005f) {
+                val strokePx = 1.dp.toPx()
+                val cornerPx = 28.dp.toPx()
+                drawRoundRect(
+                    color = Color.White.copy(alpha = 0.16f * a),
+                    topLeft = Offset(strokePx / 2f, strokePx / 2f),
+                    size = Size(size.width - strokePx, size.height + cornerPx),
+                    cornerRadius = CornerRadius(cornerPx, cornerPx),
+                    style = Stroke(width = strokePx)
                 )
-            ),
-            shape = sheetShape
-        )
-        .border(
-            width = 1.dp,
-            color = Color.White.copy(alpha = 0.16f * sheetGlassAlpha),
-            shape = sheetShape
-        )
+            }
+        }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = Color.Transparent,
-        scrimColor = Color.Black.copy(alpha = 0.48f * sheetGlassAlpha),
+        scrimColor = Color.Black.copy(alpha = 0.28f),
         dragHandle = null,
         contentColor = Color.White,
         modifier = modifier.testTag("edit_card_bottom_sheet")
@@ -338,8 +359,9 @@ fun EditCardBottomSheet(
                         .align(Alignment.CenterHorizontally)
                         .width(42.dp)
                         .height(4.dp)
+                        .graphicsLayer { alpha = chromeAlphaState.value }
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.30f * chromeAlpha))
+                        .background(Color.White.copy(alpha = 0.30f))
                 )
                 Spacer(modifier = Modifier.height(14.dp))
 
@@ -347,7 +369,7 @@ fun EditCardBottomSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .graphicsLayer { alpha = chromeAlpha },
+                        .graphicsLayer { alpha = chromeAlphaState.value },
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -379,7 +401,7 @@ fun EditCardBottomSheet(
                 Spacer(modifier = Modifier.height(18.dp))
 
                 // 1. CARD BRAND
-                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                     Text(
                         text = "Card Logo & Name",
                         fontSize = 15.sp,
@@ -1398,7 +1420,7 @@ fun EditCardBottomSheet(
                 }
 
                 // 5. BACKGROUND STYLE & PREVIEW SCALE TOGGLE
-                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                     Spacer(modifier = Modifier.height(18.dp))
                     Text(
                         text = "Background Style & Preview Mode",
@@ -1660,7 +1682,7 @@ fun EditCardBottomSheet(
                 }
 
                 // 5C & 6. GRADIENTS + CARD LAYOUT STYLE
-                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                     if (!styleConfig.useTransparentBackground && !styleConfig.useBlurredAlbumBackground) {
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
@@ -1792,7 +1814,7 @@ fun EditCardBottomSheet(
                             color = Color.White.copy(alpha = 0.58f),
                             modifier = Modifier
                                 .padding(top = 2.dp, bottom = 4.dp)
-                                .graphicsLayer { alpha = chromeAlpha }
+                                .graphicsLayer { alpha = chromeAlphaState.value }
                         )
                         Slider(
                             value = styleConfig.cardBlurRadius.coerceIn(0f, 40f),
@@ -1840,7 +1862,7 @@ fun EditCardBottomSheet(
 
                     // FLOATING GLASS WAVEFORM CARD (fades during live scrub)
                     if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD) {
-                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                             Spacer(modifier = Modifier.height(10.dp))
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
@@ -2099,7 +2121,7 @@ fun EditCardBottomSheet(
 
                     // LYRICS CARD CONTROLS + 16-PROVIDER AUTO LYRICS SEARCH (LINES & WORD BY WORD)
                     if (styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_LYRICS_CARD) {
-                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                             Spacer(modifier = Modifier.height(14.dp))
                             Text(
                                 text = "Lyrics Card Background",
@@ -2223,7 +2245,7 @@ fun EditCardBottomSheet(
                         }
 
                         // 16-PROVIDER AUTO LYRICS SEARCH + LINES / WORD-BY-WORD PICKER
-                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
                             Spacer(modifier = Modifier.height(14.dp))
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
@@ -2697,7 +2719,7 @@ fun EditCardBottomSheet(
                     }
 
                     // Sections 7-10 fade out during any Live Scrubbing
-                    Column(modifier = Modifier.graphicsLayer { alpha = chromeAlpha }) {
+                    Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
 
                         Spacer(modifier = Modifier.height(20.dp))
 
@@ -2875,6 +2897,20 @@ fun EditCardBottomSheet(
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // 11. ECHOSNAP FOLDER BACKUP (EXPORT / IMPORT / RESET)
+                    EchoSnapBackupSectionCard(
+                        styleConfig = styleConfig,
+                        onLivePreviewReset = {
+                            onLiveBlurPreview(null)
+                            onLiveCardScalePreview(null)
+                            onLiveCardOpacityPreview(null)
+                            onLiveCardBlurPreview(null)
+                            onLiveLyricsBlurPreview(null)
+                        }
+                    )
                 }
             }
         }

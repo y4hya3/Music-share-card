@@ -75,6 +75,85 @@ object SavedMediaLibrary {
         _savedCovers.value = readCoverIndex(ctx).filter { File(it.localImagePath).exists() }
     }
 
+    fun getCanvasesDir(context: Context): File =
+        File(File(context.applicationContext.filesDir, ROOT_DIR), CANVASES_DIR).apply { mkdirs() }
+
+    fun getCoversDir(context: Context): File =
+        File(File(context.applicationContext.filesDir, ROOT_DIR), COVERS_DIR).apply { mkdirs() }
+
+    /**
+     * Merges or replaces imported covers and canvases into internal storage & updates index JSONs.
+     */
+    fun upsertImportedMedia(
+        context: Context,
+        importedCovers: List<SavedCoverItem>,
+        importedCanvases: List<SavedCanvasItem>,
+        replaceExisting: Boolean = false
+    ) {
+        val ctx = context.applicationContext
+        if (replaceExisting) {
+            val keepPaths = buildSet {
+                importedCovers.forEach { add(it.localImagePath) }
+                importedCanvases.forEach {
+                    add(it.localVideoPath)
+                    it.thumbnailPath?.let { thumb -> add(thumb) }
+                }
+            }
+            clearMediaFilesOnly(ctx, keepPaths = keepPaths)
+        }
+
+        val currentCovers = if (replaceExisting) {
+            emptyList()
+        } else {
+            readCoverIndex(ctx).filter { File(it.localImagePath).exists() }
+        }
+        val importedCoverIds = importedCovers.map { it.id }.toSet()
+        val nextCovers = (importedCovers + currentCovers.filterNot { it.id in importedCoverIds })
+            .distinctBy { it.id }
+            .filter { File(it.localImagePath).exists() }
+        writeCoverIndex(ctx, nextCovers)
+        _savedCovers.value = nextCovers
+
+        val currentCanvases = if (replaceExisting) {
+            emptyList()
+        } else {
+            readCanvasIndex(ctx).filter { File(it.localVideoPath).exists() }
+        }
+        val importedCanvasIds = importedCanvases.map { it.id }.toSet()
+        val nextCanvases = (importedCanvases + currentCanvases.filterNot { it.id in importedCanvasIds })
+            .distinctBy { it.id }
+            .filter { File(it.localVideoPath).exists() }
+        writeCanvasIndex(ctx, nextCanvases)
+        _savedCanvases.value = nextCanvases
+    }
+
+    /**
+     * Clears all locally saved Cover Arts, Animated Canvases, and linked album song lists.
+     */
+    fun resetAllSavedMedia(context: Context) {
+        val ctx = context.applicationContext
+        clearMediaFilesOnly(ctx, keepPaths = emptySet())
+        writeCanvasIndex(ctx, emptyList())
+        writeCoverIndex(ctx, emptyList())
+        _savedCanvases.value = emptyList()
+        _savedCovers.value = emptyList()
+    }
+
+    private fun clearMediaFilesOnly(context: Context, keepPaths: Set<String>) {
+        val root = File(context.filesDir, ROOT_DIR)
+        if (!root.exists()) return
+        listOf(CANVASES_DIR, COVERS_DIR).forEach { sub ->
+            val dir = File(root, sub)
+            if (dir.exists() && dir.isDirectory) {
+                dir.listFiles()?.forEach { f ->
+                    if (f.absolutePath !in keepPaths) {
+                        runCatching { f.delete() }
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun saveCanvasFromCandidate(
         context: Context,
         candidate: AnimatedCanvasCandidate,

@@ -27,7 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -35,6 +35,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.service.SpotifyAuthManager
 import com.example.util.CanvasVideoExporter
+import com.example.util.DevicePerformanceTier
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -86,7 +87,7 @@ fun AnimatedCanvasVideoBackground(
             }
         }
     }
-    val fadeAlpha by animateFloatAsState(
+    val fadeAlphaState = animateFloatAsState(
         targetValue = if (isVideoReady) 1f else 0f,
         animationSpec = tween(durationMillis = 240),
         label = "canvas_video_fade"
@@ -152,8 +153,9 @@ fun AnimatedCanvasVideoBackground(
         AndroidView(
             modifier = modifier
                 .fillMaxSize()
-                .alpha(fadeAlpha),
+                .graphicsLayer { alpha = fadeAlphaState.value },
             factory = { viewCtx ->
+                val useFastBlur = DevicePerformanceTier.get(viewCtx).isLegacyRenderTier
                 TextureView(viewCtx).apply {
                     isOpaque = false
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -172,7 +174,8 @@ fun AnimatedCanvasVideoBackground(
                                 outputSurfaceTexture = surfaceTexture,
                                 initialWidth = max(1, width),
                                 initialHeight = max(1, height),
-                                initialBlurPx = blurRadiusPx
+                                initialBlurPx = blurRadiusPx,
+                                useFastBlurShader = useFastBlur
                             )
                             glRendererRef = controller
 
@@ -298,7 +301,8 @@ private class PreviewGlRendererController(
     private val outputSurfaceTexture: SurfaceTexture,
     initialWidth: Int,
     initialHeight: Int,
-    initialBlurPx: Float
+    initialBlurPx: Float,
+    private val useFastBlurShader: Boolean
 ) {
     private val glThread = HandlerThread("CanvasPreviewGl").apply { start() }
     private val glHandler = Handler(glThread.looper)
@@ -337,6 +341,7 @@ private class PreviewGlRendererController(
     private var stMatrixHandle: Int = 0
     private var cropScaleHandle: Int = 0
     private var blurHandle: Int = 0
+    private var fastModeHandle: Int = 0
     private var quadBuffer: FloatBuffer? = null
     private val stMatrix = FloatArray(16)
 
@@ -454,6 +459,7 @@ private class PreviewGlRendererController(
             stMatrixHandle = GLES20.glGetUniformLocation(program, "uStMatrix")
             cropScaleHandle = GLES20.glGetUniformLocation(program, "uCropScale")
             blurHandle = GLES20.glGetUniformLocation(program, "uBlurRadius")
+            fastModeHandle = GLES20.glGetUniformLocation(program, "uFastMode")
 
             decoderSurfaceTexture = SurfaceTexture(oesTextureId).apply {
                 setOnFrameAvailableListener({
@@ -505,6 +511,7 @@ private class PreviewGlRendererController(
             GLES20.glUniformMatrix4fv(stMatrixHandle, 1, false, stMatrix, 0)
             GLES20.glUniform2f(cropScaleHandle, cropScaleX, cropScaleY)
             GLES20.glUniform1f(blurHandle, (blurRadiusPx / 40f).coerceIn(0f, 1f) * 0.015f)
+            GLES20.glUniform1f(fastModeHandle, if (useFastBlurShader) 1f else 0f)
 
             qb.position(0)
             GLES20.glVertexAttribPointer(posHandle, 2, GLES20.GL_FLOAT, false, 16, qb)
@@ -591,10 +598,19 @@ private class PreviewGlRendererController(
             precision mediump float;
             uniform samplerExternalOES sTexture;
             uniform float uBlurRadius;
+            uniform float uFastMode;
             varying vec2 vTexCoord;
             void main() {
                 if (uBlurRadius <= 0.0004) {
                     gl_FragColor = texture2D(sTexture, vTexCoord);
+                } else if (uFastMode > 0.5) {
+                    float r = uBlurRadius * 1.15;
+                    vec4 sum = texture2D(sTexture, vTexCoord) * 0.24;
+                    sum += texture2D(sTexture, clamp(vTexCoord + vec2(r, r * 0.65), 0.0, 1.0)) * 0.19;
+                    sum += texture2D(sTexture, clamp(vTexCoord + vec2(-r, r * 0.65), 0.0, 1.0)) * 0.19;
+                    sum += texture2D(sTexture, clamp(vTexCoord + vec2(r * 0.65, -r), 0.0, 1.0)) * 0.19;
+                    sum += texture2D(sTexture, clamp(vTexCoord + vec2(-r * 0.65, -r), 0.0, 1.0)) * 0.19;
+                    gl_FragColor = sum;
                 } else {
                     float r = uBlurRadius;
                     vec4 sum = texture2D(sTexture, vTexCoord) * 0.16;

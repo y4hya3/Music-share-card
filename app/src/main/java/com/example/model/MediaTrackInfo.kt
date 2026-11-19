@@ -1,10 +1,12 @@
 package com.example.model
 
 import android.graphics.Bitmap
+import androidx.compose.runtime.Immutable
 
 /**
  * Represents media playback metadata extracted from active media notifications.
  */
+@Immutable
 data class MediaTrackInfo(
     val title: String,
     val artist: String,

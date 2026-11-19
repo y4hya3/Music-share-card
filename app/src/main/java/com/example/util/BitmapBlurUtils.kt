@@ -10,6 +10,7 @@ import android.graphics.Rect
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.util.LruCache
 import android.util.Size
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -31,6 +32,8 @@ object BitmapBlurUtils {
     private val highQualityBitmapPaint = Paint(
         Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG
     )
+
+    private val mipPyramidCache = LruCache<String, Triple<Bitmap, Bitmap, Bitmap>>(2)
 
     fun toSafeSoftwareBitmap(source: Bitmap?, maxDimension: Int = 1024): Bitmap? {
         if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) {
@@ -424,26 +427,46 @@ object BitmapBlurUtils {
         }
 
         val actualMaxSide = max(mutable.width, mutable.height).coerceAtLeast(1)
-        val maxEffective = max(10, (actualMaxSide * 0.14f).roundToInt())
+        val maxEffective = max(10, (actualMaxSide * 0.105f).roundToInt())
         val effectiveRadius = ((clampedRadius / 40f) * maxEffective).roundToInt().coerceIn(1, maxEffective)
         stackBlurInPlace(mutable, effectiveRadius)
         return mutable
     }
 
     /**
-     * Pre-computes a 3-stop blur mip pyramid (12px, 24px, 40px) once per cover art change so
-     * devices below Android 12 can crossfade between cached blur textures at 60fps during slider drag.
+     * Pre-computes and caches a 3-stop blur mip pyramid (12px, 24px, 40px) once per cover art change so
+     * devices below Android 12 share one cached pyramid across background and glass card layers at 60fps.
      */
-    fun computeBlurMipPyramid(source: Bitmap): Triple<Bitmap, Bitmap, Bitmap>? {
+    fun computeBlurMipPyramid(
+        source: Bitmap,
+        lowDim: Int = 340,
+        midDim: Int = 260,
+        highDim: Int = 220
+    ): Triple<Bitmap, Bitmap, Bitmap>? {
+        if (source.isRecycled) return null
+        val key = "${System.identityHashCode(source)}_${source.width}x${source.height}_${lowDim}_${midDim}_${highDim}"
+        synchronized(mipPyramidCache) {
+            mipPyramidCache.get(key)?.let { cached ->
+                if (!cached.first.isRecycled && !cached.second.isRecycled && !cached.third.isRecycled) {
+                    return cached
+                } else {
+                    mipPyramidCache.remove(key)
+                }
+            }
+        }
         return try {
             val safe = toSafeSoftwareBitmap(source, maxDimension = 720) ?: return null
-            val low = blurBitmap(safe, radiusPx = 12f, maxDimension = 340)
-            val mid = blurBitmap(safe, radiusPx = 24f, maxDimension = 260)
-            val high = blurBitmap(safe, radiusPx = 40f, maxDimension = 220)
+            val low = blurBitmap(safe, radiusPx = 12f, maxDimension = lowDim)
+            val mid = blurBitmap(safe, radiusPx = 24f, maxDimension = midDim)
+            val high = blurBitmap(safe, radiusPx = 40f, maxDimension = highDim)
             if (safe !== source && safe !== low && safe !== mid && safe !== high && !safe.isRecycled) {
                 safe.recycle()
             }
-            Triple(low, mid, high)
+            val result = Triple(low, mid, high)
+            synchronized(mipPyramidCache) {
+                mipPyramidCache.put(key, result)
+            }
+            result
         } catch (_: Exception) {
             null
         }

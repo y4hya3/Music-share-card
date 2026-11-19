@@ -1,5 +1,6 @@
 package com.example.model
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 
 enum class CardBrandMode(val label: String, val wordmark: String) {
@@ -38,6 +39,7 @@ enum class LyricsCardBackgroundMode(val label: String) {
     SONG_ART("Song Cover Art")
 }
 
+@Immutable
 data class CardStyleConfig(
     val brandMode: CardBrandMode = CardBrandMode.BITCHORD,
     val logoColorMode: LogoColorMode = LogoColorMode.RED,

@@ -1,21 +1,16 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Keep Android framework entry points, NotificationListenerService, and models safe under R8 full mode
+-keep class com.example.BitChordApplication { *; }
+-keep class com.example.MainActivity { *; }
+-keep class com.example.ui.SpotifyLoginActivity { *; }
+-keep class com.example.service.MusicNotificationListenerService { *; }
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Preserve models & enums
+-keep class com.example.model.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep MediaMetadata / Notification reflection & MediaController metadata safe
+-dontwarn android.media.**
+-dontwarn android.app.Notification**
+-dontwarn org.robolectric.**

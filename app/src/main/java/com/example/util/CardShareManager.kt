@@ -15,6 +15,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
@@ -61,10 +62,12 @@ object CardShareManager {
         context: Context,
         track: MediaTrackInfo,
         palette: CardPalette,
-        styleConfig: CardStyleConfig
+        styleConfig: CardStyleConfig,
+        targetWidth: Int = 1080,
+        targetHeight: Int = 1920
     ): Bitmap = withContext(Dispatchers.Default) {
-        val width = 1080
-        val height = 1920
+        val width = targetWidth.coerceAtLeast(360)
+        val height = targetHeight.coerceAtLeast(640)
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         bitmap.eraseColor(AndroidColor.TRANSPARENT)
         val canvas = Canvas(bitmap)
@@ -316,65 +319,93 @@ object CardShareManager {
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
 
         val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
-        val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
-        val shadowAlpha = (145f * styleConfig.glowIntensity.coerceAtLeast(0.25f) * glassOpacity)
-            .roundToInt()
-            .coerceIn(0, 255)
-        if (shadowAlpha > 2) {
+        val glassBlur = styleConfig.cardBlurRadius.coerceIn(0f, 40f)
+        val blurFrac = (glassBlur / 40f).coerceIn(0f, 1f)
+        val cardPath = Path().apply {
+            addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
+        }
+
+        val glowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f)
+        val shadowAlpha = (0.42f * glowStrength * glassOpacity).coerceIn(0f, 0.52f)
+        val shadowAlphaInt = (shadowAlpha * 255f).roundToInt().coerceIn(0, 255)
+        if (shadowAlphaInt > 2 && glassOpacity > 0.01f) {
+            val shadowBlurPx = ((10f + 8f * blurFrac) * glowStrength * scale * 3f).coerceAtLeast(1f)
+            val shadowOffsetY = 21f * scale
             val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = AndroidColor.argb(shadowAlpha, 0, 0, 0)
-                maskFilter = BlurMaskFilter(64f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+                color = AndroidColor.argb(shadowAlphaInt, 0, 0, 0)
+                maskFilter = BlurMaskFilter(shadowBlurPx, BlurMaskFilter.Blur.NORMAL)
             }
-            canvas.drawRoundRect(
-                RectF(cardLeft, cardTop + (22f * scale), cardRight, cardBottom + (22f * scale)),
-                cornerRadius,
-                cornerRadius,
-                shadowPaint
-            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val savedShadow = canvas.save()
+                canvas.clipOutPath(cardPath)
+                canvas.drawRoundRect(
+                    RectF(cardLeft, cardTop + shadowOffsetY, cardRight, cardBottom + shadowOffsetY),
+                    cornerRadius,
+                    cornerRadius,
+                    shadowPaint
+                )
+                canvas.restoreToCount(savedShadow)
+            } else {
+                val pad = shadowBlurPx * 2f + shadowOffsetY
+                @Suppress("DEPRECATION")
+                val savedLayer = canvas.saveLayer(
+                    cardLeft - pad,
+                    cardTop - pad,
+                    cardRight + pad,
+                    cardBottom + pad,
+                    null,
+                    Canvas.ALL_SAVE_FLAG
+                )
+                canvas.drawRoundRect(
+                    RectF(cardLeft, cardTop + shadowOffsetY, cardRight, cardBottom + shadowOffsetY),
+                    cornerRadius,
+                    cornerRadius,
+                    shadowPaint
+                )
+                val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+                }
+                canvas.drawPath(cardPath, clearPaint)
+                canvas.restoreToCount(savedLayer)
+            }
         }
 
         val albumArt = track.albumArt
-        val glassBlur = styleConfig.cardBlurRadius.coerceIn(0f, 40f)
-        val glassDownFactor = (glassBlur / 20f).coerceIn(0f, 1f)
-        val glassUpFactor = ((glassBlur - 20f) / 20f).coerceIn(0f, 1f)
+        val topAlpha = (0.20f + 0.50f * blurFrac) * glassOpacity
+        val bottomAlpha = (0.30f + 0.46f * blurFrac) * glassOpacity
+        val borderAlphaInt = ((0.30f + 0.08f * blurFrac) * glassOpacity * 255f)
+            .roundToInt()
+            .coerceIn(0, 255)
+        val sideFrostColor = lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.28f)
 
-        val topAlpha = (if (glassBlur <= 20f) {
-            0.20f + (0.67f * glassDownFactor)
-        } else {
-            0.87f - (0.31f * glassUpFactor)
-        }) * glassOpacity
-        val bottomAlpha = (if (glassBlur <= 20f) {
-            0.30f + (0.62f * glassDownFactor)
-        } else {
-            0.92f - (0.28f * glassUpFactor)
-        }) * glassOpacity
-        val borderAlphaInt = ((if (glassBlur <= 20f) {
-            0.30f - 0.16f * glassDownFactor
-        } else {
-            0.14f + 0.24f * glassUpFactor
-        }) * glassOpacity * 255f).roundToInt().coerceIn(0, 255)
-        val sideFrostColor = lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.32f)
-
-        if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
-            val spreadPx = 12f * glassUpFactor
+        if (blurFrac > 0.10f && glassOpacity > 0.01f) {
+            val spreadPx = 9f * blurFrac
             val outerHaloRect = RectF(
                 cardLeft - spreadPx,
                 cardTop - spreadPx,
                 cardRight + spreadPx,
                 cardBottom + spreadPx
             )
+            val haloBlurPx = ((18f + 60f * blurFrac) * scale).coerceAtLeast(1f)
             val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.STROKE
-                strokeWidth = (15f + 27f * glassUpFactor) * scale
-                color = withAlpha(sideFrostColor, 0.36f * glassUpFactor * glassOpacity)
-                maskFilter = BlurMaskFilter((30f + 72f * glassUpFactor) * scale, BlurMaskFilter.Blur.NORMAL)
+                strokeWidth = (9f + 21f * blurFrac) * scale
+                color = withAlpha(sideFrostColor, 0.20f * blurFrac * blurFrac * glassOpacity)
+                maskFilter = BlurMaskFilter(haloBlurPx, BlurMaskFilter.Blur.NORMAL)
             }
-            canvas.drawRoundRect(outerHaloRect, cornerRadius, cornerRadius, haloPaint)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val savedHalo = canvas.save()
+                canvas.clipOutPath(cardPath)
+                canvas.drawRoundRect(outerHaloRect, cornerRadius, cornerRadius, haloPaint)
+                canvas.restoreToCount(savedHalo)
+            } else {
+                canvas.drawRoundRect(outerHaloRect, cornerRadius, cornerRadius, haloPaint)
+            }
         }
 
         val accentTint = lerpArgb(palette.dominantColor.toArgb(), palette.vibrantColor.toArgb(), 0.18f)
-        val topCardColor = withAlpha(lerpArgb(accentTint, 0xFF16161C.toInt(), 0.42f), topAlpha)
-        val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0C0C10.toInt(), 0.40f), bottomAlpha)
+        val topCardColor = withAlpha(lerpArgb(accentTint, 0xFF16161C.toInt(), 0.44f), topAlpha)
+        val bottomCardColor = withAlpha(lerpArgb(palette.darkMutedColor.toArgb(), 0xFF0C0C10.toInt(), 0.42f), bottomAlpha)
         val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 cardLeft, cardTop, cardLeft, cardBottom,
@@ -384,14 +415,15 @@ object CardShareManager {
         }
         canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
 
-        if (glassUpFactor > 0.01f && glassOpacity > 0.01f) {
+        if (glassBlur > 0.5f && glassOpacity > 0.01f) {
             drawFrostedGlassOverlay(
                 canvas = canvas,
                 cardRect = cardRect,
                 cornerRadius = cornerRadius,
                 albumArt = albumArt,
-                blurRadius = 26f + (14f * glassUpFactor),
-                intensity = glassUpFactor * glassOpacity,
+                blurRadius = glassBlur,
+                blurFrac = blurFrac,
+                glassOpacity = glassOpacity,
                 sideFrostColor = sideFrostColor
             )
         }
@@ -399,7 +431,7 @@ object CardShareManager {
         if (borderAlphaInt > 0) {
             val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.STROKE
-                strokeWidth = 3f + (3.6f * glassUpFactor)
+                strokeWidth = 3.3f + (2.4f * blurFrac)
                 color = AndroidColor.argb(borderAlphaInt, 255, 255, 255)
             }
             canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, borderPaint)
@@ -1169,25 +1201,29 @@ object CardShareManager {
         cornerRadius: Float,
         albumArt: Bitmap?,
         blurRadius: Float,
-        intensity: Float,
+        blurFrac: Float,
+        glassOpacity: Float,
         sideFrostColor: Int
     ) {
-        val clamped = blurRadius.coerceIn(1f, 40f)
-        val drawBmp = albumArt?.let {
+        val clamped = blurRadius.coerceIn(0f, 40f)
+        val layerAlpha = (0.60f * blurFrac * glassOpacity).coerceIn(0f, 1f)
+        val drawBmp = if (clamped > 0.5f && albumArt != null) {
             BitmapBlurUtils.blurBitmap(
-                source = it,
+                source = albumArt,
                 radiusPx = clamped,
                 maxDimension = 220
             )
+        } else {
+            null
         }
         canvas.save()
         val cardClip = Path().apply {
             addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
         }
         canvas.clipPath(cardClip)
-        if (drawBmp != null) {
+        if (drawBmp != null && layerAlpha > 0.01f) {
             val frostedPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-                alpha = (255f * 0.56f * intensity.coerceIn(0f, 1f)).roundToInt().coerceIn(0, 255)
+                alpha = (255f * layerAlpha).roundToInt().coerceIn(0, 255)
             }
             drawCenterCroppedBitmap(
                 canvas = canvas,
@@ -1195,61 +1231,37 @@ object CardShareManager {
                 destRect = cardRect,
                 paint = frostedPaint
             )
+            val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    cardRect.left, cardRect.top, cardRect.left, cardRect.bottom,
+                    intArrayOf(
+                        AndroidColor.argb((255f * 0.34f * blurFrac * layerAlpha).roundToInt().coerceIn(0, 255), 0, 0, 0),
+                        AndroidColor.argb((255f * 0.42f * blurFrac * layerAlpha).roundToInt().coerceIn(0, 255), 0, 0, 0),
+                        AndroidColor.argb((255f * 0.50f * blurFrac * layerAlpha).roundToInt().coerceIn(0, 255), 0, 0, 0)
+                    ),
+                    floatArrayOf(0f, 0.5f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(cardRect, scrimPaint)
         }
-        val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                cardRect.left, cardRect.top, cardRect.left, cardRect.bottom,
-                intArrayOf(
-                    AndroidColor.argb((158f * intensity).roundToInt().coerceIn(0, 255), 14, 14, 18),
-                    AndroidColor.argb((178f * intensity).roundToInt().coerceIn(0, 255), 12, 12, 16),
-                    AndroidColor.argb((198f * intensity).roundToInt().coerceIn(0, 255), 10, 10, 14)
-                ),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(cardRect, scrimPaint)
 
-        // Left & right card side frosted gradient
-        val sideH = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                cardRect.left, cardRect.top, cardRect.right, cardRect.top,
-                intArrayOf(
-                    withAlpha(sideFrostColor, 0.28f * intensity),
-                    withAlpha(sideFrostColor, 0.05f * intensity),
-                    withAlpha(sideFrostColor, 0.05f * intensity),
-                    withAlpha(sideFrostColor, 0.28f * intensity)
-                ),
-                floatArrayOf(0f, 0.18f, 0.82f, 1f),
-                Shader.TileMode.CLAMP
-            )
+        // Uniform diagonal frosted glass sheen across the entire card (no side-only dark/bright bands)
+        if (blurFrac > 0.02f && glassOpacity > 0.01f) {
+            val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    cardRect.left, cardRect.top, cardRect.right, cardRect.bottom,
+                    intArrayOf(
+                        withAlpha(sideFrostColor, 0.14f * blurFrac * glassOpacity),
+                        withAlpha(AndroidColor.WHITE, 0.04f * blurFrac * glassOpacity),
+                        withAlpha(sideFrostColor, 0.10f * blurFrac * glassOpacity)
+                    ),
+                    floatArrayOf(0f, 0.5f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+            canvas.drawRect(cardRect, sheenPaint)
         }
-        canvas.drawRect(cardRect, sideH)
-
-        // Top & bottom edge frosted gradient
-        val sideV = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                cardRect.left, cardRect.top, cardRect.left, cardRect.bottom,
-                intArrayOf(
-                    withAlpha(AndroidColor.WHITE, 0.20f * intensity),
-                    withAlpha(AndroidColor.WHITE, 0.02f * intensity),
-                    withAlpha(AndroidColor.WHITE, 0.02f * intensity),
-                    withAlpha(AndroidColor.WHITE, 0.18f * intensity)
-                ),
-                floatArrayOf(0f, 0.15f, 0.85f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(cardRect, sideV)
-
-        // Soft blurred inner perimeter glow along all 4 card sides
-        val innerRimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 21f + 33f * intensity
-            color = withAlpha(AndroidColor.WHITE, 0.28f * intensity)
-            maskFilter = BlurMaskFilter(21f + 42f * intensity, BlurMaskFilter.Blur.NORMAL)
-        }
-        canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, innerRimPaint)
         canvas.restore()
 
         if (drawBmp != null && drawBmp !== albumArt && !drawBmp.isRecycled) {

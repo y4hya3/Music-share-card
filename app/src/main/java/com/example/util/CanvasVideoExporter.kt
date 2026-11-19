@@ -546,7 +546,13 @@ object CanvasVideoExporter {
             val minDurUs = if (waveformSpec != null) WAVEFORM_LOOP_DURATION_US else MIN_LOOP_DURATION_US
             val shouldLoopShortVideo = sourceDurationUs in 1L until minDurUs
             val targetDurationUs = when {
-                waveformSpec != null -> WAVEFORM_LOOP_DURATION_US
+                waveformSpec != null -> {
+                    if (sourceDurationUs > 0L) {
+                        max(WAVEFORM_LOOP_DURATION_US, sourceDurationUs.coerceAtMost(MAX_EXPORT_DURATION_US))
+                    } else {
+                        WAVEFORM_LOOP_DURATION_US
+                    }
+                }
                 shouldLoopShortVideo -> MIN_LOOP_DURATION_US
                 else -> MAX_EXPORT_DURATION_US
             }
@@ -784,6 +790,7 @@ object CanvasVideoExporter {
         private val waveformBitmap: Bitmap?
         private val waveformCanvas: Canvas?
         private val waveformBarPaint: Paint?
+        private val barRect = RectF()
         private val cropScaleX: Float
         private val cropScaleY: Float
 
@@ -894,7 +901,6 @@ object CanvasVideoExporter {
             drawQuad(oesPosHandle, oesTexHandle, videoQuadBuffer)
 
             drawForegroundAndWaveform(timeSec)
-            GLES20.glFinish()
         }
 
         fun drawStaticFrame(timeSec: Float) {
@@ -909,7 +915,6 @@ object CanvasVideoExporter {
             drawQuad(quadPosHandle, quadTexHandle, overlayQuadBuffer)
 
             drawForegroundAndWaveform(timeSec)
-            GLES20.glFinish()
         }
 
         private fun drawForegroundAndWaveform(timeSec: Float) {
@@ -975,8 +980,9 @@ object CanvasVideoExporter {
                 val barH = max(barW, maxBarH * frac)
                 val left = padX + i * (barW + gap)
                 val top = cy - barH / 2f
+                barRect.set(left, top, left + barW, top + barH)
                 canvas.drawRoundRect(
-                    RectF(left, top, left + barW, top + barH),
+                    barRect,
                     corner,
                     corner,
                     paint

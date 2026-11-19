@@ -73,6 +73,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,6 +83,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -124,6 +126,7 @@ import com.example.ui.components.SettingsDialog
 import com.example.ui.components.ShareActionsBar
 import com.example.ui.components.TransparentEditorCheckerboard
 import com.example.util.CardShareManager
+import com.example.util.DevicePerformanceTier
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -197,6 +200,20 @@ fun BitChordShareScreen(
         )
     }
 
+    // During Card Size drag, scale purely on GPU without triggering 60fps text/shape/BlurMaskFilter re-layouts
+    val stageRenderStyleConfig = remember(effectiveStyleConfig, dragCardScale, persistedStyleConfig.cardScale) {
+        if (dragCardScale != null) {
+            effectiveStyleConfig.copy(cardScale = persistedStyleConfig.cardScale)
+        } else {
+            effectiveStyleConfig
+        }
+    }
+    val dragScaleRatio = if (dragCardScale != null && persistedStyleConfig.cardScale > 0.01f) {
+        (dragCardScale!! / persistedStyleConfig.cardScale).coerceIn(0.45f, 2.1f)
+    } else {
+        1f
+    }
+
     val showBgBlurTab = !effectiveStyleConfig.useTransparentBackground &&
         (effectiveStyleConfig.useBlurredAlbumBackground || !activeCanvasUrl.isNullOrBlank())
     val showCardBlurTab = effectiveStyleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD
@@ -215,7 +232,7 @@ fun BitChordShareScreen(
     }
 
     val isLiveScrubbingCard = liveScrubTarget != LiveScrubTarget.NONE
-    val chromeAlpha by animateFloatAsState(
+    val chromeAlphaState: State<Float> = animateFloatAsState(
         targetValue = if (isLiveScrubbingCard) 0f else 1f,
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "live_scrub_chrome_alpha"
@@ -403,7 +420,10 @@ fun BitChordShareScreen(
 
         val fitProgress by animateFloatAsState(
             targetValue = if (effectiveStyleConfig.isFitToScreenPreview) 1f else 0f,
-            animationSpec = tween(durationMillis = 260, easing = EaseInOut),
+            animationSpec = spring(
+                dampingRatio = 0.88f,
+                stiffness = Spring.StiffnessMedium
+            ),
             label = "preview_scale_fit_progress"
         )
 
@@ -481,8 +501,8 @@ fun BitChordShareScreen(
                         .graphicsLayer {
                             val ent = stageEntrance.value
                             val entScale = 0.94f + 0.06f * ent
-                            scaleX = cardZoom * entScale
-                            scaleY = cardZoom * entScale
+                            scaleX = cardZoom * entScale * dragScaleRatio
+                            scaleY = cardZoom * entScale * dragScaleRatio
                             translationY = (1f - ent) * 28.dp.toPx()
                             alpha = ent
                         },
@@ -491,7 +511,7 @@ fun BitChordShareScreen(
                     MusicStoryCard(
                         track = currentTrack,
                         palette = palette,
-                        styleConfig = effectiveStyleConfig,
+                        styleConfig = stageRenderStyleConfig,
                         maxCardWidth = 340.dp,
                         maxArtSize = 310.dp,
                         modifier = Modifier.testTag("center_story_card")
@@ -582,15 +602,15 @@ fun BitChordShareScreen(
                                         modifier = Modifier
                                             .requiredSize(width = 360.dp, height = 640.dp)
                                             .graphicsLayer {
-                                                scaleX = paneCardZoom
-                                                scaleY = paneCardZoom
+                                                scaleX = paneCardZoom * dragScaleRatio
+                                                scaleY = paneCardZoom * dragScaleRatio
                                             },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         MusicStoryCard(
                                             track = currentTrack,
                                             palette = palette,
-                                            styleConfig = effectiveStyleConfig,
+                                            styleConfig = stageRenderStyleConfig,
                                             maxCardWidth = 340.dp,
                                             maxArtSize = 310.dp,
                                             modifier = Modifier.testTag("center_story_card")
@@ -603,15 +623,15 @@ fun BitChordShareScreen(
                                 MusicStoryCard(
                                     track = currentTrack,
                                     palette = palette,
-                                    styleConfig = effectiveStyleConfig,
+                                    styleConfig = stageRenderStyleConfig,
                                     maxCardWidth = adaptiveCardMax,
                                     maxArtSize = adaptiveArtMax,
                                     modifier = Modifier
                                         .graphicsLayer {
                                             val ent = stageEntrance.value
                                             val entScale = 0.94f + 0.06f * ent
-                                            scaleX = entScale
-                                            scaleY = entScale
+                                            scaleX = entScale * dragScaleRatio
+                                            scaleY = entScale * dragScaleRatio
                                             translationY = (1f - ent) * 24.dp.toPx()
                                             alpha = ent
                                         }
@@ -642,7 +662,7 @@ fun BitChordShareScreen(
                                 compactTitle = true,
                                 modifier = Modifier.graphicsLayer {
                                     val cEnt = chromeEntrance.value
-                                    alpha = chromeAlpha * cEnt
+                                    alpha = chromeAlphaState.value * cEnt
                                     translationY = -(1f - cEnt) * 14.dp.toPx()
                                 }
                             )
@@ -657,7 +677,7 @@ fun BitChordShareScreen(
                                 onRefreshClick = { handleRefreshClick() },
                                 modifier = Modifier.graphicsLayer {
                                     val cEnt = chromeEntrance.value
-                                    alpha = chromeAlpha * cEnt
+                                    alpha = chromeAlphaState.value * cEnt
                                 }
                             )
 
@@ -671,7 +691,7 @@ fun BitChordShareScreen(
                                 cardBlurRadiusPx = effectiveStyleConfig.cardBlurRadius,
                                 cardScale = effectiveStyleConfig.cardScale,
                                 cardOpacity = effectiveStyleConfig.cardOpacity,
-                                chromeAlpha = chromeAlpha,
+                                chromeAlphaState = chromeAlphaState,
                                 activeScrubTarget = liveScrubTarget,
                                 onBlurChange = { newRadius ->
                                     dragBlurRadius = newRadius.coerceIn(0f, 40f)
@@ -812,7 +832,7 @@ fun BitChordShareScreen(
                                     }
                                 },
                                 modifier = Modifier
-                                    .graphicsLayer { alpha = chromeAlpha }
+                                    .graphicsLayer { alpha = chromeAlphaState.value }
                                     .testTag("bottom_share_actions_bar")
                             )
                         }
@@ -836,7 +856,7 @@ fun BitChordShareScreen(
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                                 .graphicsLayer {
                                     val cEnt = chromeEntrance.value
-                                    alpha = chromeAlpha * cEnt
+                                    alpha = chromeAlphaState.value * cEnt
                                     translationY = -(1f - cEnt) * 14.dp.toPx()
                                 }
                         )
@@ -851,7 +871,7 @@ fun BitChordShareScreen(
                                 .widthIn(max = if (isPortraitTablet) 560.dp else 600.dp)
                                 .padding(horizontal = 20.dp, vertical = 4.dp)
                                 .graphicsLayer {
-                                    alpha = chromeAlpha * chromeEntrance.value
+                                    alpha = chromeAlphaState.value * chromeEntrance.value
                                 }
                         )
 
@@ -876,7 +896,7 @@ fun BitChordShareScreen(
                             cardBlurRadiusPx = effectiveStyleConfig.cardBlurRadius,
                             cardScale = effectiveStyleConfig.cardScale,
                             cardOpacity = effectiveStyleConfig.cardOpacity,
-                            chromeAlpha = chromeAlpha,
+                            chromeAlphaState = chromeAlphaState,
                             activeScrubTarget = liveScrubTarget,
                             onBlurChange = { newRadius ->
                                 dragBlurRadius = newRadius.coerceIn(0f, 40f)
@@ -1024,7 +1044,7 @@ fun BitChordShareScreen(
                             modifier = Modifier
                                 .graphicsLayer {
                                     val cEnt = chromeEntrance.value
-                                    alpha = chromeAlpha * cEnt
+                                    alpha = chromeAlphaState.value * cEnt
                                     translationY = (1f - cEnt) * 24.dp.toPx()
                                 }
                                 .testTag("bottom_share_actions_bar")
@@ -1126,25 +1146,33 @@ private fun CleanExportPreviewDialog(
     onShareClick: () -> Unit
 ) {
     val context = LocalContext.current
+    val tier = DevicePerformanceTier.rememberDeviceTier()
     var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showHud by remember { mutableStateOf(true) }
     val hasAnimatedCanvas = !activeCanvasVideoUrl.isNullOrBlank() && !styleConfig.useTransparentBackground
     val hasAnimatedWaveform = styleConfig.cardLayoutType == CardLayoutType.SPOTIFY_INNER_CARD &&
         styleConfig.enableWaveform
 
-    LaunchedEffect(track, palette, styleConfig, activeCanvasVideoUrl) {
+    LaunchedEffect(track, palette, styleConfig, activeCanvasVideoUrl, tier.previewMaxWidth) {
         val rendered = if (hasAnimatedCanvas || hasAnimatedWaveform) {
             CardShareManager.generateTransparentCardOverlayBitmap(
                 context = context,
                 track = track,
                 palette = palette,
                 styleConfig = styleConfig,
-                targetWidth = 1080,
-                targetHeight = 1920,
+                targetWidth = tier.previewMaxWidth,
+                targetHeight = tier.previewMaxHeight,
                 includeWaveform = !hasAnimatedWaveform
             )
         } else {
-            CardShareManager.generateStoryBitmap(context, track, palette, styleConfig)
+            CardShareManager.generateStoryBitmap(
+                context = context,
+                track = track,
+                palette = palette,
+                styleConfig = styleConfig,
+                targetWidth = tier.previewMaxWidth,
+                targetHeight = tier.previewMaxHeight
+            )
         }
         val previous = previewBitmap
         previewBitmap = rendered
@@ -1176,6 +1204,11 @@ private fun CleanExportPreviewDialog(
             contentAlignment = Alignment.Center
         ) {
             val bmp = previewBitmap
+            val previewFadeState: State<Float> = animateFloatAsState(
+                targetValue = if (bmp != null && !bmp.isRecycled) 1f else 0f,
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
+                label = "export_preview_fade"
+            )
             if (hasAnimatedCanvas || hasAnimatedWaveform) {
                 BoxWithConstraints(
                     modifier = Modifier
@@ -1194,7 +1227,7 @@ private fun CleanExportPreviewDialog(
                         BlurredAlbumBackground(
                             track = track,
                             palette = palette,
-                            styleConfig = styleConfig,
+                            styleConfig = styleConfig.copy(darkOverlayAlpha = 0f),
                             activeCanvasVideoUrl = null,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -1212,7 +1245,9 @@ private fun CleanExportPreviewDialog(
                                 contentDescription = "Animated 9:16 Export Preview",
                                 contentScale = ContentScale.FillBounds,
                                 filterQuality = FilterQuality.High,
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer { alpha = previewFadeState.value }
                             )
                         }
                         if (hasAnimatedWaveform) {
@@ -1272,7 +1307,9 @@ private fun CleanExportPreviewDialog(
                             contentDescription = "Share Card 9:16 Export Preview",
                             contentScale = ContentScale.FillBounds,
                             filterQuality = FilterQuality.High,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .graphicsLayer { alpha = previewFadeState.value }
                         )
                     }
                 }
@@ -1586,7 +1623,7 @@ private fun QuickControlSliderPill(
     cardBlurRadiusPx: Float,
     cardScale: Float,
     cardOpacity: Float,
-    chromeAlpha: Float,
+    chromeAlphaState: State<Float>,
     activeScrubTarget: LiveScrubTarget,
     onBlurChange: (Float) -> Unit,
     onBlurScrubChange: (Boolean) -> Unit,
@@ -1605,8 +1642,7 @@ private fun QuickControlSliderPill(
     val isScrubbing = activeScrubTarget != LiveScrubTarget.NONE
     val effectiveTab = if (activeTab in visibleTabs) activeTab else (visibleTabs.firstOrNull() ?: QuickControlTab.SIZE)
 
-    val pillShape = RoundedCornerShape(18.dp)
-    val pillBgAlpha by animateFloatAsState(
+    val pillBgAlphaState: State<Float> = animateFloatAsState(
         targetValue = if (isScrubbing) 0.14f else 0.46f,
         animationSpec = tween(durationMillis = 200, easing = EaseInOut),
         label = "quick_pill_bg_alpha"
@@ -1649,12 +1685,23 @@ private fun QuickControlSliderPill(
 
     Column(
         modifier = modifier
-            .background(Color.Black.copy(alpha = pillBgAlpha), pillShape)
-            .border(
-                width = 1.dp,
-                color = Color.White.copy(alpha = if (isScrubbing) 0.06f else 0.14f),
-                shape = pillShape
-            )
+            .drawBehind {
+                val radiusPx = 18.dp.toPx()
+                val cr = CornerRadius(radiusPx, radiusPx)
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = pillBgAlphaState.value.coerceIn(0f, 1f)),
+                    cornerRadius = cr
+                )
+                val borderAlpha = 0.06f + 0.08f * chromeAlphaState.value.coerceIn(0f, 1f)
+                val strokePx = 1.dp.toPx()
+                drawRoundRect(
+                    color = Color.White.copy(alpha = borderAlpha),
+                    topLeft = Offset(strokePx / 2f, strokePx / 2f),
+                    size = Size(size.width - strokePx, size.height - strokePx),
+                    cornerRadius = cr,
+                    style = Stroke(width = strokePx)
+                )
+            }
             .padding(horizontal = 14.dp, vertical = 8.dp)
             .testTag("external_blur_control_container")
     ) {
@@ -1668,7 +1715,7 @@ private fun QuickControlSliderPill(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .weight(1f, fill = false)
-                    .graphicsLayer { alpha = chromeAlpha }
+                    .graphicsLayer { alpha = chromeAlphaState.value }
             ) {
                 visibleTabs.forEach { tab ->
                     val selected = tab == effectiveTab

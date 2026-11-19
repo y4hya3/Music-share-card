@@ -706,6 +706,11 @@ fun SettingsDialog(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 4. ECHOSNAP FOLDER BACKUP (EXPORT / IMPORT / RESET)
+                EchoSnapBackupSectionCard(styleConfig = styleConfig)
             }
         }
     }

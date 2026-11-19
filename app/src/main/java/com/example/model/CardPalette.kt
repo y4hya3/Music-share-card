@@ -1,11 +1,13 @@
 package com.example.model
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 
 /**
  * Colors extracted from album artwork using AndroidX Palette.
  */
+@Immutable
 data class CardPalette(
     val vibrantColor: Color = Color(0xFFE50914),
     val darkMutedColor: Color = Color(0xFF191414),

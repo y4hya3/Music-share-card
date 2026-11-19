@@ -8,6 +8,8 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+val buildAbiSplits = providers.gradleProperty("abiSplit").orNull == "true"
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -16,10 +18,21 @@ android {
     applicationId = "com.aistudio.bitchord.app"
     minSdk = 24
     targetSdk = 35
-    versionCode = 6
-    versionName = "1.3.0"
+    versionCode = 10
+    versionName = "1.5.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  if (buildAbiSplits) {
+    splits {
+      abi {
+        isEnable = true
+        reset()
+        include("armeabi-v7a", "arm64-v8a")
+        isUniversalApk = true
+      }
+    }
   }
 
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
@@ -43,7 +56,8 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
@@ -166,7 +180,8 @@ abstract class SyncDistApksTask : DefaultTask() {
 }
 
 val syncDistApks = tasks.register<SyncDistApksTask>("syncDistApks") {
-  sourceApk.set(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+  val apkName = if (buildAbiSplits) "app-universal-debug.apk" else "app-debug.apk"
+  sourceApk.set(layout.buildDirectory.file("outputs/apk/debug/$apkName"))
   rootApk.set(rootProject.layout.projectDirectory.file("BitChord.apk"))
   publicApk.set(rootProject.layout.projectDirectory.file("public/BitChord.apk"))
 }
