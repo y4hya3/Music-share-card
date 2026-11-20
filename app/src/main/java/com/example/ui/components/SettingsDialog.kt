@@ -1,8 +1,15 @@
 package com.example.ui.components
 
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +17,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -20,13 +28,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -34,31 +45,60 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.graphics.toArgb
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import coil.compose.AsyncImage
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
+import com.example.model.LiveWallpaperMode
 import com.example.model.MediaTrackInfo
+import com.example.repository.MediaNotificationRepository
+import com.example.repository.SavedMediaLibrary
+import com.example.service.EchoSnapLiveWallpaperService
 import com.example.service.MusicNotificationListenerService
 import com.example.ui.SpotifyLoginActivity
 import com.example.util.AudioBeatMonitor
+import com.example.util.BitmapBlurUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private val SettingsGlassFill = Color(0x16FFFFFF)
 private val SettingsGlassBorder = Color(0x28FFFFFF)
@@ -80,14 +120,59 @@ fun SettingsDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val coroutineScope = rememberCoroutineScope()
     val hasMicPerm = remember(styleConfig.waveformBeatSync) {
         AudioBeatMonitor.hasRecordAudioPermission(context)
     }
+    var isSystemWallpaperActive by remember {
+        mutableStateOf(EchoSnapLiveWallpaperService.isLiveWallpaperActive(context))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isSystemWallpaperActive = EchoSnapLiveWallpaperService.isLiveWallpaperActive(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
     var localSpeed by remember(styleConfig.waveformSpeedMultiplier) {
         mutableFloatStateOf(styleConfig.waveformSpeedMultiplier.coerceIn(0.4f, 2.5f))
     }
     var localForce by remember(styleConfig.waveformForce) {
         mutableFloatStateOf(styleConfig.waveformForce.coerceIn(0.5f, 2.2f))
+    }
+    var localWallpaperBlur by remember(styleConfig.liveWallpaperBlurRadius) {
+        mutableFloatStateOf(styleConfig.liveWallpaperBlurRadius.coerceIn(0f, 40f))
+    }
+    var localEdgeBlurFade by remember(styleConfig.liveWallpaperEdgeBlurFade) {
+        mutableFloatStateOf(styleConfig.liveWallpaperEdgeBlurFade.coerceIn(0f, 1f))
+    }
+    var idleDelaySecondsInput by remember(styleConfig.liveWallpaperIdleDelaySec) {
+        mutableStateOf(styleConfig.liveWallpaperIdleDelaySec.coerceIn(1, 86_400).toString())
+    }
+    val idlePhotoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { pickedUri ->
+        if (pickedUri != null) {
+            coroutineScope.launch {
+                val savedPath = SavedMediaLibrary.saveWallpaperIdlePhotoFromUri(context, pickedUri)
+                if (savedPath != null) {
+                    val latest = MediaNotificationRepository.styleConfig.value
+                    onStyleChange(
+                        latest.copy(
+                            liveWallpaperIdlePhotoPath = savedPath,
+                            liveWallpaperIdleRevertEnabled = true
+                        )
+                    )
+                    MediaNotificationRepository.flushStylePreferences()
+                } else {
+                    Toast.makeText(context, "Could not load selected photo", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     Dialog(
@@ -502,7 +587,544 @@ fun SettingsDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // 2. LYRICS PICKER MODE
+                // 2. LIVE WALLPAPER (CONTROLLED HERE IN SETTINGS GEAR)
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = SettingsGlassFill,
+                    border = BorderStroke(1.dp, SettingsGlassBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Live Wallpaper",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = when {
+                                        !styleConfig.liveWallpaperEnabled ->
+                                            "Off — turn on for dynamic music home & lock screen"
+                                        isSystemWallpaperActive ->
+                                            "Active on Home / Lock screen • Auto-matches albums & songs"
+                                        else ->
+                                            "Enabled — tap Apply below to set as system wallpaper"
+                                    },
+                                    color = Color.White.copy(alpha = 0.65f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.liveWallpaperEnabled,
+                                onCheckedChange = { enabled ->
+                                    onStyleChange(styleConfig.copy(liveWallpaperEnabled = enabled))
+                                    MediaNotificationRepository.flushStylePreferences()
+                                    if (enabled) {
+                                        MediaNotificationRepository.triggerWallpaperMediaSync(
+                                            context = context,
+                                            forceCanvasRetry = true
+                                        )
+                                        if (!EchoSnapLiveWallpaperService.isLiveWallpaperActive(context)) {
+                                            EchoSnapLiveWallpaperService.openLiveWallpaperSetter(context)
+                                        }
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFF1DB954)
+                                ),
+                                modifier = Modifier.testTag("settings_live_wallpaper_switch")
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Surface(
+                            onClick = {
+                                if (!styleConfig.liveWallpaperEnabled) {
+                                    onStyleChange(styleConfig.copy(liveWallpaperEnabled = true))
+                                    MediaNotificationRepository.flushStylePreferences()
+                                    MediaNotificationRepository.triggerWallpaperMediaSync(
+                                        context = context,
+                                        forceCanvasRetry = true
+                                    )
+                                }
+                                EchoSnapLiveWallpaperService.openLiveWallpaperSetter(context)
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSystemWallpaperActive) Color(0x331DB954) else Color(0x33FF2B44),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSystemWallpaperActive) Color(0x661DB954) else Color(0x77FF2B44)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_live_wallpaper_apply_button")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (isSystemWallpaperActive) Color(0xFF1DB954) else Color(0xFFFF2B44)
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = if (isSystemWallpaperActive) {
+                                            "EchoSnap Wallpaper Active"
+                                        } else {
+                                            "Set as System Live Wallpaper"
+                                        },
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                                Text(
+                                    text = if (isSystemWallpaperActive) "Preview" else "Apply",
+                                    color = if (isSystemWallpaperActive) Color(0xFF9BE7B3) else Color(0xFFFF8A96),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = "Wallpaper Source Mode",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val isCanvasMode = styleConfig.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(liveWallpaperMode = LiveWallpaperMode.ANIMATED_CANVAS)
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                    MediaNotificationRepository.triggerWallpaperMediaSync(
+                                        context = context,
+                                        forceCanvasRetry = true
+                                    )
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isCanvasMode) Color(0xFF1DB954) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isCanvasMode) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_mode_canvas")
+                            ) {
+                                Text(
+                                    text = "Animated Canvas",
+                                    color = if (isCanvasMode) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isCanvasMode) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(liveWallpaperMode = LiveWallpaperMode.ARTWORK_ONLY)
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (!isCanvasMode) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (!isCanvasMode) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_mode_artwork")
+                            ) {
+                                Text(
+                                    text = "Artwork Only",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (!isCanvasMode) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = if (styleConfig.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS) {
+                                "Shows high-res artwork cleanly until an animated canvas matches (online or saved)."
+                            } else {
+                                "Always renders high-res saved album cover or notification artwork with 0% video overhead."
+                            },
+                            color = Color.White.copy(alpha = 0.56f),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        LiveWallpaperMiniPreview(
+                            track = currentTrack,
+                            palette = palette,
+                            centerBlurPx = localWallpaperBlur,
+                            edgeBlurFade = localEdgeBlurFade,
+                            showCard = styleConfig.liveWallpaperShowCard,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_live_wallpaper_mini_preview")
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Wallpaper Blur",
+                                color = Color.White.copy(alpha = 0.88f),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = "${localWallpaperBlur.roundToInt()}px",
+                                color = Color(0xFFFF8A96),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testTag("settings_live_wallpaper_blur_value")
+                            )
+                        }
+                        Slider(
+                            value = localWallpaperBlur,
+                            onValueChange = { next ->
+                                val clamped = next.coerceIn(0f, 40f)
+                                localWallpaperBlur = clamped
+                                onStyleChange(styleConfig.copy(liveWallpaperBlurRadius = clamped))
+                            },
+                            onValueChangeFinished = {
+                                MediaNotificationRepository.flushStylePreferences()
+                            },
+                            valueRange = 0f..40f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White,
+                                activeTrackColor = Color(0xFFFF2B44),
+                                inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                            ),
+                            modifier = Modifier.testTag("settings_live_wallpaper_blur_slider")
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text(
+                                    text = "Top & Bottom Edge Blur",
+                                    color = Color.White.copy(alpha = 0.88f),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "Frosts top clock & bottom dock while keeping middle clear",
+                                    color = Color.White.copy(alpha = 0.55f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                            Text(
+                                text = "${(localEdgeBlurFade * 100f).roundToInt()}%",
+                                color = Color(0xFF9BE7B3),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testTag("settings_live_wallpaper_edge_value")
+                            )
+                        }
+                        Slider(
+                            value = localEdgeBlurFade,
+                            onValueChange = { next ->
+                                val clamped = next.coerceIn(0f, 1f)
+                                localEdgeBlurFade = clamped
+                                onStyleChange(styleConfig.copy(liveWallpaperEdgeBlurFade = clamped))
+                            },
+                            onValueChangeFinished = {
+                                MediaNotificationRepository.flushStylePreferences()
+                            },
+                            valueRange = 0f..1f,
+                            colors = SliderDefaults.colors(
+                                thumbColor = Color.White,
+                                activeTrackColor = Color(0xFF1DB954),
+                                inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                            ),
+                            modifier = Modifier.testTag("settings_live_wallpaper_edge_slider")
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Show Music Card on Wallpaper",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "Display your EchoSnap music card centered on wallpaper",
+                                    color = Color.White.copy(alpha = 0.60f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.liveWallpaperShowCard,
+                                onCheckedChange = { showCard ->
+                                    onStyleChange(styleConfig.copy(liveWallpaperShowCard = showCard))
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFFFF2B44)
+                                ),
+                                modifier = Modifier.testTag("settings_live_wallpaper_show_card_switch")
+                            )
+                        }
+
+                        HorizontalDivider(
+                            color = Color.White.copy(alpha = 0.10f),
+                            modifier = Modifier.padding(vertical = 12.dp)
+                        )
+
+                        // When Song Stops -> Switch to Library Photo (or disable to keep last Canvas/Artwork)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Standby Photo When Song Stops",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (!styleConfig.liveWallpaperIdleRevertEnabled) {
+                                        "Disabled — stays on last Animated Canvas or Artwork"
+                                    } else if (styleConfig.liveWallpaperIdlePhotoPath.isBlank()) {
+                                        "Pick a photo from your library below"
+                                    } else {
+                                        "Switches to your photo ${styleConfig.liveWallpaperIdleDelaySec}s after music stops"
+                                    },
+                                    color = Color.White.copy(alpha = 0.62f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.liveWallpaperIdleRevertEnabled,
+                                onCheckedChange = { enabled ->
+                                    if (enabled && styleConfig.liveWallpaperIdlePhotoPath.isBlank()) {
+                                        idlePhotoPickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    } else {
+                                        onStyleChange(styleConfig.copy(liveWallpaperIdleRevertEnabled = enabled))
+                                        MediaNotificationRepository.flushStylePreferences()
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFF1DB954)
+                                ),
+                                modifier = Modifier.testTag("settings_live_wallpaper_idle_switch")
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        val hasIdlePhoto = styleConfig.liveWallpaperIdlePhotoPath.isNotBlank() &&
+                            File(styleConfig.liveWallpaperIdlePhotoPath).exists()
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (hasIdlePhoto) {
+                                AsyncImage(
+                                    model = File(styleConfig.liveWallpaperIdlePhotoPath),
+                                    contentDescription = "Standby wallpaper photo preview",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .border(1.dp, SettingsGlassBorder, RoundedCornerShape(10.dp))
+                                )
+                            }
+                            Surface(
+                                onClick = {
+                                    idlePhotoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.White.copy(alpha = 0.11f),
+                                border = BorderStroke(1.dp, SettingsGlassBorder),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_idle_pick_photo")
+                            ) {
+                                Text(
+                                    text = if (hasIdlePhoto) "Change Library Photo" else "Add Photo from Library",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp)
+                                )
+                            }
+                            if (hasIdlePhoto) {
+                                Surface(
+                                    onClick = {
+                                        SavedMediaLibrary.deleteWallpaperIdlePhoto(
+                                            context,
+                                            styleConfig.liveWallpaperIdlePhotoPath
+                                        )
+                                        onStyleChange(
+                                            styleConfig.copy(
+                                                liveWallpaperIdlePhotoPath = "",
+                                                liveWallpaperIdleRevertEnabled = false
+                                            )
+                                        )
+                                        MediaNotificationRepository.flushStylePreferences()
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0x33FF2B44),
+                                    border = BorderStroke(1.dp, Color(0x66FF2B44)),
+                                    modifier = Modifier.testTag("settings_live_wallpaper_idle_remove_photo")
+                                ) {
+                                    Text(
+                                        text = "Remove",
+                                        color = Color(0xFFFF8A96),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text(
+                            text = "Switch Delay (seconds, max 86400s)",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(5, 60).forEach { sec ->
+                                val selected = styleConfig.liveWallpaperIdleDelaySec == sec
+                                Surface(
+                                    onClick = {
+                                        idleDelaySecondsInput = sec.toString()
+                                        onStyleChange(styleConfig.copy(liveWallpaperIdleDelaySec = sec))
+                                        MediaNotificationRepository.flushStylePreferences()
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) Color(0xFF1DB954) else Color.White.copy(alpha = 0.09f),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) Color.Transparent else SettingsGlassBorder
+                                    ),
+                                    modifier = Modifier.testTag("settings_live_wallpaper_idle_${sec}s")
+                                ) {
+                                    Text(
+                                        text = "${sec}s",
+                                        color = if (selected) Color.Black else Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                                    )
+                                }
+                            }
+
+                            OutlinedTextField(
+                                value = idleDelaySecondsInput,
+                                onValueChange = { raw ->
+                                    val digitsOnly = raw.filter { it.isDigit() }.take(5)
+                                    idleDelaySecondsInput = digitsOnly
+                                    val parsed = digitsOnly.toIntOrNull()
+                                    if (parsed != null) {
+                                        val clamped = parsed.coerceIn(1, 86_400)
+                                        if (parsed > 86_400) {
+                                            idleDelaySecondsInput = clamped.toString()
+                                        }
+                                        onStyleChange(styleConfig.copy(liveWallpaperIdleDelaySec = clamped))
+                                    }
+                                },
+                                singleLine = true,
+                                placeholder = {
+                                    Text("Sec (1-86400)", color = Color.White.copy(alpha = 0.42f), fontSize = 12.sp)
+                                },
+                                suffix = {
+                                    Text("sec", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+                                },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White,
+                                    focusedBorderColor = Color(0xFF1DB954),
+                                    unfocusedBorderColor = SettingsGlassBorder,
+                                    cursorColor = Color(0xFF1DB954)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_idle_seconds_input")
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 3. LYRICS PICKER MODE
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = SettingsGlassFill,
@@ -711,6 +1333,288 @@ fun SettingsDialog(
 
                 // 4. ECHOSNAP FOLDER BACKUP (EXPORT / IMPORT / RESET)
                 EchoSnapBackupSectionCard(styleConfig = styleConfig)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LiveWallpaperMiniPreview(
+    track: MediaTrackInfo,
+    palette: CardPalette,
+    centerBlurPx: Float,
+    edgeBlurFade: Float,
+    showCard: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val art = track.albumArt
+    val centerNorm = (centerBlurPx / 40f).coerceIn(0f, 1f)
+    val edgeFade = edgeBlurFade.coerceIn(0f, 1f)
+
+    // Precompute compact preview mipmaps once per track artwork so scrubbing BOTH sliders runs at 60fps
+    val mipImages by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
+        initialValue = null,
+        key1 = art
+    ) {
+        value = if (art != null && !art.isRecycled) {
+            withContext(Dispatchers.Default) {
+                BitmapBlurUtils.computeBlurMipPyramid(
+                    source = art,
+                    lowDim = 128,
+                    midDim = 76,
+                    highDim = 42
+                )?.let { (low, mid, high) ->
+                    Triple(low.asImageBitmap(), mid.asImageBitmap(), high.asImageBitmap())
+                }
+            }
+        } else {
+            null
+        }
+    }
+    val sharpPreviewBmp = remember(art) {
+        art?.takeIf { !it.isRecycled }
+            ?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = 180)?.asImageBitmap() }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color.Black.copy(alpha = 0.34f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
+        modifier = modifier
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Miniature 9:16 Phone Wallpaper Frame
+            Box(
+                modifier = Modifier
+                    .width(74.dp)
+                    .height(132.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(palette.vibrantColor.copy(alpha = 0.85f), Color(0xFF0D0F18))
+                        )
+                    )
+            ) {
+                // 1. Center Wallpaper Layer (uniform center blur 0..40px)
+                if (sharpPreviewBmp != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        Image(
+                            bitmap = sharpPreviewBmp,
+                            contentDescription = "Wallpaper center blur preview",
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.Medium,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (centerBlurPx > 0.4f) {
+                                        Modifier.blur(
+                                            radius = (centerBlurPx * 0.36f).dp,
+                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        )
+                    } else {
+                        Image(
+                            bitmap = sharpPreviewBmp,
+                            contentDescription = "Wallpaper center blur preview",
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.Low,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        val mips = mipImages
+                        if (mips != null && centerBlurPx > 0.4f) {
+                            val midAlpha = (centerNorm * 1.4f).coerceIn(0f, 1f)
+                            val highAlpha = ((centerNorm - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                            if (midAlpha > 0.01f) {
+                                Image(
+                                    bitmap = mips.first,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    filterQuality = FilterQuality.Low,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .graphicsLayer { alpha = midAlpha }
+                                )
+                            }
+                            if (highAlpha > 0.01f) {
+                                Image(
+                                    bitmap = mips.second,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    filterQuality = FilterQuality.Low,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .graphicsLayer { alpha = highAlpha }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 2. Top & Bottom Edge Frosted Layer (heavily blurred, masked to top 38% & bottom 38% ONLY)
+                val edgeSourceBmp = mipImages?.third ?: sharpPreviewBmp
+                if (edgeSourceBmp != null && edgeFade > 0.01f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                compositingStrategy = CompositingStrategy.Offscreen
+                            }
+                            .drawWithContent {
+                                drawContent()
+                                drawRect(
+                                    brush = Brush.verticalGradient(
+                                        0.0f to Color.White.copy(alpha = edgeFade),
+                                        0.18f to Color.White.copy(alpha = edgeFade * 0.92f),
+                                        0.38f to Color.Transparent,
+                                        0.62f to Color.Transparent,
+                                        0.82f to Color.White.copy(alpha = edgeFade * 0.92f),
+                                        1.0f to Color.White.copy(alpha = edgeFade)
+                                    ),
+                                    blendMode = BlendMode.DstIn
+                                )
+                            }
+                    ) {
+                        Image(
+                            bitmap = edgeSourceBmp,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.Low,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                        Modifier.blur(
+                                            radius = (11f + edgeFade * 9f).dp,
+                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = edgeFade * 0.22f))
+                        )
+                    }
+                }
+
+                // 3. Simulated Lock/Home Clock in top band + Dock dots in bottom band
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(vertical = 8.dp, horizontal = 6.dp),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "12:45",
+                        color = Color.White.copy(alpha = 0.92f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    if (showCard) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xAA161822),
+                            border = BorderStroke(0.6.dp, Color.White.copy(alpha = 0.30f)),
+                            modifier = Modifier
+                                .fillMaxWidth(0.86f)
+                                .height(42.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 4.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(palette.vibrantColor.copy(alpha = 0.8f))
+                                ) {
+                                    if (sharpPreviewBmp != null) {
+                                        Image(
+                                            bitmap = sharpPreviewBmp,
+                                            contentDescription = null,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.9f)
+                                            .height(3.5.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.White.copy(alpha = 0.85f))
+                                    )
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.6f)
+                                            .height(2.5.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.White.copy(alpha = 0.50f))
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(42.dp))
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        repeat(4) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.72f))
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Helpful Legend beside miniature phone frame
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = "Live Blur Preview",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "• Wallpaper Blur (${centerBlurPx.roundToInt()}px) blurs the entire backdrop & middle.",
+                    color = Color.White.copy(alpha = 0.68f),
+                    fontSize = 10.sp
+                )
+                Text(
+                    text = "• Edge Blur (${(edgeFade * 100f).roundToInt()}%) heavily frosts the top clock & bottom dock while keeping the middle clear.",
+                    color = Color(0xFFA6F4C5),
+                    fontSize = 10.sp
+                )
             }
         }
     }

@@ -39,6 +39,11 @@ enum class LyricsCardBackgroundMode(val label: String) {
     SONG_ART("Song Cover Art")
 }
 
+enum class LiveWallpaperMode(val label: String) {
+    ANIMATED_CANVAS("Animated Canvas"),
+    ARTWORK_ONLY("Artwork Only")
+}
+
 @Immutable
 data class CardStyleConfig(
     val brandMode: CardBrandMode = CardBrandMode.BITCHORD,
@@ -67,6 +72,14 @@ data class CardStyleConfig(
     val showLogoWordmark: Boolean = true,
     val autoSearchOnlineArt: Boolean = false,
     val autoSearchAnimatedCanvas: Boolean = false,
+    val liveWallpaperEnabled: Boolean = false,
+    val liveWallpaperMode: LiveWallpaperMode = LiveWallpaperMode.ANIMATED_CANVAS,
+    val liveWallpaperBlurRadius: Float = 10f, // 0f..40f real-time wallpaper blur
+    val liveWallpaperEdgeBlurFade: Float = 0.65f, // 0f..1f progressive top & bottom edge frosted blur (keeps middle clear)
+    val liveWallpaperShowCard: Boolean = true,
+    val liveWallpaperIdleRevertEnabled: Boolean = false,
+    val liveWallpaperIdleDelaySec: Int = 60, // 1..86400 seconds (up to 1 day) after song stops
+    val liveWallpaperIdlePhotoPath: String = "",
     val spotifyAccessToken: String = "",
     val spotifySpDcCookie: String = "",
     val spotifyRefreshToken: String = "",

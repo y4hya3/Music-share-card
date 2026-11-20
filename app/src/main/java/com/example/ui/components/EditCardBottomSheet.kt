@@ -751,12 +751,6 @@ fun EditCardBottomSheet(
                                 checked = styleConfig.autoSearchAnimatedCanvas,
                                 onCheckedChange = { enabled ->
                                     onStyleChange(styleConfig.copy(autoSearchAnimatedCanvas = enabled))
-                                    if (enabled && canvasCandidates.isEmpty()) {
-                                        MediaNotificationRepository.searchAnimatedCanvases(
-                                            customQuery = canvasSearchQuery,
-                                            autoApplyBest = !currentTrack.isSample
-                                        )
-                                    }
                                 },
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = Color.White,
@@ -1124,7 +1118,7 @@ fun EditCardBottomSheet(
                             onClick = {
                                 MediaNotificationRepository.searchAnimatedCanvases(
                                     customQuery = canvasSearchQuery,
-                                    autoApplyBest = false
+                                    autoApplyBest = styleConfig.autoSearchAnimatedCanvas
                                 )
                             },
                             enabled = !isSearchingCanvas && canvasSearchQuery.isNotBlank(),

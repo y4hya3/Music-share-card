@@ -585,6 +585,45 @@ object SavedMediaLibrary {
         }
     }
 
+    suspend fun saveWallpaperIdlePhotoFromUri(
+        context: Context,
+        uri: Uri
+    ): String? = withContext(Dispatchers.IO) {
+        val ctx = context.applicationContext
+        val root = File(ctx.filesDir, ROOT_DIR).apply { mkdirs() }
+        val decoded = BitmapBlurUtils.decodeHighResFromUri(ctx, uri, maxDimension = 1600)
+            ?: return@withContext null
+        val destFile = File(root, "wallpaper_idle_${System.currentTimeMillis()}.jpg")
+        return@withContext try {
+            // Remove older standby photo files before writing new one
+            root.listFiles()?.filter { it.name.startsWith("wallpaper_idle_") }?.forEach {
+                runCatching { it.delete() }
+            }
+            FileOutputStream(destFile).use { out ->
+                decoded.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                out.flush()
+            }
+            if (destFile.exists() && destFile.length() > 0L) destFile.absolutePath else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            if (!decoded.isRecycled) decoded.recycle()
+        }
+    }
+
+    fun deleteWallpaperIdlePhoto(context: Context, path: String?) {
+        runCatching {
+            if (!path.isNullOrBlank()) {
+                val f = File(path)
+                if (f.exists()) f.delete()
+            }
+            val root = File(context.applicationContext.filesDir, ROOT_DIR)
+            root.listFiles()?.filter { it.name.startsWith("wallpaper_idle_") }?.forEach {
+                it.delete()
+            }
+        }
+    }
+
     private fun upgradeCoverUrlToMaxResolution(url: String): String {
         return when {
             url.contains("1000x1000bb") -> url.replace("1000x1000bb", "3000x3000bb")

@@ -7,6 +7,7 @@ import com.example.model.CardBrandMode
 import com.example.model.CardLayoutType
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
+import com.example.model.LiveWallpaperMode
 import com.example.model.LogoColorMode
 import com.example.model.LyricsCardBackgroundMode
 
@@ -45,6 +46,14 @@ object CardStylePreferences {
     private const val KEY_CUSTOM_LYRICS = "custom_lyrics"
     private const val KEY_LYRICS_BG_MODE = "lyrics_bg_mode"
     private const val KEY_AUTO_SEARCH_CANVAS = "auto_search_canvas"
+    private const val KEY_LIVE_WALLPAPER_ENABLED = "live_wallpaper_enabled"
+    private const val KEY_LIVE_WALLPAPER_MODE = "live_wallpaper_mode"
+    private const val KEY_LIVE_WALLPAPER_BLUR = "live_wallpaper_blur_radius"
+    private const val KEY_LIVE_WALLPAPER_EDGE_BLUR = "live_wallpaper_edge_blur_fade"
+    private const val KEY_LIVE_WALLPAPER_SHOW_CARD = "live_wallpaper_show_card"
+    private const val KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED = "live_wallpaper_idle_revert_enabled"
+    private const val KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC = "live_wallpaper_idle_delay_sec"
+    private const val KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH = "live_wallpaper_idle_photo_path"
     private const val KEY_SPOTIFY_ACCESS_TOKEN = "spotify_access_token"
     private const val KEY_SPOTIFY_SP_DC_COOKIE = "spotify_sp_dc_cookie"
     private const val KEY_SPOTIFY_REFRESH_TOKEN = "spotify_refresh_token"
@@ -77,6 +86,10 @@ object CardStylePreferences {
             prefs.getString(KEY_LYRICS_BG_MODE, defaults.lyricsCardBackgroundMode.name),
             defaults.lyricsCardBackgroundMode
         )
+        val liveWallpaperMode = enumValueOrDefault(
+            prefs.getString(KEY_LIVE_WALLPAPER_MODE, defaults.liveWallpaperMode.name),
+            defaults.liveWallpaperMode
+        )
 
         val customColorArgb = prefs.getInt(KEY_CUSTOM_LOGO_COLOR, defaults.customLogoColor.toArgb())
         val waveformColorArgb = prefs.getInt(KEY_WAVEFORM_COLOR, defaults.waveformColor.toArgb())
@@ -108,6 +121,23 @@ object CardStylePreferences {
             showLogoWordmark = prefs.getBoolean(KEY_SHOW_WORDMARK, defaults.showLogoWordmark),
             autoSearchOnlineArt = prefs.getBoolean(KEY_AUTO_SEARCH_ONLINE_ART, defaults.autoSearchOnlineArt),
             autoSearchAnimatedCanvas = prefs.getBoolean(KEY_AUTO_SEARCH_CANVAS, defaults.autoSearchAnimatedCanvas),
+            liveWallpaperEnabled = prefs.getBoolean(KEY_LIVE_WALLPAPER_ENABLED, defaults.liveWallpaperEnabled),
+            liveWallpaperMode = liveWallpaperMode,
+            liveWallpaperBlurRadius = prefs.getFloat(KEY_LIVE_WALLPAPER_BLUR, defaults.liveWallpaperBlurRadius).coerceIn(0f, 40f),
+            liveWallpaperEdgeBlurFade = prefs.getFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, defaults.liveWallpaperEdgeBlurFade).coerceIn(0f, 1f),
+            liveWallpaperShowCard = prefs.getBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, defaults.liveWallpaperShowCard),
+            liveWallpaperIdleRevertEnabled = prefs.getBoolean(
+                KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED,
+                defaults.liveWallpaperIdleRevertEnabled
+            ),
+            liveWallpaperIdleDelaySec = prefs.getInt(
+                KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC,
+                defaults.liveWallpaperIdleDelaySec
+            ).coerceIn(1, 86_400),
+            liveWallpaperIdlePhotoPath = prefs.getString(
+                KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH,
+                defaults.liveWallpaperIdlePhotoPath
+            ) ?: "",
             spotifyAccessToken = prefs.getString(KEY_SPOTIFY_ACCESS_TOKEN, defaults.spotifyAccessToken) ?: "",
             spotifySpDcCookie = prefs.getString(KEY_SPOTIFY_SP_DC_COOKIE, defaults.spotifySpDcCookie) ?: "",
             spotifyRefreshToken = prefs.getString(KEY_SPOTIFY_REFRESH_TOKEN, defaults.spotifyRefreshToken) ?: "",
@@ -156,6 +186,14 @@ object CardStylePreferences {
             .putBoolean(KEY_SHOW_WORDMARK, config.showLogoWordmark)
             .putBoolean(KEY_AUTO_SEARCH_ONLINE_ART, config.autoSearchOnlineArt)
             .putBoolean(KEY_AUTO_SEARCH_CANVAS, config.autoSearchAnimatedCanvas)
+            .putBoolean(KEY_LIVE_WALLPAPER_ENABLED, config.liveWallpaperEnabled)
+            .putString(KEY_LIVE_WALLPAPER_MODE, config.liveWallpaperMode.name)
+            .putFloat(KEY_LIVE_WALLPAPER_BLUR, config.liveWallpaperBlurRadius.coerceIn(0f, 40f))
+            .putFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, config.liveWallpaperEdgeBlurFade.coerceIn(0f, 1f))
+            .putBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, config.liveWallpaperShowCard)
+            .putBoolean(KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED, config.liveWallpaperIdleRevertEnabled)
+            .putInt(KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC, config.liveWallpaperIdleDelaySec.coerceIn(1, 86_400))
+            .putString(KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH, config.liveWallpaperIdlePhotoPath)
             .putString(KEY_SPOTIFY_ACCESS_TOKEN, config.spotifyAccessToken)
             .putString(KEY_SPOTIFY_SP_DC_COOKIE, config.spotifySpDcCookie)
             .putString(KEY_SPOTIFY_REFRESH_TOKEN, config.spotifyRefreshToken)

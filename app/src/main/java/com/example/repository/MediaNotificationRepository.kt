@@ -10,6 +10,7 @@ import android.net.Uri
 import com.example.R
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
+import com.example.model.LiveWallpaperMode
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
 import com.example.service.AnimatedCanvasCandidate
@@ -45,8 +46,12 @@ object MediaNotificationRepository {
     @Volatile
     private var appContext: Context? = null
 
+    @Volatile
+    private var initialized: Boolean = false
+
     private var onlineSearchJob: Job? = null
     private var canvasSearchJob: Job? = null
+    private var applyCanvasJob: Job? = null
     private var coverLoadJob: Job? = null
     private var lyricsSearchJob: Job? = null
     private var paletteJob: Job? = null
@@ -123,14 +128,30 @@ object MediaNotificationRepository {
     private val _lyricsSearchStatus = MutableStateFlow<String?>(null)
     val lyricsSearchStatus: StateFlow<String?> = _lyricsSearchStatus.asStateFlow()
 
+    private val _lastPlaybackStoppedElapsedMs = MutableStateFlow(0L)
+    val lastPlaybackStoppedElapsedMs: StateFlow<Long> = _lastPlaybackStoppedElapsedMs.asStateFlow()
+
     private var sampleTracksList: List<MediaTrackInfo> = emptyList()
 
+    @Synchronized
+    fun ensureInitialized(context: Context) {
+        if (initialized && appContext != null) {
+            return
+        }
+        initialize(context)
+    }
+
+    @Synchronized
     fun initialize(context: Context) {
         val ctx = context.applicationContext
         appContext = ctx
+        initialized = true
         _styleConfig.value = CardStylePreferences.load(ctx)
         SavedMediaLibrary.initialize(ctx)
         checkNotificationAccess(ctx)
+        if (_lastPlaybackStoppedElapsedMs.value == 0L && _currentTrack.value.isSample) {
+            _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
+        }
 
         val initialTrack = MediaTrackInfo(
             title = "SICKO MODE",
@@ -225,6 +246,9 @@ object MediaNotificationRepository {
         val isSameTrack = !current.isSample && currentKey == newKey
 
         if (!isSameTrack) {
+            canvasSearchJob?.cancel()
+            applyCanvasJob?.cancel()
+            onlineSearchJob?.cancel()
             _originalPlayerArt.value = trackInfo.albumArt
             _selectedCoverId.value = "player"
             _onlineCoverCandidates.value = emptyList()
@@ -238,6 +262,8 @@ object MediaNotificationRepository {
             userManuallySelectedCanvasTrackKey = null
             autoAppliedSavedCanvasTrackKey = null
             autoAppliedSavedCoverTrackKey = null
+            lastAutoSearchedTrackKey = null
+            lastAutoCanvasTrackKey = null
             coverLoadJob?.cancel()
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
@@ -276,6 +302,13 @@ object MediaNotificationRepository {
         }
         val artChanged = finalTrack.albumArt !== current.albumArt
         _currentTrack.value = finalTrack
+        if (!finalTrack.isSample) {
+            if (finalTrack.isPlaying) {
+                _lastPlaybackStoppedElapsedMs.value = 0L
+            } else if (_lastPlaybackStoppedElapsedMs.value == 0L || current.isPlaying) {
+                _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
+            }
+        }
         if (!isSameTrack || artChanged) {
             extractPaletteForTrack(finalTrack)
         }
@@ -322,14 +355,18 @@ object MediaNotificationRepository {
             searchOnlineCovers(autoApplyBest = autoAppliedSavedCoverTrackKey != newKey)
         }
 
-        // If Auto-Search Animated Canvas is enabled, look up looping canvases automatically for new live tracks
-        // (unless a linked offline Saved Album canvas already matched for this track)
+        // If Auto-Search Animated Canvas OR Live Wallpaper Animated Canvas mode is enabled,
+        // look up looping canvases automatically when no offline saved album/song canvas matched
+        val cfgSnapshot = _styleConfig.value
+        val needsWallpaperCanvas = cfgSnapshot.liveWallpaperEnabled &&
+            cfgSnapshot.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS
         if (!finalTrack.isSample &&
-            _styleConfig.value.autoSearchAnimatedCanvas &&
+            (cfgSnapshot.autoSearchAnimatedCanvas || needsWallpaperCanvas) &&
+            autoAppliedSavedCanvasTrackKey != newKey &&
             lastAutoCanvasTrackKey != newKey
         ) {
             lastAutoCanvasTrackKey = newKey
-            searchAnimatedCanvases(autoApplyBest = autoAppliedSavedCanvasTrackKey != newKey)
+            searchAnimatedCanvases(autoApplyBest = true)
         }
     }
 
@@ -378,8 +415,50 @@ object MediaNotificationRepository {
         return MusicNotificationListenerService.syncNow(context)
     }
 
+    fun markCurrentTrackStopped() {
+        val cur = _currentTrack.value
+        if (!cur.isSample && cur.isPlaying) {
+            _currentTrack.value = cur.copy(isPlaying = false)
+        }
+        if (_lastPlaybackStoppedElapsedMs.value == 0L || cur.isPlaying) {
+            _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun triggerWallpaperMediaSync(
+        context: Context,
+        forceCanvasRetry: Boolean = false
+    ) {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        SavedMediaLibrary.initialize(ctx)
+        refreshFromActiveMedia(ctx, force = true)
+        recheckSavedAlbumCanvasForCurrentTrack()
+        recheckSavedAlbumCoverForCurrentTrack()
+
+        val cfg = _styleConfig.value
+        val track = _currentTrack.value
+        val key = trackKey(track)
+        if (forceCanvasRetry && _activeCanvasUrl.value.isNullOrBlank()) {
+            lastAutoCanvasTrackKey = null
+        }
+        if (cfg.liveWallpaperEnabled &&
+            cfg.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS &&
+            !track.isSample &&
+            _activeCanvasId.value == "none" &&
+            autoAppliedSavedCanvasTrackKey != key &&
+            lastAutoCanvasTrackKey != key
+        ) {
+            lastAutoCanvasTrackKey = key
+            searchAnimatedCanvases(autoApplyBest = true)
+        }
+    }
+
     fun selectSampleTrack(track: MediaTrackInfo) {
         coverLoadJob?.cancel()
+        canvasSearchJob?.cancel()
+        applyCanvasJob?.cancel()
+        onlineSearchJob?.cancel()
         _originalPlayerArt.value = track.albumArt
         _selectedCoverId.value = "player"
         _onlineCoverCandidates.value = emptyList()
@@ -417,6 +496,16 @@ object MediaNotificationRepository {
         if (savedCoverMatch != null) {
             autoAppliedSavedCoverTrackKey = key
             applySavedCoverForTrackAsync(track, savedCoverMatch, isAutoApply = true)
+        }
+
+        val cfg = _styleConfig.value
+        val needsWallpaperCanvas = cfg.liveWallpaperEnabled &&
+            cfg.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS
+        if ((cfg.autoSearchAnimatedCanvas || needsWallpaperCanvas) &&
+            autoAppliedSavedCanvasTrackKey != key
+        ) {
+            lastAutoCanvasTrackKey = key
+            searchAnimatedCanvases(autoApplyBest = true)
         }
     }
 
@@ -537,9 +626,19 @@ object MediaNotificationRepository {
         saveImmediately: Boolean = false,
         update: (CardStyleConfig) -> CardStyleConfig
     ) {
-        val updated = update(_styleConfig.value)
-        if (updated == _styleConfig.value) return
+        val previous = _styleConfig.value
+        val updated = update(previous)
+        if (updated == previous) return
         _styleConfig.value = updated
+
+        val autoCanvasJustEnabled = !previous.autoSearchAnimatedCanvas && updated.autoSearchAnimatedCanvas
+        val wallpaperCanvasJustEnabled = updated.liveWallpaperEnabled &&
+            updated.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS &&
+            (!previous.liveWallpaperEnabled || previous.liveWallpaperMode != LiveWallpaperMode.ANIMATED_CANVAS)
+        if (autoCanvasJustEnabled || wallpaperCanvasJustEnabled) {
+            triggerAutoCanvasForCurrentTrackIfNeeded()
+        }
+
         val ctx = appContext ?: return
         prefsSaveJob?.cancel()
         prefsSaveJob = repositoryScope.launch(Dispatchers.IO) {
@@ -547,6 +646,36 @@ object MediaNotificationRepository {
                 delay(200)
             }
             CardStylePreferences.save(ctx, _styleConfig.value)
+        }
+    }
+
+    fun triggerAutoCanvasForCurrentTrackIfNeeded(customQuery: String? = null) {
+        recheckSavedAlbumCanvasForCurrentTrack()
+        val track = _currentTrack.value
+        val key = trackKey(track)
+        if (autoAppliedSavedCanvasTrackKey == key && !_activeCanvasUrl.value.isNullOrBlank()) {
+            return
+        }
+        val existingCandidates = _animatedCanvasCandidates.value
+        val hasCustomOverride = !customQuery.isNullOrBlank() &&
+            !customQuery.trim().equals("${track.title} ${track.artist}".trim(), ignoreCase = true)
+        if (!hasCustomOverride && existingCandidates.isNotEmpty() && _activeCanvasId.value == "none") {
+            val ordered = existingCandidates.filter { it.isLoopingVideo && !it.videoUrl.isNullOrBlank() }
+                .ifEmpty { existingCandidates }
+            applyCanvasJob?.cancel()
+            applyCanvasJob = repositoryScope.launch {
+                applyAnimatedCanvasCandidate(
+                    candidate = ordered.first(),
+                    markAsManual = false,
+                    fallbackCandidates = ordered.drop(1)
+                )
+            }
+            return
+        }
+        if (_activeCanvasId.value == "none" || _activeCanvasUrl.value.isNullOrBlank()) {
+            lastAutoCanvasTrackKey = key
+            userManuallySelectedCanvasTrackKey = null
+            searchAnimatedCanvases(customQuery = customQuery, autoApplyBest = true)
         }
     }
 
@@ -775,8 +904,13 @@ object MediaNotificationRepository {
                     userManuallySelectedCanvasTrackKey != trackSnapshotKey &&
                     autoAppliedSavedCanvasTrackKey != trackSnapshotKey
                 ) {
-                    val best = result.candidates.firstOrNull { it.isLoopingVideo } ?: result.candidates.first()
-                    applyAnimatedCanvasCandidate(best, markAsManual = false)
+                    val ordered = result.candidates.filter { it.isLoopingVideo && !it.videoUrl.isNullOrBlank() }
+                        .ifEmpty { result.candidates }
+                    applyAnimatedCanvasCandidate(
+                        candidate = ordered.first(),
+                        markAsManual = false,
+                        fallbackCandidates = ordered.drop(1)
+                    )
                 }
             } finally {
                 _isSearchingCanvas.value = false
@@ -866,18 +1000,20 @@ object MediaNotificationRepository {
     }
 
     fun selectAnimatedCanvas(candidate: AnimatedCanvasCandidate) {
-        repositoryScope.launch {
-            _isSearchingCanvas.value = true
-            try {
-                applyAnimatedCanvasCandidate(candidate, markAsManual = true)
-            } finally {
-                _isSearchingCanvas.value = false
-            }
+        applyCanvasJob?.cancel()
+        val applyTrackKey = trackKey(_currentTrack.value)
+        userManuallySelectedCanvasTrackKey = applyTrackKey
+        autoAppliedSavedCanvasTrackKey = null
+        _activeCanvasId.value = candidate.id
+
+        applyCanvasJob = repositoryScope.launch {
+            applyAnimatedCanvasCandidate(candidate, markAsManual = true)
         }
     }
 
     fun clearAnimatedCanvas() {
-        userManuallySelectedCanvasTrackKey = null
+        applyCanvasJob?.cancel()
+        userManuallySelectedCanvasTrackKey = trackKey(_currentTrack.value)
         autoAppliedSavedCanvasTrackKey = null
         _activeCanvasUrl.value = null
         _activeCanvasId.value = "none"
@@ -885,7 +1021,8 @@ object MediaNotificationRepository {
 
     private suspend fun applyAnimatedCanvasCandidate(
         candidate: AnimatedCanvasCandidate,
-        markAsManual: Boolean
+        markAsManual: Boolean,
+        fallbackCandidates: List<AnimatedCanvasCandidate> = emptyList()
     ) {
         val current = _currentTrack.value
         val applyTrackKey = trackKey(current)
@@ -904,27 +1041,51 @@ object MediaNotificationRepository {
             null
         }
 
-        // Resolve remote MP4 to a local cached file:// URI first when possible so Home renders cleanly
-        // without requiring manual Save -> Saved browser selection.
-        val resolvedPlayableUri = when {
-            rawUrl.isEmpty() -> null
-            cachedReadyUri != null -> cachedReadyUri
-            rawUrl.startsWith("file://") || rawUrl.startsWith("content://") -> rawUrl
-            ctx != null -> CanvasVideoExporter.resolveOrCacheVideoUri(ctx, rawUrl) ?: rawUrl
-            else -> rawUrl
-        }
-
-        // Guard against race if user switched tracks while caching video
-        if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
-            _activeCanvasUrl.value = resolvedPlayableUri
+        if (rawUrl.isEmpty()) {
+            if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
+                _activeCanvasUrl.value = null
+            }
+        } else if (cachedReadyUri != null || rawUrl.startsWith("file://") || rawUrl.startsWith("content://")) {
+            val immediateUri = cachedReadyUri ?: rawUrl
+            if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
+                _activeCanvasUrl.value = immediateUri
+                _canvasSearchStatus.value = "Playing ${candidate.source} canvas"
+            }
+        } else {
+            // Emit raw HTTPS URL immediately so playback begins right away instead of waiting for full download
+            if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
+                _activeCanvasUrl.value = rawUrl
+                _canvasSearchStatus.value = "Applying ${candidate.source} canvas..."
+            }
+            val cachedUri = if (ctx != null) {
+                CanvasVideoExporter.resolveOrCacheVideoUri(ctx, rawUrl)
+            } else {
+                null
+            }
+            if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
+                if (cachedUri != null) {
+                    _activeCanvasUrl.value = cachedUri
+                    _canvasSearchStatus.value = "Playing ${candidate.source} canvas"
+                } else if (!markAsManual && fallbackCandidates.isNotEmpty()) {
+                    applyAnimatedCanvasCandidate(
+                        candidate = fallbackCandidates.first(),
+                        markAsManual = false,
+                        fallbackCandidates = fallbackCandidates.drop(1)
+                    )
+                    return
+                } else {
+                    _canvasSearchStatus.value = "Streaming ${candidate.source} canvas"
+                }
+            }
         }
 
         // Like Spotify, keep the song's real album cover inside the card while the Canvas video
         // animates in the background (only populate artwork if none exists or candidate is still art).
         if (candidate.videoUrl.isNullOrBlank() || current.albumArt == null) {
             val hdFrame = AnimatedCanvasSearchService.extractHighResPosterOrFrame(candidate)
-            if (hdFrame != null) {
-                val updated = current.copy(albumArt = hdFrame)
+            if (hdFrame != null && trackKey(_currentTrack.value) == applyTrackKey) {
+                val latest = _currentTrack.value
+                val updated = latest.copy(albumArt = hdFrame)
                 _currentTrack.value = updated
                 extractPaletteForTrack(updated)
             }

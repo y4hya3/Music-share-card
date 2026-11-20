@@ -42,6 +42,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         activeInstance = this
+        MediaNotificationRepository.ensureInitialized(applicationContext)
         attachSessionListener(applicationContext)
     }
 
@@ -57,6 +58,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
         super.onListenerConnected()
         activeInstance = this
         Log.d(TAG, "NotificationListenerService connected. Syncing active media...")
+        MediaNotificationRepository.ensureInitialized(applicationContext)
         attachSessionListener(applicationContext)
         syncNow(applicationContext)
     }
@@ -82,7 +84,11 @@ class MusicNotificationListenerService : NotificationListenerService() {
         val currentTrack = MediaNotificationRepository.currentTrack.value
         if (currentTrack.packageName == sbn.packageName && !currentTrack.isSample) {
             Log.d(TAG, "Active music notification removed for package: ${sbn.packageName}")
-            syncNow(applicationContext)
+            val stillHasTrack = syncNow(applicationContext)
+            val afterTrack = MediaNotificationRepository.currentTrack.value
+            if (!stillHasTrack || (afterTrack.packageName == sbn.packageName && !afterTrack.isPlaying)) {
+                MediaNotificationRepository.markCurrentTrackStopped()
+            }
         }
     }
 
@@ -216,8 +222,19 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     }
 
                     override fun onPlaybackStateChanged(state: PlaybackState?) {
-                        if (state?.state == PlaybackState.STATE_PLAYING) {
+                        val st = state?.state ?: return
+                        if (st == PlaybackState.STATE_PLAYING) {
                             extractFromController(appCtx, controller, notificationBitmapFallback = null)
+                        } else if (st == PlaybackState.STATE_PAUSED ||
+                            st == PlaybackState.STATE_STOPPED ||
+                            st == PlaybackState.STATE_NONE ||
+                            st == PlaybackState.STATE_ERROR
+                        ) {
+                            val current = MediaNotificationRepository.currentTrack.value
+                            if (!current.isSample && current.packageName == controller.packageName) {
+                                extractFromController(appCtx, controller, notificationBitmapFallback = null)
+                                MediaNotificationRepository.markCurrentTrackStopped()
+                            }
                         }
                     }
                 }
@@ -313,6 +330,24 @@ class MusicNotificationListenerService : NotificationListenerService() {
             // Pure Notification extras fallback (for players without standard MediaSession metadata)
             val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
             if (title.isNullOrBlank()) return false
+
+            val existing = MediaNotificationRepository.currentTrack.value
+            if (!existing.isSample &&
+                existing.packageName == sbn.packageName &&
+                existing.title.equals(title, ignoreCase = true) &&
+                existing.artist.isNotBlank() &&
+                !existing.artist.equals(existing.appName, ignoreCase = true)
+            ) {
+                if (notifFallbackArt != null) {
+                    MediaNotificationRepository.updateTrackArtworkIfMatching(
+                        packageName = existing.packageName,
+                        title = existing.title,
+                        artist = existing.artist,
+                        albumArt = notifFallbackArt
+                    )
+                }
+                return true
+            }
 
             val artist = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
                 ?: extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()

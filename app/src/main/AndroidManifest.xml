@@ -80,6 +80,20 @@
             </intent-filter>
         </service>
 
+        <!-- Live Wallpaper Service displaying live song artwork or animated canvas -->
+        <service
+            android:name=".service.EchoSnapLiveWallpaperService"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_WALLPAPER"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.wallpaper.WallpaperService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.wallpaper"
+                android:resource="@xml/echosnap_wallpaper" />
+        </service>
+
         <!-- FileProvider for sharing generated music story cards -->
         <provider
             android:name="androidx.core.content.FileProvider"

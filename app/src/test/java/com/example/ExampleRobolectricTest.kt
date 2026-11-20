@@ -26,12 +26,15 @@ import com.example.util.AudioBeatMonitor
 import com.example.util.BitmapBlurUtils
 import com.example.util.CardShareManager
 import com.example.util.WaveformExportSpec
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -1599,6 +1602,270 @@ class ExampleRobolectricTest {
       SavedMediaLibrary.resetAllSavedMedia(context)
     } finally {
       tempRoot.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `live wallpaper settings and standby photo delay persist cleanly across bounds including 5s 60s and 86400s`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val defaults = CardStyleConfig()
+    assertEquals(10f, defaults.liveWallpaperBlurRadius, 0.001f)
+    assertEquals(0.65f, defaults.liveWallpaperEdgeBlurFade, 0.001f)
+
+    val dummyPhoto = File(context.cacheDir, "standby_photo_test.jpg").apply {
+      val bmp = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+      java.io.FileOutputStream(this).use { out ->
+        bmp.compress(Bitmap.CompressFormat.JPEG, 90, out)
+      }
+      bmp.recycle()
+    }
+
+    val saved = CardStyleConfig(
+      liveWallpaperEnabled = true,
+      liveWallpaperMode = com.example.model.LiveWallpaperMode.ARTWORK_ONLY,
+      liveWallpaperBlurRadius = 26f,
+      liveWallpaperEdgeBlurFade = 0.85f,
+      liveWallpaperShowCard = false,
+      liveWallpaperIdleRevertEnabled = true,
+      liveWallpaperIdleDelaySec = 86_400, // 1 day in seconds
+      liveWallpaperIdlePhotoPath = dummyPhoto.absolutePath
+    )
+    CardStylePreferences.save(context, saved)
+    val reloaded = CardStylePreferences.load(context)
+
+    assertTrue(reloaded.liveWallpaperEnabled)
+    assertEquals(com.example.model.LiveWallpaperMode.ARTWORK_ONLY, reloaded.liveWallpaperMode)
+    assertEquals(26f, reloaded.liveWallpaperBlurRadius, 0.001f)
+    assertEquals(0.85f, reloaded.liveWallpaperEdgeBlurFade, 0.001f)
+    assertFalse(reloaded.liveWallpaperShowCard)
+    assertTrue(reloaded.liveWallpaperIdleRevertEnabled)
+    assertEquals(86_400, reloaded.liveWallpaperIdleDelaySec)
+    assertEquals(dummyPhoto.absolutePath, reloaded.liveWallpaperIdlePhotoPath)
+
+    // Out-of-range values clamp strictly into 1..86400 seconds and 0..40px blur
+    CardStylePreferences.save(
+      context,
+      saved.copy(
+        liveWallpaperMode = com.example.model.LiveWallpaperMode.ANIMATED_CANVAS,
+        liveWallpaperIdleDelaySec = 999_999,
+        liveWallpaperBlurRadius = 80f,
+        liveWallpaperEdgeBlurFade = 2.0f,
+        liveWallpaperIdleRevertEnabled = false
+      )
+    )
+    val clamped = CardStylePreferences.load(context)
+    assertEquals(com.example.model.LiveWallpaperMode.ANIMATED_CANVAS, clamped.liveWallpaperMode)
+    assertEquals(86_400, clamped.liveWallpaperIdleDelaySec)
+    assertEquals(40f, clamped.liveWallpaperBlurRadius, 0.001f)
+    assertEquals(1f, clamped.liveWallpaperEdgeBlurFade, 0.001f)
+    assertFalse(clamped.liveWallpaperIdleRevertEnabled)
+
+    // Verify helper deletion cleans standby photo path cleanly
+    SavedMediaLibrary.deleteWallpaperIdlePhoto(context, dummyPhoto.absolutePath)
+    assertFalse(dummyPhoto.exists())
+  }
+
+  @Test
+  fun `live wallpaper repository ensureInitialized playback stop timer and offline artwork fallback work`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.repository.MediaNotificationRepository.ensureInitialized(context)
+
+    val notificationArt = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888)
+    try {
+      // Playing track clears stopped elapsed timestamp and retains high-res notification artwork
+      com.example.repository.MediaNotificationRepository.updateTrack(
+        MediaTrackInfo(
+          title = "Unlisted Live Song",
+          artist = "Independent Artist",
+          album = "Single",
+          appName = "YouTube Music",
+          packageName = "com.google.android.apps.youtube.music",
+          albumArt = notificationArt,
+          isPlaying = true,
+          isSample = false
+        )
+      )
+      assertEquals(0L, com.example.repository.MediaNotificationRepository.lastPlaybackStoppedElapsedMs.value)
+      assertSame(notificationArt, com.example.repository.MediaNotificationRepository.currentTrack.value.albumArt)
+
+      // No saved canvas matched -> activeCanvasUrl remains null so wallpaper cleanly displays artwork fallback
+      assertNull(com.example.repository.MediaNotificationRepository.activeCanvasUrl.value)
+
+      // Marking playback stopped flips isPlaying = false and records non-zero elapsed timer
+      com.example.repository.MediaNotificationRepository.markCurrentTrackStopped()
+      assertFalse(com.example.repository.MediaNotificationRepository.currentTrack.value.isPlaying)
+      assertTrue(com.example.repository.MediaNotificationRepository.lastPlaybackStoppedElapsedMs.value > 0L)
+    } finally {
+      if (!notificationArt.isRecycled) notificationArt.recycle()
+    }
+  }
+
+  @Test
+  fun `live wallpaper service is registered in package manager with bind wallpaper permission and metadata`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val component = android.content.ComponentName(
+      context,
+      com.example.service.EchoSnapLiveWallpaperService::class.java
+    )
+    @Suppress("DEPRECATION")
+    val serviceInfo = context.packageManager.getServiceInfo(
+      component,
+      android.content.pm.PackageManager.GET_META_DATA
+    )
+    assertEquals(android.Manifest.permission.BIND_WALLPAPER, serviceInfo.permission)
+    assertTrue(serviceInfo.exported)
+    assertNotNull(serviceInfo.metaData)
+    assertTrue(serviceInfo.metaData.containsKey("android.service.wallpaper"))
+  }
+
+  @Test
+  fun `canvas video exporter validates mp4 headers rejects html and deduplicates concurrent cache downloads`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val validMp4Bytes = ByteArray(8192).apply {
+      this[0] = 0x00; this[1] = 0x00; this[2] = 0x00; this[3] = 0x18
+      "ftypisom".toByteArray(Charsets.US_ASCII).copyInto(this, destinationOffset = 4)
+    }
+    val fakeBytes = ByteArray(8192) { 0x42 }
+    val htmlBytes = "<html><body>Not Found</body></html>".repeat(300).toByteArray(Charsets.UTF_8)
+
+    val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/valid.mp4") { ex ->
+      ex.responseHeaders.add("Content-Type", "video/mp4")
+      ex.sendResponseHeaders(200, validMp4Bytes.size.toLong())
+      ex.responseBody.use { it.write(validMp4Bytes) }
+    }
+    server.createContext("/html_error.mp4") { ex ->
+      ex.responseHeaders.add("Content-Type", "text/html")
+      ex.sendResponseHeaders(200, htmlBytes.size.toLong())
+      ex.responseBody.use { it.write(htmlBytes) }
+    }
+    server.createContext("/fake_bytes.mp4") { ex ->
+      ex.responseHeaders.add("Content-Type", "application/octet-stream")
+      ex.sendResponseHeaders(200, fakeBytes.size.toLong())
+      ex.responseBody.use { it.write(fakeBytes) }
+    }
+    server.start()
+
+    try {
+      val baseUrl = "http://127.0.0.1:${server.address.port}"
+      val validUrl = "$baseUrl/valid.mp4"
+      com.example.util.CanvasVideoExporter.invalidateCachedVideoFile(context, validUrl)
+
+      val results = runBlocking {
+        coroutineScope {
+          val a = async(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.util.CanvasVideoExporter.prefetchVideoToCache(context, validUrl)
+          }
+          val b = async(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.util.CanvasVideoExporter.prefetchVideoToCache(context, validUrl)
+          }
+          listOf(a.await(), b.await())
+        }
+      }
+      assertNotNull(results[0])
+      assertNotNull(results[1])
+      assertEquals(results[0]!!.absolutePath, results[1]!!.absolutePath)
+      assertTrue(results[0]!!.exists() && results[0]!!.length() == validMp4Bytes.size.toLong())
+      assertNotNull(com.example.util.CanvasVideoExporter.getCachedVideoFileIfReady(context, validUrl))
+
+      com.example.util.CanvasVideoExporter.invalidateCachedVideoFile(context, validUrl)
+      assertNull(com.example.util.CanvasVideoExporter.getCachedVideoFileIfReady(context, validUrl))
+
+      val rejectedHtml = runBlocking {
+        com.example.util.CanvasVideoExporter.resolveOrCacheVideoUri(context, "$baseUrl/html_error.mp4")
+      }
+      assertNull("Expected HTML response not to be cached as video", rejectedHtml)
+
+      val rejectedBogus = runBlocking {
+        com.example.util.CanvasVideoExporter.resolveOrCacheVideoUri(context, "$baseUrl/fake_bytes.mp4")
+      }
+      assertNull("Expected non-MP4/non-WebM payload to fail validation", rejectedBogus)
+    } finally {
+      server.stop(0)
+    }
+  }
+
+  @Test
+  fun `selecting online animated canvas emits playback url immediately upgrades to cache and clears cleanly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.repository.MediaNotificationRepository.ensureInitialized(context)
+    SavedMediaLibrary.resetAllSavedMedia(context)
+    com.example.repository.MediaNotificationRepository.updateStyleConfig(saveImmediately = true) {
+      it.copy(autoSearchAnimatedCanvas = false, liveWallpaperEnabled = false)
+    }
+    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+
+    com.example.repository.MediaNotificationRepository.selectSampleTrack(
+      MediaTrackInfo(
+        title = "Canvas Flow Test",
+        artist = "EchoSnap",
+        album = "Unit Test",
+        appName = "Spotify",
+        packageName = "com.spotify.music",
+        albumArt = null,
+        isPlaying = true,
+        isSample = true
+      )
+    )
+    org.robolectric.shadows.ShadowLooper.idleMainLooper()
+
+    val validMp4Bytes = ByteArray(8192).apply {
+      this[0] = 0x00; this[1] = 0x00; this[2] = 0x00; this[3] = 0x18
+      "ftypmp42".toByteArray(Charsets.US_ASCII).copyInto(this, destinationOffset = 4)
+    }
+    val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+    server.createContext("/canvas_loop.mp4") { ex ->
+      ex.responseHeaders.add("Content-Type", "video/mp4")
+      ex.sendResponseHeaders(200, validMp4Bytes.size.toLong())
+      ex.responseBody.use { it.write(validMp4Bytes) }
+    }
+    server.start()
+
+    try {
+      val videoUrl = "http://127.0.0.1:${server.address.port}/canvas_loop.mp4"
+      com.example.util.CanvasVideoExporter.invalidateCachedVideoFile(context, videoUrl)
+
+      val candidate = AnimatedCanvasCandidate(
+        id = "online_spotify_canvas_test",
+        title = "Canvas Flow Test",
+        artist = "EchoSnap",
+        videoUrl = videoUrl,
+        hdPosterUrl = null,
+        source = "Spotify",
+        resolutionLabel = "1080×1920 MP4",
+        matchScore = 100,
+        isLoopingVideo = true
+      )
+
+      com.example.repository.MediaNotificationRepository.selectAnimatedCanvas(candidate)
+      org.robolectric.shadows.ShadowLooper.idleMainLooper()
+
+      assertEquals("online_spotify_canvas_test", com.example.repository.MediaNotificationRepository.activeCanvasId.value)
+      val immediateOrCached = com.example.repository.MediaNotificationRepository.activeCanvasUrl.value
+      assertNotNull("Expected activeCanvasUrl to be populated immediately upon tap", immediateOrCached)
+
+      // Allow Dispatchers.IO cache download to finish and post cached file:// upgrade onto Main looper
+      val deadlineMs = System.currentTimeMillis() + 3000L
+      while (System.currentTimeMillis() < deadlineMs) {
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        if (com.example.repository.MediaNotificationRepository.activeCanvasUrl.value?.startsWith("file://") == true) {
+          break
+        }
+        Thread.sleep(25L)
+      }
+      org.robolectric.shadows.ShadowLooper.idleMainLooper()
+      val finalUrl = com.example.repository.MediaNotificationRepository.activeCanvasUrl.value
+      assertNotNull(finalUrl)
+      assertTrue("Expected cached file:// upgrade (got $finalUrl)", finalUrl!!.startsWith("file://"))
+
+      com.example.repository.MediaNotificationRepository.clearAnimatedCanvas()
+      org.robolectric.shadows.ShadowLooper.idleMainLooper()
+      assertEquals("none", com.example.repository.MediaNotificationRepository.activeCanvasId.value)
+      assertNull(com.example.repository.MediaNotificationRepository.activeCanvasUrl.value)
+
+      com.example.util.CanvasVideoExporter.invalidateCachedVideoFile(context, videoUrl)
+    } finally {
+      server.stop(0)
     }
   }
 }

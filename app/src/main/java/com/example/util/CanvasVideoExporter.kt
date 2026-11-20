@@ -31,11 +31,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -72,6 +74,7 @@ object CanvasVideoExporter {
     private const val MAX_EXPORT_DURATION_US = 10_000_000L
     private const val STATIC_WAVEFORM_DURATION_SEC = 8
     private const val EGL_RECORDABLE_ANDROID = 0x3142
+    private val cacheDownloadLocks = ConcurrentHashMap<String, Any>()
 
     suspend fun exportAnimatedStoryVideo(
         context: Context,
@@ -289,12 +292,27 @@ object CanvasVideoExporter {
         if (videoUrl.startsWith("file://")) {
             val path = Uri.parse(videoUrl).path ?: return null
             val f = File(path)
-            return if (f.exists() && f.length() > 4096L) f else null
+            return if (isLikelyValidVideoFile(f)) f else null
         }
         val cacheDir = File(context.cacheDir, "canvas_video_cache")
-        val cacheKey = videoUrl.hashCode().toUInt().toString(16)
+        val cacheKey = cacheKeyForUrl(videoUrl)
         val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        return if (cached.exists() && cached.length() > 4096L) cached else null
+        return if (isLikelyValidVideoFile(cached)) {
+            cached
+        } else {
+            if (cached.exists()) runCatching { cached.delete() }
+            null
+        }
+    }
+
+    fun invalidateCachedVideoFile(context: Context, videoUrl: String) {
+        if (videoUrl.startsWith("file://") || videoUrl.startsWith("content://")) return
+        val cacheDir = File(context.cacheDir, "canvas_video_cache")
+        val cacheKey = cacheKeyForUrl(videoUrl)
+        val cached = File(cacheDir, "canvas_$cacheKey.mp4")
+        if (cached.exists()) {
+            runCatching { cached.delete() }
+        }
     }
 
     suspend fun prefetchVideoToCache(context: Context, videoUrl: String): File? = withContext(Dispatchers.IO) {
@@ -304,6 +322,47 @@ object CanvasVideoExporter {
     suspend fun resolveOrCacheVideoUri(context: Context, videoUrl: String): String? = withContext(Dispatchers.IO) {
         val file = resolveVideoFile(context, videoUrl) ?: return@withContext null
         Uri.fromFile(file).toString()
+    }
+
+    private fun cacheKeyForUrl(videoUrl: String): String =
+        normalizeDownloadUrl(videoUrl).hashCode().toUInt().toString(16)
+
+    private fun normalizeDownloadUrl(rawUrl: String): String {
+        val trimmed = rawUrl.trim()
+        if (trimmed.startsWith("http://", ignoreCase = true)) {
+            val host = runCatching { URL(trimmed).host.lowercase() }.getOrDefault("")
+            if (host.isNotEmpty() && host != "127.0.0.1" && host != "localhost") {
+                return "https://" + trimmed.substring(7)
+            }
+        }
+        return trimmed
+    }
+
+    private fun isLikelyValidVideoFile(file: File): Boolean {
+        if (!file.exists() || !file.isFile || file.length() <= 4096L) return false
+        return try {
+            val header = ByteArray(32)
+            val read = RandomAccessFile(file, "r").use { raf ->
+                raf.read(header)
+            }
+            if (read < 12) return false
+            // ISOBMFF MP4 / M4V / MOV / 3GP box types at offset 4
+            val boxType = String(header, 4, 4, Charsets.US_ASCII)
+            if (boxType == "ftyp" || boxType == "moov" || boxType == "mdat" ||
+                boxType == "free" || boxType == "skip" || boxType == "wide"
+            ) {
+                return true
+            }
+            // EBML (WebM / MKV) header magic 0x1A 0x45 0xDF 0xA3
+            if (header[0] == 0x1A.toByte() && header[1] == 0x45.toByte() &&
+                header[2] == 0xDF.toByte() && header[3] == 0xA3.toByte()
+            ) {
+                return true
+            }
+            false
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun prepareOutputDir(context: Context): File =
@@ -342,67 +401,115 @@ object CanvasVideoExporter {
 
     private fun downloadVideoToCache(context: Context, videoUrl: String): File? {
         val cacheDir = File(context.cacheDir, "canvas_video_cache").apply { mkdirs() }
-        val cacheKey = videoUrl.hashCode().toUInt().toString(16)
+        val normalizedUrl = normalizeDownloadUrl(videoUrl)
+        val cacheKey = normalizedUrl.hashCode().toUInt().toString(16)
         val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        if (cached.exists() && cached.length() > 4096L) {
-            cached.setLastModified(System.currentTimeMillis())
-            return cached
-        }
+        val lock = cacheDownloadLocks.computeIfAbsent(cacheKey) { Any() }
 
-        // Keep cache bounded on low-storage devices like Redmi 9C
-        cacheDir.listFiles()
-            ?.sortedByDescending { it.lastModified() }
-            ?.drop(7)
-            ?.forEach { it.delete() }
-
-        val tempFile = File(cacheDir, "tmp_$cacheKey.mp4")
-        if (tempFile.exists()) tempFile.delete()
-        var currentUrl = videoUrl
-        var redirects = 0
-        while (redirects < 6) {
-            val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 9000
-                readTimeout = 20000
-                instanceFollowRedirects = false
-                setRequestProperty("User-Agent", com.example.service.SpotifyAuthManager.DESKTOP_BROWSER_UA)
-                setRequestProperty("Accept", "*/*")
+        synchronized(lock) {
+            if (isLikelyValidVideoFile(cached)) {
+                cached.setLastModified(System.currentTimeMillis())
+                return cached
             }
-            try {
-                val code = conn.responseCode
-                if (code in 300..399) {
-                    val loc = conn.getHeaderField("Location") ?: return null
-                    currentUrl = URL(URL(currentUrl), loc).toString()
-                    redirects++
-                    continue
-                }
-                if (code !in 200..299) return null
+            if (cached.exists()) {
+                runCatching { cached.delete() }
+            }
 
-                conn.inputStream.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        input.copyTo(output, bufferSize = 16_384)
-                        output.flush()
+            val tempFile = File.createTempFile("tmp_${cacheKey}_", ".mp4", cacheDir)
+            var currentUrl = normalizedUrl
+            var redirects = 0
+            try {
+                while (redirects < 6) {
+                    val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 9000
+                        readTimeout = 20000
+                        instanceFollowRedirects = false
+                        setRequestProperty("User-Agent", com.example.service.SpotifyAuthManager.DESKTOP_BROWSER_UA)
+                        setRequestProperty("Accept", "video/mp4,video/*,*/*;q=0.8")
+                        val host = runCatching { URL(currentUrl).host.lowercase() }.getOrDefault("")
+                        if (host.contains("apple.com") || host.contains("mzstatic.com")) {
+                            setRequestProperty("Referer", "https://music.apple.com/")
+                        }
+                    }
+                    try {
+                        val code = conn.responseCode
+                        if (code in 300..399) {
+                            val loc = conn.getHeaderField("Location") ?: return null
+                            currentUrl = normalizeDownloadUrl(URL(URL(currentUrl), loc).toString())
+                            redirects++
+                            continue
+                        }
+                        if (code !in 200..299) return null
+
+                        val contentType = conn.contentType?.lowercase().orEmpty()
+                        if (contentType.startsWith("text/") ||
+                            contentType.contains("json") ||
+                            contentType.contains("xml") ||
+                            contentType.startsWith("image/")
+                        ) {
+                            return null
+                        }
+
+                        val expectedLength = conn.contentLengthLong
+                        var totalWritten = 0L
+                        conn.inputStream.use { input ->
+                            FileOutputStream(tempFile).use { output ->
+                                val buf = ByteArray(16_384)
+                                while (true) {
+                                    val n = input.read(buf)
+                                    if (n < 0) break
+                                    output.write(buf, 0, n)
+                                    totalWritten += n
+                                }
+                                output.flush()
+                            }
+                        }
+                        if (expectedLength > 0L && totalWritten < expectedLength) {
+                            tempFile.delete()
+                            return null
+                        }
+                        if (isLikelyValidVideoFile(tempFile)) {
+                            if (cached.exists()) cached.delete()
+                            val moved = if (tempFile.renameTo(cached)) {
+                                true
+                            } else {
+                                val staging = File.createTempFile("stg_${cacheKey}_", ".mp4", cacheDir)
+                                tempFile.copyTo(staging, overwrite = true)
+                                tempFile.delete()
+                                staging.renameTo(cached) || run {
+                                    staging.copyTo(cached, overwrite = true)
+                                    staging.delete()
+                                    true
+                                }
+                            }
+                            if (moved && isLikelyValidVideoFile(cached)) {
+                                cached.setLastModified(System.currentTimeMillis())
+                                // Keep cache bounded on low-storage devices like Redmi 9C
+                                cacheDir.listFiles()
+                                    ?.filter { it.name.startsWith("canvas_") && it.absolutePath != cached.absolutePath }
+                                    ?.sortedByDescending { it.lastModified() }
+                                    ?.drop(7)
+                                    ?.forEach { runCatching { it.delete() } }
+                                return cached
+                            }
+                        }
+                        tempFile.delete()
+                        return null
+                    } finally {
+                        conn.disconnect()
                     }
                 }
-                if (tempFile.length() > 4096L) {
-                    if (cached.exists()) cached.delete()
-                    if (tempFile.renameTo(cached)) {
-                        return cached
-                    }
-                    tempFile.copyTo(cached, overwrite = true)
-                    tempFile.delete()
-                    return if (cached.exists() && cached.length() > 4096L) cached else null
-                }
-                tempFile.delete()
                 return null
             } catch (e: Exception) {
                 Log.w(TAG, "Failed downloading canvas video: ${e.message}")
                 tempFile.delete()
                 return null
             } finally {
-                conn.disconnect()
+                if (tempFile.exists()) {
+                    runCatching { tempFile.delete() }
+                }
             }
         }
-        return null
     }
 
     private fun transcodeWithOverlay(
@@ -897,7 +1004,7 @@ object CanvasVideoExporter {
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, videoTextureId)
             GLES20.glUniformMatrix4fv(oesStMatrixHandle, 1, false, stMatrix, 0)
             GLES20.glUniform2f(oesCropScaleHandle, cropScaleX, cropScaleY)
-            GLES20.glUniform1f(oesBlurHandle, blurIntensity * 0.015f)
+            GLES20.glUniform1f(oesBlurHandle, blurIntensity * 0.036f)
             drawQuad(oesPosHandle, oesTexHandle, videoQuadBuffer)
 
             drawForegroundAndWaveform(timeSec)
