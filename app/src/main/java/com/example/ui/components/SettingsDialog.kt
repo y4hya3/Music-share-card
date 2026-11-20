@@ -1574,6 +1574,18 @@ private fun LiveWallpaperMiniPreview(
                                 }
                             }
                         }
+                    } else if (sharpPreviewBmp != null && centerBlurPx < 24f) {
+                        val coverAlpha = if (centerBlurPx <= 14f) 1f else ((24f - centerBlurPx) / 10f).coerceIn(0f, 1f)
+                        Image(
+                            bitmap = sharpPreviewBmp,
+                            contentDescription = "Un-chopped artwork preview",
+                            contentScale = ContentScale.Fit,
+                            filterQuality = FilterQuality.Medium,
+                            modifier = Modifier
+                                .fillMaxWidth(0.84f)
+                                .height(46.dp)
+                                .graphicsLayer { alpha = coverAlpha }
+                        )
                     } else {
                         Spacer(modifier = Modifier.height(42.dp))
                     }

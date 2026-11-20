@@ -55,6 +55,7 @@ class ExampleRobolectricTest {
   }
 
   @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
   fun `trimLetterboxBarsIfPresent trims symmetric bars without recycling source`() {
     val w = 320
     val h = 180
@@ -1867,5 +1868,81 @@ class ExampleRobolectricTest {
     } finally {
       server.stop(0)
     }
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `trimLetterboxBarsIfPresent preserves near-square and dark covers without chopping`() {
+    // 1. Near-square album cover (aspect ~1.09) with dark outer edge must NOT be chopped
+    val nearSquare = Bitmap.createBitmap(240, 220, Bitmap.Config.ARGB_8888)
+    val c1 = Canvas(nearSquare)
+    c1.drawColor(AndroidColor.BLACK)
+    val artPaint = Paint().apply { color = AndroidColor.rgb(220, 60, 120) }
+    c1.drawRect(30f, 30f, 210f, 190f, artPaint)
+    val preservedSquare = com.example.util.BitmapBlurUtils.trimLetterboxBarsIfPresent(nearSquare)
+    assertSame("Expected near-square cover not to be chopped", nearSquare, preservedSquare)
+
+    // 2. Dark atmospheric 16:9 cover (very dark grey, <24 max channel) must NOT be trimmed
+    val darkWide = Bitmap.createBitmap(320, 180, Bitmap.Config.ARGB_8888)
+    val c2 = Canvas(darkWide)
+    c2.drawColor(AndroidColor.BLACK)
+    c2.drawRect(70f, 0f, 250f, 180f, Paint().apply { color = AndroidColor.rgb(18, 18, 20) })
+    val preservedDark = com.example.util.BitmapBlurUtils.trimLetterboxBarsIfPresent(darkWide)
+    assertSame("Expected very dark cover without bright inner border to remain intact", darkWide, preservedDark)
+
+    // 3. Genuine 16:9 letterboxed thumbnail with pure black pillars and bright centered art gets trimmed cleanly
+    val youtubeWide = Bitmap.createBitmap(320, 180, Bitmap.Config.ARGB_8888)
+    val c3 = Canvas(youtubeWide)
+    c3.drawColor(AndroidColor.BLACK)
+    c3.drawRect(70f, 0f, 250f, 180f, Paint().apply { color = AndroidColor.rgb(240, 180, 40) })
+    val trimmedWide = com.example.util.BitmapBlurUtils.trimLetterboxBarsIfPresent(youtubeWide)
+    assertTrue("Expected 16:9 YouTube pillarbox bars to be trimmed (got ${trimmedWide.width})", trimmedWide.width in 168..184)
+    assertEquals(180, trimmedWide.height)
+
+    nearSquare.recycle()
+    darkWide.recycle()
+    if (trimmedWide !== youtubeWide) trimmedWide.recycle()
+    youtubeWide.recycle()
+  }
+
+  @Test
+  fun `pickBestMatchingCoverCandidate selects verified track match and rejects mismatches`() {
+    val wrong = com.example.service.OnlineCoverCandidate(
+      id = "wrong",
+      title = "Completely Different Song",
+      artist = "Random Artist",
+      album = "Other Album",
+      thumbnailUrl = "https://example.com/1_t.jpg",
+      fullResUrl = "https://example.com/1.jpg",
+      source = "iTunes",
+      resolutionLabel = "1000×1000"
+    )
+    val right = com.example.service.OnlineCoverCandidate(
+      id = "right",
+      title = "Blinding Lights",
+      artist = "The Weeknd",
+      album = "After Hours",
+      thumbnailUrl = "https://example.com/2_t.jpg",
+      fullResUrl = "https://example.com/2.jpg",
+      source = "Deezer",
+      resolutionLabel = "1000×1000"
+    )
+
+    val picked = com.example.service.CoverArtSearchService.pickBestMatchingCoverCandidate(
+      candidates = listOf(wrong, right),
+      targetTitle = "Blinding Lights",
+      targetArtist = "The Weeknd",
+      targetAlbum = "After Hours"
+    )
+    assertNotNull(picked)
+    assertEquals("right", picked!!.id)
+
+    val rejected = com.example.service.CoverArtSearchService.pickBestMatchingCoverCandidate(
+      candidates = listOf(wrong),
+      targetTitle = "Blinding Lights",
+      targetArtist = "The Weeknd",
+      targetAlbum = "After Hours"
+    )
+    assertNull("Expected unrelated candidate to be rejected", rejected)
   }
 }

@@ -63,7 +63,8 @@ fun AnimatedCanvasVideoBackground(
     videoUrl: String,
     modifier: Modifier = Modifier,
     blurRadiusPx: Float = 0f,
-    isPlaybackPaused: Boolean = false
+    isPlaybackPaused: Boolean = false,
+    onVideoReadyChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     var currentLogicalUrl by remember { mutableStateOf(videoUrl) }
@@ -130,19 +131,19 @@ fun AnimatedCanvasVideoBackground(
     }
     val fadeAlphaState = animateFloatAsState(
         targetValue = if (isVideoReady) 1f else 0f,
-        animationSpec = tween(durationMillis = 220),
+        animationSpec = tween(durationMillis = 200),
         label = "canvas_video_fade"
     )
+    val isFullyOpaque = isVideoReady && fadeAlphaState.value >= 0.98f
+
+    LaunchedEffect(isFullyOpaque, activePlayUri) {
+        onVideoReadyChanged(isFullyOpaque)
+    }
 
     var playerControllerRef by remember(activePlayUri) { mutableStateOf<AsyncCanvasMediaPlayerController?>(null) }
     var glRendererRef by remember(activePlayUri) { mutableStateOf<PreviewGlRendererController?>(null) }
     var isLifecycleResumed by remember { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
-
-    // Propagate blur slider changes immediately at 60fps with coalesced queue (even while paused)
-    LaunchedEffect(blurRadiusPx, glRendererRef) {
-        glRendererRef?.updateBlurRadius(blurRadiusPx)
-    }
 
     DisposableEffect(lifecycleOwner, activePlayUri) {
         isLifecycleResumed = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
@@ -169,6 +170,7 @@ fun AnimatedCanvasVideoBackground(
         onDispose {
             isPrepared = false
             isVideoReady = false
+            onVideoReadyChanged(false)
             playerControllerRef?.releaseAsync()
             playerControllerRef = null
             glRendererRef?.release()
@@ -255,7 +257,10 @@ fun AnimatedCanvasVideoBackground(
                     }
                 }
             },
-            update = {
+            update = { textureView ->
+                if (textureView.isOpaque != isFullyOpaque) {
+                    textureView.isOpaque = isFullyOpaque
+                }
                 glRendererRef?.updateBlurRadius(blurRadiusPx)
             }
         )
@@ -449,11 +454,13 @@ private class PreviewGlRendererController(
     private var quadBuffer: FloatBuffer? = null
     private val stMatrix = FloatArray(16)
 
-    // Reusable FBO ping-pong buffers (only created when blurRadiusPx > 0.45f)
-    private val fboIds = IntArray(2)
-    private val fboTexIds = IntArray(2)
+    // Pre-allocated 2-level pyramid FBOs ([0,1] = compact base res, [2,3] = half-res) -> zero reallocations during slider drag
+    private val fboIds = IntArray(4)
+    private val fboTexIds = IntArray(4)
     private var currentFboW = 0
     private var currentFboH = 0
+    private var currentHalfFboW = 0
+    private var currentHalfFboH = 0
 
     fun start(onSurfaceReady: (Surface?) -> Unit) {
         glHandler.post {
@@ -596,21 +603,33 @@ private class PreviewGlRendererController(
         }
     }
 
-    private fun ensureBlurFbos(targetW: Int, targetH: Int): Boolean {
-        if (currentFboW == targetW && currentFboH == targetH && fboIds[0] != 0 && fboIds[1] != 0) {
+    private fun ensureBlurFbos(baseW: Int, baseH: Int): Boolean {
+        val halfW = (baseW / 2).coerceAtLeast(24)
+        val halfH = (baseH / 2).coerceAtLeast(24)
+        if (currentFboW == baseW &&
+            currentFboH == baseH &&
+            currentHalfFboW == halfW &&
+            currentHalfFboH == halfH &&
+            fboIds[0] != 0 &&
+            fboIds[1] != 0 &&
+            fboIds[2] != 0 &&
+            fboIds[3] != 0
+        ) {
             return true
         }
         deleteBlurFbos()
-        GLES20.glGenFramebuffers(2, fboIds, 0)
-        GLES20.glGenTextures(2, fboTexIds, 0)
-        for (i in 0..1) {
+        GLES20.glGenFramebuffers(4, fboIds, 0)
+        GLES20.glGenTextures(4, fboTexIds, 0)
+        for (i in 0..3) {
+            val w = if (i < 2) baseW else halfW
+            val h = if (i < 2) baseH else halfH
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[i])
             GLES20.glTexImage2D(
                 GLES20.GL_TEXTURE_2D,
                 0,
                 GLES20.GL_RGBA,
-                targetW,
-                targetH,
+                w,
+                h,
                 0,
                 GLES20.GL_RGBA,
                 GLES20.GL_UNSIGNED_BYTE,
@@ -631,24 +650,26 @@ private class PreviewGlRendererController(
             )
         }
         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-        currentFboW = targetW
-        currentFboH = targetH
+        currentFboW = baseW
+        currentFboH = baseH
+        currentHalfFboW = halfW
+        currentHalfFboH = halfH
         return true
     }
 
     private fun deleteBlurFbos() {
-        if (fboIds[0] != 0 || fboIds[1] != 0) {
-            GLES20.glDeleteFramebuffers(2, fboIds, 0)
-            fboIds[0] = 0
-            fboIds[1] = 0
+        if (fboIds.any { it != 0 }) {
+            GLES20.glDeleteFramebuffers(4, fboIds, 0)
+            for (i in 0..3) fboIds[i] = 0
         }
-        if (fboTexIds[0] != 0 || fboTexIds[1] != 0) {
-            GLES20.glDeleteTextures(2, fboTexIds, 0)
-            fboTexIds[0] = 0
-            fboTexIds[1] = 0
+        if (fboTexIds.any { it != 0 }) {
+            GLES20.glDeleteTextures(4, fboTexIds, 0)
+            for (i in 0..3) fboTexIds[i] = 0
         }
         currentFboW = 0
         currentFboH = 0
+        currentHalfFboW = 0
+        currentHalfFboH = 0
     }
 
     private fun drawCurrentFrame(updateTexImage: Boolean) {
@@ -685,7 +706,7 @@ private class PreviewGlRendererController(
             GLES20.glDisable(GLES20.GL_BLEND)
             val blurPx = blurRadiusPx
 
-            if (blurPx <= 0.45f) {
+            if (blurPx <= 0.35f) {
                 // Fast zero-blur path: direct 1-tap OES render to screen
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                 GLES20.glViewport(0, 0, vw, vh)
@@ -696,13 +717,8 @@ private class PreviewGlRendererController(
                 GLES20.glUniform2f(oesCropScaleHandle, cropScaleX, cropScaleY)
                 drawQuad(oesPosHandle, oesTexHandle, qb)
             } else {
-                // Quantized FBO buckets eliminate GPU texture reallocation stutters while dragging blur slider
-                val norm = (blurPx / 40f).coerceIn(0f, 1f)
-                val maxLongEdge = when {
-                    blurPx <= 8f -> if (isLegacyTier) 208 else 264
-                    blurPx <= 20f -> if (isLegacyTier) 144 else 184
-                    else -> if (isLegacyTier) 96 else 124
-                }
+                // Fixed pre-allocated 2-level Gaussian pyramid: zero texture reallocations on drag & step <= 1.10 (zero ringing)
+                val maxLongEdge = if (isLegacyTier) 180 else 240
                 val fboW: Int
                 val fboH: Int
                 if (vw >= vh) {
@@ -713,8 +729,10 @@ private class PreviewGlRendererController(
                     fboW = (maxLongEdge * viewAspect).roundToInt().coerceAtLeast(32)
                 }
                 ensureBlurFbos(fboW, fboH)
+                val halfW = currentHalfFboW
+                val halfH = currentHalfFboH
 
-                // Pass 1: Sample OES video ONCE per compact FBO texel into FBO1
+                // Pass 1: Sample OES video ONCE per compact FBO texel into FBO[0]
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[0])
                 GLES20.glViewport(0, 0, fboW, fboH)
                 GLES20.glUseProgram(oesProgram)
@@ -729,51 +747,70 @@ private class PreviewGlRendererController(
                 GLES20.glUseProgram(blurProgram)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
 
-                if (blurPx <= 8f) {
-                    val step1 = 0.55f + (blurPx / 8f) * 1.15f
-                    // H: FBO1 -> FBO2
+                if (blurPx <= 10f) {
+                    val step1 = 0.25f + (blurPx / 10f) * 0.80f
+                    // H: FBO[0] -> FBO[1]
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[1])
                     GLES20.glViewport(0, 0, fboW, fboH)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[0])
                     GLES20.glUniform2f(blurTexelStepHandle, step1 * invW, 0f)
                     drawQuad(blurPosHandle, blurTexHandle, qb)
 
-                    // V + upscale: FBO2 -> Screen
+                    // V + bilinear upscale: FBO[1] -> Screen
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                     GLES20.glViewport(0, 0, vw, vh)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[1])
                     GLES20.glUniform2f(blurTexelStepHandle, 0f, step1 * invH)
                     drawQuad(blurPosHandle, blurTexHandle, qb)
                 } else {
-                    // Two ping-pong H+V Gaussian passes for velvety bokeh without grid/ghost artifacts
-                    val stepA = 0.95f + norm * 0.95f
-                    val stepB = 1.15f + norm * 1.45f
+                    val t = ((blurPx - 10f) / 30f).coerceIn(0f, 1f)
+                    val invHalfW = 1f / halfW.toFloat()
+                    val invHalfH = 1f / halfH.toFloat()
 
-                    // Iter 1 H: FBO1 -> FBO2
+                    // Level 1 pre-blur (step = 1.05): eliminates aliasing before 2x downsample
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[1])
                     GLES20.glViewport(0, 0, fboW, fboH)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[0])
-                    GLES20.glUniform2f(blurTexelStepHandle, stepA * invW, 0f)
+                    GLES20.glUniform2f(blurTexelStepHandle, 1.05f * invW, 0f)
                     drawQuad(blurPosHandle, blurTexHandle, qb)
 
-                    // Iter 1 V: FBO2 -> FBO1
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[0])
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[1])
-                    GLES20.glUniform2f(blurTexelStepHandle, 0f, stepA * invH)
+                    GLES20.glUniform2f(blurTexelStepHandle, 0f, 1.05f * invH)
                     drawQuad(blurPosHandle, blurTexHandle, qb)
 
-                    // Iter 2 H: FBO1 -> FBO2
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[1])
+                    // Level 2 half-res blur (step = 0.45..1.10): ultra-smooth velvety bokeh with zero ringing
+                    val step2 = 0.45f + t * 0.65f
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[2])
+                    GLES20.glViewport(0, 0, halfW, halfH)
                     GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[0])
-                    GLES20.glUniform2f(blurTexelStepHandle, stepB * invW, 0f)
+                    GLES20.glUniform2f(blurTexelStepHandle, step2 * invW, 0f)
                     drawQuad(blurPosHandle, blurTexHandle, qb)
 
-                    // Iter 2 V + hardware bilinear upscale: FBO2 -> Screen
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-                    GLES20.glViewport(0, 0, vw, vh)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[1])
-                    GLES20.glUniform2f(blurTexelStepHandle, 0f, stepB * invH)
-                    drawQuad(blurPosHandle, blurTexHandle, qb)
+                    if (t > 0.35f) {
+                        val step3 = ((t - 0.35f) / 0.65f) * 1.05f
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[3])
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
+                        GLES20.glUniform2f(blurTexelStepHandle, 0f, step2 * invHalfH)
+                        drawQuad(blurPosHandle, blurTexHandle, qb)
+
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboIds[2])
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[3])
+                        GLES20.glUniform2f(blurTexelStepHandle, step3 * invHalfW, 0f)
+                        drawQuad(blurPosHandle, blurTexHandle, qb)
+
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                        GLES20.glViewport(0, 0, vw, vh)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
+                        GLES20.glUniform2f(blurTexelStepHandle, 0f, step3 * invHalfH)
+                        drawQuad(blurPosHandle, blurTexHandle, qb)
+                    } else {
+                        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+                        GLES20.glViewport(0, 0, vw, vh)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
+                        GLES20.glUniform2f(blurTexelStepHandle, 0f, step2 * invHalfH)
+                        drawQuad(blurPosHandle, blurTexHandle, qb)
+                    }
                 }
             }
 

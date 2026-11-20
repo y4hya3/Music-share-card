@@ -50,6 +50,7 @@ object MediaNotificationRepository {
     private var initialized: Boolean = false
 
     private var onlineSearchJob: Job? = null
+    private var lowResCoverUpgradeJob: Job? = null
     private var canvasSearchJob: Job? = null
     private var applyCanvasJob: Job? = null
     private var coverLoadJob: Job? = null
@@ -60,6 +61,7 @@ object MediaNotificationRepository {
     @Volatile
     private var lastMediaRefreshMs: Long = 0L
     private var lastAutoSearchedTrackKey: String? = null
+    private var lastAutoUpgradedLowResTrackKey: String? = null
     private var lastAutoCanvasTrackKey: String? = null
     private var userManuallySelectedCoverTrackKey: String? = null
     private var userManuallySelectedCanvasTrackKey: String? = null
@@ -249,6 +251,7 @@ object MediaNotificationRepository {
             canvasSearchJob?.cancel()
             applyCanvasJob?.cancel()
             onlineSearchJob?.cancel()
+            lowResCoverUpgradeJob?.cancel()
             _originalPlayerArt.value = trackInfo.albumArt
             _selectedCoverId.value = "player"
             _onlineCoverCandidates.value = emptyList()
@@ -263,6 +266,7 @@ object MediaNotificationRepository {
             autoAppliedSavedCanvasTrackKey = null
             autoAppliedSavedCoverTrackKey = null
             lastAutoSearchedTrackKey = null
+            lastAutoUpgradedLowResTrackKey = null
             lastAutoCanvasTrackKey = null
             coverLoadJob?.cancel()
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
@@ -353,6 +357,17 @@ object MediaNotificationRepository {
         ) {
             lastAutoSearchedTrackKey = newKey
             searchOnlineCovers(autoApplyBest = autoAppliedSavedCoverTrackKey != newKey)
+        } else if (!finalTrack.isSample &&
+            autoAppliedSavedCoverTrackKey != newKey &&
+            userManuallySelectedCoverTrackKey != newKey &&
+            lastAutoUpgradedLowResTrackKey != newKey
+        ) {
+            val artMaxSide = finalTrack.albumArt?.takeIf { !it.isRecycled }
+                ?.let { maxOf(it.width, it.height) } ?: 0
+            if (artMaxSide < 600) {
+                lastAutoUpgradedLowResTrackKey = newKey
+                upgradeLowResArtworkSilently(finalTrack)
+            }
         }
 
         // If Auto-Search Animated Canvas OR Live Wallpaper Animated Canvas mode is enabled,
@@ -432,6 +447,10 @@ object MediaNotificationRepository {
         val ctx = context.applicationContext
         ensureInitialized(ctx)
         SavedMediaLibrary.initialize(ctx)
+        checkNotificationAccess(ctx)
+        if (_isNotificationAccessEnabled.value && !MusicNotificationListenerService.hasActiveListenerBinding()) {
+            MusicNotificationListenerService.rebindIfPossible(ctx)
+        }
         refreshFromActiveMedia(ctx, force = true)
         recheckSavedAlbumCanvasForCurrentTrack()
         recheckSavedAlbumCoverForCurrentTrack()
@@ -459,6 +478,7 @@ object MediaNotificationRepository {
         canvasSearchJob?.cancel()
         applyCanvasJob?.cancel()
         onlineSearchJob?.cancel()
+        lowResCoverUpgradeJob?.cancel()
         _originalPlayerArt.value = track.albumArt
         _selectedCoverId.value = "player"
         _onlineCoverCandidates.value = emptyList()
@@ -471,6 +491,7 @@ object MediaNotificationRepository {
         autoAppliedSavedCanvasTrackKey = null
         autoAppliedSavedCoverTrackKey = null
         lastAutoSearchedTrackKey = null
+        lastAutoUpgradedLowResTrackKey = null
         lastAutoCanvasTrackKey = null
 
         val key = trackKey(track)
@@ -821,6 +842,46 @@ object MediaNotificationRepository {
         val updated = current.copy(albumArt = hdBitmap)
         _currentTrack.value = updated
         extractPaletteForTrack(updated)
+    }
+
+    private fun upgradeLowResArtworkSilently(snapshot: MediaTrackInfo) {
+        val expectedKey = trackKey(snapshot)
+        val searchTerm = buildSearchQuery(snapshot).trim()
+        if (searchTerm.isEmpty()) return
+
+        lowResCoverUpgradeJob?.cancel()
+        lowResCoverUpgradeJob = repositoryScope.launch {
+            val candidates = CoverArtSearchService.searchCoverArt(searchTerm, maxResults = 6)
+            val bestMatch = CoverArtSearchService.pickBestMatchingCoverCandidate(
+                candidates = candidates,
+                targetTitle = snapshot.title,
+                targetArtist = snapshot.artist,
+                targetAlbum = snapshot.album
+            ) ?: return@launch
+
+            val hdBitmap = CoverArtSearchService.fetchFullResolutionArt(
+                candidate = bestMatch,
+                maxDimension = DevicePerformanceTier.recommendedCoverMaxDim(appContext)
+            ) ?: return@launch
+
+            val current = _currentTrack.value
+            if (trackKey(current) != expectedKey ||
+                userManuallySelectedCoverTrackKey == expectedKey ||
+                autoAppliedSavedCoverTrackKey == expectedKey
+            ) {
+                return@launch
+            }
+            val curArt = current.albumArt
+            val curPixels = if (curArt != null && !curArt.isRecycled) curArt.width.toLong() * curArt.height.toLong() else 0L
+            val hdPixels = hdBitmap.width.toLong() * hdBitmap.height.toLong()
+            val hdMax = maxOf(hdBitmap.width, hdBitmap.height)
+            if (hdMax >= 600 && hdPixels > curPixels) {
+                _selectedCoverId.value = bestMatch.id
+                val updated = current.copy(albumArt = hdBitmap)
+                _currentTrack.value = updated
+                extractPaletteForTrack(updated)
+            }
+        }
     }
 
     fun searchAnimatedCanvases(

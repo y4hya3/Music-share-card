@@ -115,6 +115,8 @@ fun BlurredAlbumBackground(
         albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.bgSourceMaxDim) }
     }
 
+    var isCanvasOpaque by remember(activeCanvasVideoUrl) { mutableStateOf(false) }
+
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val stageWidthRatio = (maxWidth.value / 360f).coerceIn(0.65f, 1.45f)
         if (styleConfig.useTransparentBackground) {
@@ -122,7 +124,14 @@ fun BlurredAlbumBackground(
             return@BoxWithConstraints
         }
 
-        if (styleConfig.useBlurredAlbumBackground && sharpOrGpuBgBitmap != null) {
+        val hideStaticUnderlay = !activeCanvasVideoUrl.isNullOrBlank() && isCanvasOpaque
+        if (hideStaticUnderlay) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0A0A0E))
+            )
+        } else if (styleConfig.useBlurredAlbumBackground && sharpOrGpuBgBitmap != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val bgImageBitmap = remember(sharpOrGpuBgBitmap) {
                     sharpOrGpuBgBitmap.asImageBitmap()
@@ -240,6 +249,7 @@ fun BlurredAlbumBackground(
                 videoUrl = activeCanvasVideoUrl,
                 blurRadiusPx = blurRadius,
                 isPlaybackPaused = isCanvasPaused,
+                onVideoReadyChanged = { isCanvasOpaque = it },
                 modifier = Modifier.fillMaxSize()
             )
         }

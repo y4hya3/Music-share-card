@@ -98,6 +98,9 @@ class MusicNotificationListenerService : NotificationListenerService() {
         @Volatile
         private var activeInstance: MusicNotificationListenerService? = null
 
+        @Volatile
+        private var cachedAppContext: Context? = null
+
         private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val registeredCallbacks = ConcurrentHashMap<MediaSession.Token, Pair<MediaController, MediaController.Callback>>()
         private val appLabelCache = ConcurrentHashMap<String, String>()
@@ -105,12 +108,14 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private var sessionManagerRef: MediaSessionManager? = null
 
         private val activeSessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-            val appCtx = activeInstance?.applicationContext ?: return@OnActiveSessionsChangedListener
+            val appCtx = activeInstance?.applicationContext ?: cachedAppContext ?: return@OnActiveSessionsChangedListener
             controllers?.let {
                 registerControllerCallbacks(appCtx, it)
                 processControllersList(appCtx, it)
             }
         }
+
+        fun hasActiveListenerBinding(): Boolean = activeInstance != null
 
         fun isNotificationAccessGranted(context: Context): Boolean {
             val packageName = context.packageName
@@ -147,6 +152,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
          */
         fun syncNow(context: Context): Boolean {
             val appCtx = context.applicationContext
+            cachedAppContext = appCtx
             if (!isNotificationAccessGranted(appCtx)) {
                 return false
             }
@@ -170,6 +176,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
         }
 
         private fun attachSessionListener(context: Context) {
+            cachedAppContext = context.applicationContext
             if (sessionsListenerRegistered || !isNotificationAccessGranted(context)) return
             try {
                 val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
@@ -398,7 +405,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
             }
             val maxMetadataDim = candidateBitmaps.maxOfOrNull { maxOf(it.width, it.height) } ?: 0
-            if (maxMetadataDim < 300) {
+            if (maxMetadataDim < 720) {
                 findNotificationArtworkForPackage(context, controller.packageName)?.let {
                     if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
                 }
@@ -629,8 +636,8 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     if (drawable is android.graphics.drawable.BitmapDrawable && drawable.bitmap != null) {
                         candidates.add(drawable.bitmap)
                     } else {
-                        val w = drawable.intrinsicWidth.coerceAtLeast(128)
-                        val h = drawable.intrinsicHeight.coerceAtLeast(128)
+                        val w = drawable.intrinsicWidth.coerceAtLeast(512)
+                        val h = drawable.intrinsicHeight.coerceAtLeast(512)
                         candidates.add(drawable.toBitmap(width = w, height = h, config = Bitmap.Config.ARGB_8888))
                     }
                 }
@@ -661,7 +668,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     .filter { !it.isRecycled && it.width > 0 && it.height > 0 }
                     .maxByOrNull { it.width.toLong() * it.height.toLong() }
 
-                val safe = BitmapBlurUtils.toSafeSoftwareBitmap(best, maxDimension = 1024)
+                val safe = BitmapBlurUtils.toSafeSoftwareBitmap(best, maxDimension = 1400)
                 if (safe != null) {
                     val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(safe)
                     if (safe !== best && trimmed !== safe && !safe.isRecycled) {

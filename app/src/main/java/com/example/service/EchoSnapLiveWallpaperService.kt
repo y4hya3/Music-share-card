@@ -1,14 +1,17 @@
 package com.example.service
 
 import android.app.WallpaperManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
+import androidx.core.content.ContextCompat
 import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
 import android.net.Uri
@@ -94,6 +97,19 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
         private var idlePlaceholderBitmap: Bitmap? = null
         private val mainHandler = Handler(Looper.getMainLooper())
         private val idleTimeoutRunnable = Runnable { evaluateIdleTimeoutState() }
+        private val videoWatchdogRunnable = Runnable { checkAndRecoverVideoPlayback() }
+        private var screenStateReceiver: BroadcastReceiver? = null
+
+        @Volatile
+        private var hiddenSinceRealtimeMs: Long = 0L
+
+        @Volatile
+        private var lastVideoFrameRealtimeMs: Long = 0L
+
+        @Volatile
+        private var videoResumeAttemptTimeMs: Long = 0L
+
+        private var videoRecoveryAttempts = 0
 
         private var currentConfig = MediaNotificationRepository.styleConfig.value
         private var currentTrack = MediaNotificationRepository.currentTrack.value
@@ -178,12 +194,15 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
 
         private var quadBuffer: FloatBuffer? = null
         private var cardQuadBuffer: FloatBuffer? = null
+        private var fitArtQuadBuffer: FloatBuffer? = null
         private val stMatrix = FloatArray(16)
 
-        private val fboIds = IntArray(3)
-        private val fboTexIds = IntArray(3)
+        private val fboIds = IntArray(4)
+        private val fboTexIds = IntArray(4)
         private var currentFboW = 0
         private var currentFboH = 0
+        private var currentHalfFboW = 0
+        private var currentHalfFboH = 0
 
         // Off-thread MediaPlayer state (exclusively touched on mediaThread)
         private var mediaPlayer: MediaPlayer? = null
@@ -199,6 +218,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             mediaThread = HandlerThread("EchoSnapWallpaperMedia").apply { start() }
             mediaHandler = Handler(mediaThread!!.looper)
 
+            registerScreenStateReceiver()
             startObservingRepository()
         }
 
@@ -209,6 +229,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             viewWidth = max(1, frame.width())
             viewHeight = max(1, frame.height())
             isSurfaceValid = true
+            MediaNotificationRepository.triggerWallpaperMediaSync(appCtx, forceCanvasRetry = true)
 
             glHandler?.post {
                 if (initGl(surface)) {
@@ -225,6 +246,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             viewWidth = max(1, width)
             viewHeight = max(1, height)
             updateCardQuadBuffer(viewWidth, viewHeight)
+            updateFitArtQuadBuffer(viewWidth, viewHeight, artWidth, artHeight)
             requestStaticRender()
         }
 
@@ -232,12 +254,28 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             super.onVisibilityChanged(visible)
             isEngineVisible = visible
             if (visible) {
-                MediaNotificationRepository.refreshFromActiveMedia(appCtx, force = false)
+                val hiddenDurationMs = if (hiddenSinceRealtimeMs > 0L) {
+                    (SystemClock.elapsedRealtime() - hiddenSinceRealtimeMs).coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+                hiddenSinceRealtimeMs = 0L
+                MediaNotificationRepository.triggerWallpaperMediaSync(appCtx, forceCanvasRetry = true)
                 evaluateIdleTimeoutState()
-                updateMediaPlayerPlaybackState()
+                syncVideoSourceWithState()
+                videoResumeAttemptTimeMs = SystemClock.elapsedRealtime()
+                if (hiddenDurationMs >= 3000L && shouldPlayVideo()) {
+                    mainHandler.removeCallbacks(videoWatchdogRunnable)
+                    mainHandler.postDelayed(videoWatchdogRunnable, 420L)
+                } else if (shouldPlayVideo()) {
+                    mainHandler.removeCallbacks(videoWatchdogRunnable)
+                    mainHandler.postDelayed(videoWatchdogRunnable, 750L)
+                }
                 requestStaticRender()
             } else {
+                hiddenSinceRealtimeMs = SystemClock.elapsedRealtime()
                 mainHandler.removeCallbacks(idleTimeoutRunnable)
+                mainHandler.removeCallbacks(videoWatchdogRunnable)
                 updateMediaPlayerPlaybackState()
             }
         }
@@ -245,7 +283,13 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
         override fun onSurfaceDestroyed(holder: SurfaceHolder?) {
             isSurfaceValid = false
             isEngineVisible = false
+            activeVideoUrl = null
+            preparedVideoUrl = null
+            isMediaPrepared = false
+            hasReceivedVideoFrame = false
+            lastVideoFrameRealtimeMs = 0L
             mainHandler.removeCallbacks(idleTimeoutRunnable)
+            mainHandler.removeCallbacks(videoWatchdogRunnable)
             releaseMediaPlayerAsync(quitThread = false)
             glHandler?.post {
                 releaseGlWindowAndTextures()
@@ -256,7 +300,13 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
         override fun onDestroy() {
             isSurfaceValid = false
             isEngineVisible = false
+            activeVideoUrl = null
+            preparedVideoUrl = null
+            isMediaPrepared = false
+            hasReceivedVideoFrame = false
+            unregisterScreenStateReceiver()
             mainHandler.removeCallbacks(idleTimeoutRunnable)
+            mainHandler.removeCallbacks(videoWatchdogRunnable)
             observeJob?.cancel()
             cardOverlayJob?.cancel()
             idlePhotoLoadJob?.cancel()
@@ -276,6 +326,53 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             loadedIdlePhotoBitmap?.let { if (!it.isRecycled) it.recycle() }
             loadedIdlePhotoBitmap = null
             super.onDestroy()
+        }
+
+        private fun registerScreenStateReceiver() {
+            if (screenStateReceiver != null) return
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    when (intent?.action) {
+                        Intent.ACTION_SCREEN_OFF -> {
+                            hiddenSinceRealtimeMs = SystemClock.elapsedRealtime()
+                            mainHandler.removeCallbacks(videoWatchdogRunnable)
+                            updateMediaPlayerPlaybackState()
+                        }
+                        Intent.ACTION_SCREEN_ON,
+                        Intent.ACTION_USER_PRESENT -> {
+                            MediaNotificationRepository.triggerWallpaperMediaSync(appCtx, forceCanvasRetry = true)
+                            evaluateIdleTimeoutState()
+                            syncVideoSourceWithState()
+                            if (shouldPlayVideo()) {
+                                videoResumeAttemptTimeMs = SystemClock.elapsedRealtime()
+                                updateMediaPlayerPlaybackState()
+                                mainHandler.removeCallbacks(videoWatchdogRunnable)
+                                mainHandler.postDelayed(videoWatchdogRunnable, 480L)
+                            }
+                            requestStaticRender()
+                        }
+                    }
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            try {
+                ContextCompat.registerReceiver(appCtx, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+                screenStateReceiver = receiver
+            } catch (_: Exception) {
+            }
+        }
+
+        private fun unregisterScreenStateReceiver() {
+            val receiver = screenStateReceiver ?: return
+            screenStateReceiver = null
+            try {
+                appCtx.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
         }
 
         private fun startObservingRepository() {
@@ -479,7 +576,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             lastUploadedArtBitmap = rawArt
 
             // Upload software-safe high-res bitmap copy to GL_TEXTURE_2D
-            val maxDim = if (tier.isLowRam) 1080 else 1500
+            val maxDim = if (tier.isLowRam) 1200 else 1600
             val uploadCopy = BitmapBlurUtils.toSafeSoftwareBitmap(rawArt, maxDimension = maxDim) ?: return
             glHandler?.post {
                 if (!isSurfaceValid || artTextureId == 0 || eglContext == EGL14.EGL_NO_CONTEXT) {
@@ -493,6 +590,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                     artWidth = max(1, uploadCopy.width)
                     artHeight = max(1, uploadCopy.height)
                     hasArtTexture = true
+                    updateFitArtQuadBuffer(viewWidth, viewHeight, artWidth, artHeight)
                 } catch (_: Exception) {
                 } finally {
                     if (uploadCopy !== rawArt && !uploadCopy.isRecycled) {
@@ -531,8 +629,8 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             if (!force && sig == lastCardRenderSignature && hasCardTexture) return
             lastCardRenderSignature = sig
 
-            val targetW = if (tier.isLegacyRenderTier) 540 else 720
-            val targetH = if (tier.isLegacyRenderTier) 960 else 1280
+            val targetW = if (tier.isLowRam) 540 else 720
+            val targetH = if (tier.isLowRam) 960 else 1280
             val overlayStyle = cfg.copy(
                 useTransparentBackground = true,
                 useBlurredAlbumBackground = false
@@ -587,6 +685,8 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             if (targetUrl == null) {
                 activeVideoUrl = null
                 hasReceivedVideoFrame = false
+                videoRecoveryAttempts = 0
+                mainHandler.removeCallbacks(videoWatchdogRunnable)
                 releaseMediaPlayerAsync(quitThread = false)
                 requestStaticRender()
                 return
@@ -613,12 +713,40 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
 
             activeVideoUrl = targetUrl
             hasReceivedVideoFrame = false
+            videoRecoveryAttempts = 0
             requestStaticRender() // Shows high-res artwork cleanly while video prepares
 
             glHandler?.post {
                 val decSurface = decoderSurface
                 if (!isSurfaceValid || decSurface == null) return@post
                 prepareMediaPlayerAsync(targetUrl, decSurface)
+            }
+        }
+
+        private fun checkAndRecoverVideoPlayback() {
+            if (!isSurfaceValid || !shouldPlayVideo()) return
+            val url = activeVideoUrl ?: return
+            val elapsedSinceFrame = SystemClock.elapsedRealtime() - lastVideoFrameRealtimeMs
+            val frameArrivedAfterResume = lastVideoFrameRealtimeMs >= videoResumeAttemptTimeMs &&
+                elapsedSinceFrame < 1200L
+            if (frameArrivedAfterResume && isMediaPrepared && hasReceivedVideoFrame) {
+                videoRecoveryAttempts = 0
+                return
+            }
+            if (videoRecoveryAttempts >= 3) return
+            videoRecoveryAttempts++
+            val forceRebuildSurface = videoRecoveryAttempts >= 2 || decoderSurface == null
+
+            glHandler?.post {
+                if (!isSurfaceValid || activeVideoUrl != url) return@post
+                if (forceRebuildSurface) {
+                    recreateDecoderSurfaceLocked()
+                }
+                val decSurface = decoderSurface ?: return@post
+                hasReceivedVideoFrame = false
+                videoResumeAttemptTimeMs = SystemClock.elapsedRealtime()
+                prepareMediaPlayerAsync(url, decSurface)
+                mainHandler.postDelayed(videoWatchdogRunnable, 900L)
             }
         }
 
@@ -668,6 +796,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                                 videoHeight = preparedMp.videoHeight
                             }
                             if (shouldPlayVideo()) {
+                                videoResumeAttemptTimeMs = SystemClock.elapsedRealtime()
                                 preparedMp.start()
                             }
                         } catch (_: Exception) {
@@ -715,12 +844,27 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
 
         private fun updateMediaPlayerPlaybackState() {
             val play = shouldPlayVideo()
+            val expectedUrl = activeVideoUrl
             mediaHandler?.post {
-                val mp = mediaPlayer ?: return@post
+                val mp = mediaPlayer
+                if (mp == null) {
+                    if (play && !expectedUrl.isNullOrBlank() && preparedVideoUrl == null) {
+                        glHandler?.post {
+                            val s = decoderSurface
+                            if (isSurfaceValid && s != null && activeVideoUrl == expectedUrl) {
+                                prepareMediaPlayerAsync(expectedUrl, s)
+                            }
+                        }
+                    }
+                    return@post
+                }
                 if (!isMediaPrepared) return@post
                 try {
                     if (play) {
-                        if (!mp.isPlaying) mp.start()
+                        if (!mp.isPlaying) {
+                            videoResumeAttemptTimeMs = SystemClock.elapsedRealtime()
+                            mp.start()
+                        }
                     } else {
                         if (mp.isPlaying) mp.pause()
                     }
@@ -856,15 +1000,17 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                 if (gh != null) {
                     decoderSurfaceTexture = SurfaceTexture(oesTextureId).apply {
                         setOnFrameAvailableListener({
-                            if (isSurfaceValid && shouldPlayVideo()) {
-                                texImagePending.set(true)
-                                if (renderPending.compareAndSet(false, true)) {
-                                    gh.post {
-                                        renderPending.set(false)
-                                        if (isSurfaceValid) {
-                                            val doTex = texImagePending.getAndSet(false)
-                                            drawFrameInternal(updateTexImage = doTex)
-                                        }
+                            lastVideoFrameRealtimeMs = SystemClock.elapsedRealtime()
+                            videoRecoveryAttempts = 0
+                            texImagePending.set(true)
+                            if (renderPending.compareAndSet(false, true)) {
+                                gh.post {
+                                    renderPending.set(false)
+                                    val doTex = texImagePending.getAndSet(false)
+                                    if (isSurfaceValid && shouldPlayVideo()) {
+                                        drawFrameInternal(updateTexImage = doTex)
+                                    } else if (doTex) {
+                                        drainPendingTexImageSafely()
                                     }
                                 }
                             }
@@ -876,6 +1022,60 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             } catch (_: Exception) {
                 false
             }
+        }
+
+        private fun drainPendingTexImageSafely() {
+            val dst = decoderSurfaceTexture ?: return
+            if (eglDisplay == EGL14.EGL_NO_DISPLAY || eglSurface == EGL14.EGL_NO_SURFACE || eglContext == EGL14.EGL_NO_CONTEXT) {
+                return
+            }
+            try {
+                if (EGL14.eglGetCurrentContext() != eglContext ||
+                    EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW) != eglSurface
+                ) {
+                    EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+                }
+                dst.updateTexImage()
+                dst.getTransformMatrix(stMatrix)
+                hasReceivedVideoFrame = true
+                lastVideoFrameRealtimeMs = SystemClock.elapsedRealtime()
+            } catch (_: Exception) {
+            }
+        }
+
+        private fun recreateDecoderSurfaceLocked() {
+            if (oesTextureId == 0 || glHandler == null) return
+            try {
+                decoderSurface?.release()
+            } catch (_: Exception) {
+            }
+            decoderSurface = null
+            try {
+                decoderSurfaceTexture?.release()
+            } catch (_: Exception) {
+            }
+            decoderSurfaceTexture = null
+
+            val gh = glHandler ?: return
+            decoderSurfaceTexture = SurfaceTexture(oesTextureId).apply {
+                setOnFrameAvailableListener({
+                    lastVideoFrameRealtimeMs = SystemClock.elapsedRealtime()
+                    videoRecoveryAttempts = 0
+                    texImagePending.set(true)
+                    if (renderPending.compareAndSet(false, true)) {
+                        gh.post {
+                            renderPending.set(false)
+                            val doTex = texImagePending.getAndSet(false)
+                            if (isSurfaceValid && shouldPlayVideo()) {
+                                drawFrameInternal(updateTexImage = doTex)
+                            } else if (doTex) {
+                                drainPendingTexImageSafely()
+                            }
+                        }
+                    }
+                }, gh)
+            }
+            decoderSurface = Surface(decoderSurfaceTexture)
         }
 
         private fun updateCardQuadBuffer(vw: Int, vh: Int) {
@@ -901,26 +1101,53 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             cardQuadBuffer = allocateFloatBuffer(verts)
         }
 
-        private fun ensureBlurFbos(targetW: Int, targetH: Int) {
-            if (currentFboW == targetW &&
-                currentFboH == targetH &&
+        private fun updateFitArtQuadBuffer(vw: Int, vh: Int, aw: Int, ah: Int) {
+            val viewAspect = vw.toFloat() / vh.coerceAtLeast(1).toFloat()
+            val artAspect = aw.toFloat() / ah.coerceAtLeast(1).toFloat()
+            val maxW = 0.84f
+            val maxH = 0.64f
+            var scaleX = maxW
+            var scaleY = scaleX * (viewAspect / artAspect)
+            if (scaleY > maxH) {
+                scaleY = maxH
+                scaleX = scaleY * (artAspect / viewAspect)
+            }
+            val verts = floatArrayOf(
+                -scaleX, -scaleY, 0f, 0f,
+                scaleX, -scaleY, 1f, 0f,
+                -scaleX, scaleY, 0f, 1f,
+                scaleX, scaleY, 1f, 1f
+            )
+            fitArtQuadBuffer = allocateFloatBuffer(verts)
+        }
+
+        private fun ensureBlurFbos(baseW: Int, baseH: Int) {
+            val halfW = (baseW / 2).coerceAtLeast(24)
+            val halfH = (baseH / 2).coerceAtLeast(24)
+            if (currentFboW == baseW &&
+                currentFboH == baseH &&
+                currentHalfFboW == halfW &&
+                currentHalfFboH == halfH &&
                 fboIds[0] != 0 &&
                 fboIds[1] != 0 &&
-                fboIds[2] != 0
+                fboIds[2] != 0 &&
+                fboIds[3] != 0
             ) {
                 return
             }
             deleteBlurFbos()
-            GLES20.glGenFramebuffers(3, fboIds, 0)
-            GLES20.glGenTextures(3, fboTexIds, 0)
-            for (i in 0..2) {
+            GLES20.glGenFramebuffers(4, fboIds, 0)
+            GLES20.glGenTextures(4, fboTexIds, 0)
+            for (i in 0..3) {
+                val w = if (i < 2) baseW else halfW
+                val h = if (i < 2) baseH else halfH
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[i])
                 GLES20.glTexImage2D(
                     GLES20.GL_TEXTURE_2D,
                     0,
                     GLES20.GL_RGBA,
-                    targetW,
-                    targetH,
+                    w,
+                    h,
                     0,
                     GLES20.GL_RGBA,
                     GLES20.GL_UNSIGNED_BYTE,
@@ -941,25 +1168,25 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                 )
             }
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-            currentFboW = targetW
-            currentFboH = targetH
+            currentFboW = baseW
+            currentFboH = baseH
+            currentHalfFboW = halfW
+            currentHalfFboH = halfH
         }
 
         private fun deleteBlurFbos() {
-            if (fboIds[0] != 0 || fboIds[1] != 0 || fboIds[2] != 0) {
-                GLES20.glDeleteFramebuffers(3, fboIds, 0)
-                fboIds[0] = 0
-                fboIds[1] = 0
-                fboIds[2] = 0
+            if (fboIds.any { it != 0 }) {
+                GLES20.glDeleteFramebuffers(4, fboIds, 0)
+                for (i in 0..3) fboIds[i] = 0
             }
-            if (fboTexIds[0] != 0 || fboTexIds[1] != 0 || fboTexIds[2] != 0) {
-                GLES20.glDeleteTextures(3, fboTexIds, 0)
-                fboTexIds[0] = 0
-                fboTexIds[1] = 0
-                fboTexIds[2] = 0
+            if (fboTexIds.any { it != 0 }) {
+                GLES20.glDeleteTextures(4, fboTexIds, 0)
+                for (i in 0..3) fboTexIds[i] = 0
             }
             currentFboW = 0
             currentFboH = 0
+            currentHalfFboW = 0
+            currentHalfFboH = 0
         }
 
         private fun runPingPongGaussianIteration(
@@ -1005,6 +1232,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                         it.updateTexImage()
                         it.getTransformMatrix(stMatrix)
                         hasReceivedVideoFrame = true
+                        lastVideoFrameRealtimeMs = SystemClock.elapsedRealtime()
                     }
                 }
 
@@ -1044,12 +1272,28 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                     cropScaleY = srcAspect / viewAspect
                 }
 
-                val centerBlur = if (isWallpaperEnabled && !showingStandbyPhoto) blurRadiusPx else 0f
+                val rawCenterBlur = if (isWallpaperEnabled && !showingStandbyPhoto) blurRadiusPx else 0f
                 val edgeBlur = if (isWallpaperEnabled && !showingStandbyPhoto) edgeBlurFade else 0f
+
+                // When showing plain artwork with card hidden, frame the un-chopped crisp cover centered
+                // over a soft ambient-blurred halo of itself unless the user pushes blur high (> 14px).
+                val showUncroppedCenterArt = isWallpaperEnabled &&
+                    !showingStandbyPhoto &&
+                    !useVideo &&
+                    !showCardOverlay &&
+                    hasArtTexture &&
+                    fitArtQuadBuffer != null &&
+                    rawCenterBlur < 24f
+
+                val centerBlur = if (showUncroppedCenterArt) {
+                    max(rawCenterBlur, 12f)
+                } else {
+                    rawCenterBlur
+                }
 
                 GLES20.glDisable(GLES20.GL_BLEND)
 
-                if (centerBlur <= 0.45f) {
+                if (centerBlur <= 0.35f) {
                     // Stage 1 (Sharp Center Layer): Direct full-res pass to screen
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                     GLES20.glViewport(0, 0, vw, vh)
@@ -1067,21 +1311,24 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                         GLES20.glUniform2f(tex2dCropScaleHandle, cropScaleX, cropScaleY)
                         GLES20.glUniform1f(tex2dFlipYHandle, 1f)
                         GLES20.glUniform1f(tex2dEdgeFadeHandle, 0f)
-                        GLES20.glUniform1f(tex2dAlphaScaleHandle, 0f)
+                        GLES20.glUniform1f(tex2dAlphaScaleHandle, 1f)
                         drawQuad(tex2dPosHandle, tex2dTexHandle, qb)
                     }
 
-                    // Stage 2 (Top & Bottom Edge Blur): Heavy multi-pass frosted band keeping middle razor sharp
+                    // Stage 2 (Top & Bottom Edge Blur): Pre-allocated 2-level Gaussian pyramid frost
                     if (edgeBlur > 0.01f) {
-                        val edgeMaxLong = if (tier.isLegacyRenderTier) 112 else 148
-                        val (fboW, fboH) = computeFboDims(edgeMaxLong, vw, vh, viewAspect)
+                        val baseMaxLong = if (tier.isLegacyRenderTier) 180 else 240
+                        val (fboW, fboH) = computeFboDims(baseMaxLong, vw, vh, viewAspect)
                         ensureBlurFbos(fboW, fboH)
+                        val halfW = currentHalfFboW
+                        val halfH = currentHalfFboH
 
-                        renderInputToFbo1(useVideo, fboW, fboH, cropScaleX, cropScaleY, qb)
-                        val edgeStep1 = 1.05f + edgeBlur * 0.95f
-                        val edgeStep2 = 1.35f + edgeBlur * 1.45f
-                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, edgeStep1, qb)
-                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, edgeStep2, qb)
+                        renderInputToFbo0(useVideo, fboW, fboH, cropScaleX, cropScaleY, qb)
+                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, 1.05f, qb)
+                        runPingPongGaussianIteration(
+                            fboTexIds[0], fboIds[3], fboTexIds[3], fboIds[2],
+                            halfW, halfH, 0.72f + edgeBlur * 0.35f, qb
+                        )
 
                         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                         GLES20.glViewport(0, 0, vw, vh)
@@ -1089,7 +1336,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
                         GLES20.glUseProgram(tex2dProgram)
                         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[0])
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
                         GLES20.glUniform2f(tex2dCropScaleHandle, 1f, 1f)
                         GLES20.glUniform1f(tex2dFlipYHandle, 0f)
                         GLES20.glUniform1f(tex2dEdgeFadeHandle, edgeBlur)
@@ -1097,47 +1344,48 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                         drawQuad(tex2dPosHandle, tex2dTexHandle, qb)
                     }
                 } else {
-                    // Quantized FBO buckets eliminate GPU reallocations during slider drags
-                    val norm = (centerBlur / 40f).coerceIn(0f, 1f)
-                    val maxLong = when {
-                        centerBlur <= 8f -> if (tier.isLegacyRenderTier) 208 else 264
-                        centerBlur <= 20f -> if (tier.isLegacyRenderTier) 144 else 184
-                        else -> if (tier.isLegacyRenderTier) 96 else 124
-                    }
-                    val (fboW, fboH) = computeFboDims(maxLong, vw, vh, viewAspect)
+                    // Pre-allocated 2-level Gaussian pyramid: zero reallocations during slider drags, step <= 1.10
+                    val baseMaxLong = if (tier.isLegacyRenderTier) 180 else 240
+                    val (fboW, fboH) = computeFboDims(baseMaxLong, vw, vh, viewAspect)
                     ensureBlurFbos(fboW, fboH)
+                    val halfW = currentHalfFboW
+                    val halfH = currentHalfFboH
 
-                    renderInputToFbo1(useVideo, fboW, fboH, cropScaleX, cropScaleY, qb)
+                    renderInputToFbo0(useVideo, fboW, fboH, cropScaleX, cropScaleY, qb)
 
-                    // Stage 1 (Center Blur Layer -> FBO[2]): Dual ping-pong Gaussian above 8px for rich frosted look
-                    if (centerBlur <= 8f) {
-                        val step1 = 0.55f + (centerBlur / 8f) * 1.15f
-                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[2], fboW, fboH, step1, qb)
+                    val centerResultTexId: Int
+                    if (centerBlur <= 10f) {
+                        val step1 = 0.25f + (centerBlur / 10f) * 0.80f
+                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, step1, qb)
+                        centerResultTexId = fboTexIds[0]
                     } else {
-                        val stepA = 0.95f + norm * 0.95f
-                        val stepB = 1.15f + norm * 1.45f
-                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[2], fboW, fboH, stepA, qb)
-                        runPingPongGaussianIteration(fboTexIds[2], fboIds[1], fboTexIds[1], fboIds[2], fboW, fboH, stepB, qb)
+                        val t = ((centerBlur - 10f) / 30f).coerceIn(0f, 1f)
+                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, 1.05f, qb)
+                        val step2 = 0.45f + t * 0.65f
+                        runPingPongGaussianIteration(fboTexIds[0], fboIds[3], fboTexIds[3], fboIds[2], halfW, halfH, step2, qb)
+                        if (t > 0.35f) {
+                            val step3 = ((t - 0.35f) / 0.65f) * 1.05f
+                            runPingPongGaussianIteration(fboTexIds[2], fboIds[3], fboTexIds[3], fboIds[2], halfW, halfH, step3, qb)
+                        }
+                        centerResultTexId = fboTexIds[2]
                     }
 
-                    // Draw exact Center Blur Layer (FBO[2]) cleanly to Screen
+                    // Draw Center Blur Layer cleanly to Screen
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                     GLES20.glViewport(0, 0, vw, vh)
                     GLES20.glUseProgram(tex2dProgram)
                     GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, centerResultTexId)
                     GLES20.glUniform2f(tex2dCropScaleHandle, 1f, 1f)
                     GLES20.glUniform1f(tex2dFlipYHandle, 0f)
                     GLES20.glUniform1f(tex2dEdgeFadeHandle, 0f)
-                    GLES20.glUniform1f(tex2dAlphaScaleHandle, 0f)
+                    GLES20.glUniform1f(tex2dAlphaScaleHandle, 1f)
                     drawQuad(tex2dPosHandle, tex2dTexHandle, qb)
 
-                    // Stage 2 (Top & Bottom Edge Blur): Stack extra wide Gaussian frost ONLY onto top & bottom bands
+                    // Stage 2 (Top & Bottom Edge Blur): Smooth half-res extra frost on top & bottom bands
                     if (edgeBlur > 0.01f) {
-                        val edgeStep1 = 1.45f + edgeBlur * 1.25f
-                        val edgeStep2 = 1.80f + edgeBlur * 1.75f
-                        runPingPongGaussianIteration(fboTexIds[2], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, edgeStep1, qb)
-                        runPingPongGaussianIteration(fboTexIds[0], fboIds[1], fboTexIds[1], fboIds[0], fboW, fboH, edgeStep2, qb)
+                        val edgeStep = 0.80f + edgeBlur * 0.30f
+                        runPingPongGaussianIteration(centerResultTexId, fboIds[3], fboTexIds[3], fboIds[2], halfW, halfH, edgeStep, qb)
 
                         GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
                         GLES20.glViewport(0, 0, vw, vh)
@@ -1145,12 +1393,34 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
                         GLES20.glUseProgram(tex2dProgram)
                         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[0])
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTexIds[2])
                         GLES20.glUniform2f(tex2dCropScaleHandle, 1f, 1f)
                         GLES20.glUniform1f(tex2dFlipYHandle, 0f)
                         GLES20.glUniform1f(tex2dEdgeFadeHandle, edgeBlur)
                         GLES20.glUniform1f(tex2dAlphaScaleHandle, 1f)
                         drawQuad(tex2dPosHandle, tex2dTexHandle, qb)
+                    }
+                }
+
+                // 2.5 Un-chopped centered full-res artwork when playing non-card artwork mode
+                val aqb = fitArtQuadBuffer
+                if (showUncroppedCenterArt && aqb != null) {
+                    val coverAlpha = if (rawCenterBlur <= 14f) {
+                        1f
+                    } else {
+                        ((24f - rawCenterBlur) / 10f).coerceIn(0f, 1f)
+                    }
+                    if (coverAlpha > 0.01f) {
+                        GLES20.glEnable(GLES20.GL_BLEND)
+                        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                        GLES20.glUseProgram(tex2dProgram)
+                        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, artTextureId)
+                        GLES20.glUniform2f(tex2dCropScaleHandle, 1f, 1f)
+                        GLES20.glUniform1f(tex2dFlipYHandle, 1f)
+                        GLES20.glUniform1f(tex2dEdgeFadeHandle, 0f)
+                        GLES20.glUniform1f(tex2dAlphaScaleHandle, coverAlpha)
+                        drawQuad(tex2dPosHandle, tex2dTexHandle, aqb)
                     }
                 }
 
@@ -1165,7 +1435,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                     GLES20.glUniform2f(tex2dCropScaleHandle, 1f, 1f)
                     GLES20.glUniform1f(tex2dFlipYHandle, 1f)
                     GLES20.glUniform1f(tex2dEdgeFadeHandle, 0f)
-                    GLES20.glUniform1f(tex2dAlphaScaleHandle, 0f)
+                    GLES20.glUniform1f(tex2dAlphaScaleHandle, 1f)
                     drawQuad(tex2dPosHandle, tex2dTexHandle, cqb)
                 }
 
@@ -1174,7 +1444,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             }
         }
 
-        private fun renderInputToFbo1(
+        private fun renderInputToFbo0(
             useVideo: Boolean,
             fboW: Int,
             fboH: Int,
@@ -1198,7 +1468,7 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
                 GLES20.glUniform2f(tex2dCropScaleHandle, cropScaleX, cropScaleY)
                 GLES20.glUniform1f(tex2dFlipYHandle, 1f)
                 GLES20.glUniform1f(tex2dEdgeFadeHandle, 0f)
-                GLES20.glUniform1f(tex2dAlphaScaleHandle, 0f)
+                GLES20.glUniform1f(tex2dAlphaScaleHandle, 1f)
                 drawQuad(tex2dPosHandle, tex2dTexHandle, qb)
             }
         }
@@ -1450,14 +1720,14 @@ class EchoSnapLiveWallpaperService : WallpaperService() {
             varying vec2 vScreenUv;
             void main() {
                 vec4 col = texture2D(sTexture, clamp(vTexCoord, 0.0, 1.0));
-                if (uEdgeOverlayAlpha > 0.5) {
+                if (uEdgeBlurFade > 0.005) {
                     float topBand = smoothstep(0.62, 0.90, vScreenUv.y);
                     float bottomBand = smoothstep(0.38, 0.10, vScreenUv.y);
                     float edge = clamp(topBand + bottomBand, 0.0, 1.0) * uEdgeBlurFade;
                     col.rgb *= (1.0 - edge * 0.18);
                     gl_FragColor = vec4(col.rgb, edge);
                 } else {
-                    gl_FragColor = col;
+                    gl_FragColor = vec4(col.rgb, col.a * uEdgeOverlayAlpha);
                 }
             }
         """

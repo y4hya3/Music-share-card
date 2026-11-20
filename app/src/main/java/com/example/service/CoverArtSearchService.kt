@@ -82,6 +82,74 @@ object CoverArtSearchService {
         }
     }
 
+    fun pickBestMatchingCoverCandidate(
+        candidates: List<OnlineCoverCandidate>,
+        targetTitle: String,
+        targetArtist: String,
+        targetAlbum: String = ""
+    ): OnlineCoverCandidate? {
+        if (candidates.isEmpty()) return null
+        val normTitle = AnimatedCanvasSearchService.normalizeQueryText(targetTitle).lowercase()
+        val normArtist = AnimatedCanvasSearchService.normalizeArtistText(targetArtist).lowercase()
+        val normAlbum = AnimatedCanvasSearchService.normalizeQueryText(targetAlbum).lowercase()
+
+        fun tokens(s: String): Set<String> =
+            s.split(Regex("[^a-z0-9]+")).filter { it.length >= 2 }.toSet()
+
+        val titleTokens = tokens(normTitle)
+        val artistTokens = tokens(normArtist)
+        val albumTokens = tokens(normAlbum)
+
+        var best: OnlineCoverCandidate? = null
+        var bestScore = Int.MIN_VALUE
+
+        for (c in candidates) {
+            val cTitle = AnimatedCanvasSearchService.normalizeQueryText(c.title).lowercase()
+            val cArtist = AnimatedCanvasSearchService.normalizeArtistText(c.artist).lowercase()
+            val cAlbum = AnimatedCanvasSearchService.normalizeQueryText(c.album).lowercase()
+
+            val cTitleTokens = tokens(cTitle)
+            val cArtistTokens = tokens(cArtist)
+            val cAlbumTokens = tokens(cAlbum)
+
+            val titleOverlap = if (titleTokens.isNotEmpty()) {
+                titleTokens.count { it in cTitleTokens || cTitle.contains(it) }
+            } else 0
+            val artistOverlap = if (artistTokens.isNotEmpty()) {
+                artistTokens.count { it in cArtistTokens || cArtist.contains(it) }
+            } else 0
+            val albumOverlap = if (albumTokens.isNotEmpty()) {
+                albumTokens.count { it in cAlbumTokens || cAlbum.contains(it) }
+            } else 0
+
+            val titleMatched = normTitle.isNotEmpty() && (
+                cTitle == normTitle ||
+                    cTitle.contains(normTitle) ||
+                    normTitle.contains(cTitle) ||
+                    titleOverlap >= maxOf(1, (titleTokens.size + 1) / 2)
+                )
+            val artistMatched = normArtist.isEmpty() ||
+                cArtist == normArtist ||
+                cArtist.contains(normArtist) ||
+                normArtist.contains(cArtist) ||
+                artistOverlap >= 1
+
+            if (!titleMatched || !artistMatched) continue
+
+            var score = titleOverlap * 30 + artistOverlap * 25 + albumOverlap * 20
+            if (cTitle == normTitle) score += 60
+            if (normArtist.isNotEmpty() && cArtist == normArtist) score += 50
+            if (normAlbum.isNotEmpty() && cAlbum == normAlbum) score += 45
+            if (c.source.contains("iTunes", ignoreCase = true)) score += 10
+
+            if (score > bestScore) {
+                bestScore = score
+                best = c
+            }
+        }
+        return best
+    }
+
     private fun queryItunes(query: String, limit: Int): List<OnlineCoverCandidate> {
         return try {
             val encoded = URLEncoder.encode(query, "UTF-8")

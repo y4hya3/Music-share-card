@@ -133,9 +133,10 @@ object BitmapBlurUtils {
         val h = source.height
         if (w < 64 || h < 64 || source.isRecycled) return source
 
-        // Only inspect non-square artwork (or slight aspect mismatches typical of video thumbnails)
+        // Only inspect genuinely non-square thumbnails (e.g. 4:3, 16:9, 9:16 video thumbs);
+        // never chop square or near-square album covers.
         val aspect = w.toFloat() / h.toFloat()
-        if (aspect in 0.96f..1.04f) return source
+        if (aspect in 0.85f..1.18f) return source
 
         return try {
             fun isNearBlack(pixel: Int): Boolean {
@@ -143,6 +144,20 @@ object BitmapBlurUtils {
                 val g = (pixel shr 8) and 0xFF
                 val b = pixel and 0xFF
                 return r <= 12 && g <= 12 && b <= 12
+            }
+
+            fun hasVisibleNonBlackBorder(rowOrCol: IntArray, step: Int): Boolean {
+                var hits = 0
+                var samples = 0
+                var i = 2
+                while (i < rowOrCol.size - 2) {
+                    samples++
+                    val px = rowOrCol[i]
+                    val maxCh = maxOf((px shr 16) and 0xFF, (px shr 8) and 0xFF, px and 0xFF)
+                    if (maxCh > 24) hits++
+                    i += step
+                }
+                return samples > 0 && hits * 4 >= samples
             }
 
             val rowBuffer = IntArray(w)
@@ -192,15 +207,39 @@ object BitmapBlurUtils {
             val minVTrigger = (h * 0.06f).roundToInt()
             val minHTrigger = (w * 0.06f).roundToInt()
 
-            val hasSymmetricVerticalBars =
+            var hasSymmetricVerticalBars =
                 topBar >= minVTrigger &&
                     bottomBar >= minVTrigger &&
                     abs(topBar - bottomBar) <= max(6, (h * 0.05f).roundToInt())
 
-            val hasSymmetricHorizontalBars =
+            if (hasSymmetricVerticalBars) {
+                val innerTopY = (topBar + 4).coerceAtMost(h - 1)
+                val innerBotY = (h - 1 - bottomBar - 4).coerceAtLeast(0)
+                source.getPixels(rowBuffer, 0, w, 0, innerTopY, w, 1)
+                val topBright = hasVisibleNonBlackBorder(rowBuffer, rowStep)
+                source.getPixels(rowBuffer, 0, w, 0, innerBotY, w, 1)
+                val botBright = hasVisibleNonBlackBorder(rowBuffer, rowStep)
+                if (!topBright || !botBright) {
+                    hasSymmetricVerticalBars = false
+                }
+            }
+
+            var hasSymmetricHorizontalBars =
                 leftBar >= minHTrigger &&
                     rightBar >= minHTrigger &&
                     abs(leftBar - rightBar) <= max(6, (w * 0.05f).roundToInt())
+
+            if (hasSymmetricHorizontalBars) {
+                val innerLeftX = (leftBar + 4).coerceAtMost(w - 1)
+                val innerRightX = (w - 1 - rightBar - 4).coerceAtLeast(0)
+                source.getPixels(colBuffer, 0, 1, innerLeftX, 0, 1, h)
+                val leftBright = hasVisibleNonBlackBorder(colBuffer, colStep)
+                source.getPixels(colBuffer, 0, 1, innerRightX, 0, 1, h)
+                val rightBright = hasVisibleNonBlackBorder(colBuffer, colStep)
+                if (!leftBright || !rightBright) {
+                    hasSymmetricHorizontalBars = false
+                }
+            }
 
             val cropTop = if (hasSymmetricVerticalBars) (topBar + 2).coerceAtMost(h / 3) else 0
             val cropBottom = if (hasSymmetricVerticalBars) (h - bottomBar - 2).coerceAtLeast(cropTop + 32) else h

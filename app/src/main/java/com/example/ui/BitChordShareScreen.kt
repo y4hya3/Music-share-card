@@ -200,13 +200,12 @@ fun BitChordShareScreen(
         )
     }
 
-    // During Card Size drag, scale purely on GPU without triggering 60fps text/shape/BlurMaskFilter re-layouts
-    val stageRenderStyleConfig = remember(effectiveStyleConfig, dragCardScale, persistedStyleConfig.cardScale) {
-        if (dragCardScale != null) {
-            effectiveStyleConfig.copy(cardScale = persistedStyleConfig.cardScale)
-        } else {
-            effectiveStyleConfig
-        }
+    // During Card Size or Background Blur drag, isolate MusicStoryCard from unnecessary recompositions & re-layouts
+    val stageRenderStyleConfig = remember(effectiveStyleConfig, dragCardScale, dragBlurRadius, persistedStyleConfig.cardScale, persistedStyleConfig.backgroundBlurRadius) {
+        effectiveStyleConfig.copy(
+            cardScale = if (dragCardScale != null) persistedStyleConfig.cardScale else effectiveStyleConfig.cardScale,
+            backgroundBlurRadius = if (dragBlurRadius != null) persistedStyleConfig.backgroundBlurRadius else effectiveStyleConfig.backgroundBlurRadius
+        )
     }
     val dragScaleRatio = if (dragCardScale != null && persistedStyleConfig.cardScale > 0.01f) {
         (dragCardScale!! / persistedStyleConfig.cardScale).coerceIn(0.45f, 2.1f)
@@ -1224,17 +1223,23 @@ private fun CleanExportPreviewDialog(
                             .clip(RoundedCornerShape(20.dp))
                             .background(Color(0xFF0E0E12))
                     ) {
-                        BlurredAlbumBackground(
-                            track = track,
-                            palette = palette,
-                            styleConfig = styleConfig.copy(darkOverlayAlpha = 0f),
-                            activeCanvasVideoUrl = null,
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        var isPreviewCanvasOpaque by remember(activeCanvasVideoUrl, hasAnimatedCanvas) {
+                            mutableStateOf(false)
+                        }
+                        if (!hasAnimatedCanvas || !isPreviewCanvasOpaque) {
+                            BlurredAlbumBackground(
+                                track = track,
+                                palette = palette,
+                                styleConfig = styleConfig.copy(darkOverlayAlpha = 0f),
+                                activeCanvasVideoUrl = null,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                         if (hasAnimatedCanvas && activeCanvasVideoUrl != null) {
                             AnimatedCanvasVideoBackground(
                                 videoUrl = activeCanvasVideoUrl,
                                 blurRadiusPx = styleConfig.backgroundBlurRadius,
+                                onVideoReadyChanged = { isPreviewCanvasOpaque = it },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
