@@ -31,5 +31,17 @@ data class CardPalette(
             titleTextColor = Color.White,
             subtitleTextColor = Color(0xCCFFFFFF)
         )
+
+        val NeutralDark = CardPalette(
+            vibrantColor = Color(0xFF1F2333),
+            darkMutedColor = Color(0xFF0E1018),
+            dominantColor = Color(0xFF161926),
+            lightVibrantColor = Color(0xFF3E4560),
+            darkVibrantColor = Color(0xFF121520),
+            mutedColor = Color(0xFF2B3042),
+            lightMutedColor = Color(0xFFB4BCD0),
+            titleTextColor = Color.White,
+            subtitleTextColor = Color(0xCCFFFFFF)
+        )
     }
 }

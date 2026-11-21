@@ -44,6 +44,26 @@ enum class LiveWallpaperMode(val label: String) {
     ARTWORK_ONLY("Artwork Only")
 }
 
+enum class LiveWallpaperArtworkFillMode(val label: String) {
+    FLOATING_SQUARE("Floating Square"),
+    FULL_SCREEN("Full Screen")
+}
+
+enum class LiveWallpaperCornerStyle(val label: String) {
+    CURVED("Curved Edges"),
+    SHARP("Sharp Edges")
+}
+
+enum class CardShadowColorMode(val label: String) {
+    ALBUM_DYNAMIC("Album Color"),
+    BLACK("Black"),
+    RED("Red"),
+    WHITE("White Glow"),
+    PURPLE("Violet"),
+    CYAN("Cyan"),
+    CUSTOM("Custom")
+}
+
 @Immutable
 data class CardStyleConfig(
     val brandMode: CardBrandMode = CardBrandMode.BITCHORD,
@@ -59,7 +79,10 @@ data class CardStyleConfig(
     val cardOpacity: Float = 1.0f, // 0.0f..1.0f frosted card surface/glass opacity (keeps photo & text opaque)
     val lyricsArtBlurRadius: Float = 0f, // 0f (crisp) to 40f (blurred) when Lyrics Card uses Song Cover Art
     val darkOverlayAlpha: Float = 0.25f, // rgba(0, 0, 0, 0.25)
-    val glowIntensity: Float = 0.75f, // soft drop shadow depth
+    val glowIntensity: Float = 0.75f, // 0f..1f card & floating square shadow depth
+    val cardShadowColorMode: CardShadowColorMode = CardShadowColorMode.ALBUM_DYNAMIC,
+    val customShadowColor: Color = Color(0xFFFF2B44),
+    val cardShadowInverse: Boolean = false, // Inverts shadow direction + adds recessed inner edge depth
     val cornerRadiusDp: Int = 16, // border-radius: 16px
     val cardScale: Float = 1.0f, // 0.60f..1.20f unified card size multiplier
     val isFitToScreenPreview: Boolean = false, // false = Full-Screen, true = Fit-to-Screen scaled preview
@@ -74,6 +97,8 @@ data class CardStyleConfig(
     val autoSearchAnimatedCanvas: Boolean = false,
     val liveWallpaperEnabled: Boolean = false,
     val liveWallpaperMode: LiveWallpaperMode = LiveWallpaperMode.ANIMATED_CANVAS,
+    val liveWallpaperArtworkFillMode: LiveWallpaperArtworkFillMode = LiveWallpaperArtworkFillMode.FLOATING_SQUARE,
+    val liveWallpaperCornerStyle: LiveWallpaperCornerStyle = LiveWallpaperCornerStyle.CURVED,
     val liveWallpaperBlurRadius: Float = 10f, // 0f..40f real-time wallpaper blur
     val liveWallpaperEdgeBlurFade: Float = 0.65f, // 0f..1f progressive top & bottom edge frosted blur (keeps middle clear)
     val liveWallpaperShowCard: Boolean = true,
@@ -96,6 +121,18 @@ data class CardStyleConfig(
             LogoColorMode.GREEN -> Color(0xFF1DB954)
             LogoColorMode.WHITE -> Color.White
             LogoColorMode.CUSTOM -> customLogoColor
+        }
+    }
+
+    fun resolveShadowColor(palette: CardPalette): Color {
+        return when (cardShadowColorMode) {
+            CardShadowColorMode.ALBUM_DYNAMIC -> palette.vibrantColor
+            CardShadowColorMode.BLACK -> Color.Black
+            CardShadowColorMode.RED -> Color(0xFFFF2B44)
+            CardShadowColorMode.WHITE -> Color.White
+            CardShadowColorMode.PURPLE -> Color(0xFF9D4EDD)
+            CardShadowColorMode.CYAN -> Color(0xFF00D2FF)
+            CardShadowColorMode.CUSTOM -> customShadowColor
         }
     }
 

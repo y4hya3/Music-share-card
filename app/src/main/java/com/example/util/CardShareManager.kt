@@ -325,14 +325,21 @@ object CardShareManager {
             addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
         }
 
-        val glowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f)
-        val shadowAlpha = (0.42f * glowStrength * glassOpacity).coerceIn(0f, 0.52f)
+        val glowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f)
+        val isInverseShadow = styleConfig.cardShadowInverse
+        val resolvedShadowColor = styleConfig.resolveShadowColor(palette).toArgb()
+        val outerShadowColor = if (isInverseShadow && resolvedShadowColor == AndroidColor.BLACK) {
+            lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.35f)
+        } else {
+            resolvedShadowColor
+        }
+        val shadowAlpha = (0.56f * glowStrength * glassOpacity).coerceIn(0f, 0.72f)
         val shadowAlphaInt = (shadowAlpha * 255f).roundToInt().coerceIn(0, 255)
-        if (shadowAlphaInt > 2 && glassOpacity > 0.01f) {
-            val shadowBlurPx = ((10f + 8f * blurFrac) * glowStrength * scale * 3f).coerceAtLeast(1f)
-            val shadowOffsetY = 21f * scale
+        if (glowStrength > 0.01f && shadowAlphaInt > 2 && glassOpacity > 0.01f) {
+            val shadowBlurPx = ((8f + 14f * glowStrength + 6f * blurFrac) * glowStrength * scale * 3f).coerceAtLeast(1f)
+            val shadowOffsetY = (if (isInverseShadow) -21f else 21f) * scale
             val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = AndroidColor.argb(shadowAlphaInt, 0, 0, 0)
+                color = withAlpha(outerShadowColor, shadowAlpha)
                 maskFilter = BlurMaskFilter(shadowBlurPx, BlurMaskFilter.Blur.NORMAL)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -425,6 +432,18 @@ object CardShareManager {
                 blurFrac = blurFrac,
                 glassOpacity = glassOpacity,
                 sideFrostColor = sideFrostColor
+            )
+        }
+
+        if (isInverseShadow && glowStrength > 0.01f && glassOpacity > 0.01f) {
+            drawCardInnerInverseShadow(
+                canvas = canvas,
+                cardRect = cardRect,
+                cardPath = cardPath,
+                cornerRadius = cornerRadius,
+                shadowColorArgb = resolvedShadowColor,
+                strength = glowStrength * glassOpacity,
+                scale = scale
             )
         }
 
@@ -617,14 +636,25 @@ object CardShareManager {
         val artRadius = styleConfig.cornerRadiusDp * 3f * scale
 
         val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
-        if (styleConfig.glowIntensity > 0.05f && glassOpacity > 0.02f) {
+        val rawGlow = styleConfig.glowIntensity.coerceIn(0f, 1f)
+        val glowStrength = rawGlow * glassOpacity
+        val isInverseShadow = styleConfig.cardShadowInverse
+        val resolvedShadowColor = styleConfig.resolveShadowColor(palette).toArgb()
+        val outerShadowColor = if (isInverseShadow && resolvedShadowColor == AndroidColor.BLACK) {
+            lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.35f)
+        } else {
+            resolvedShadowColor
+        }
+        if (glowStrength > 0.01f) {
+            val offsetY = (if (isInverseShadow) -24f else 24f) * glowStrength * scale
+            val spreadPx = (if (isInverseShadow) 10f else 20f) * glowStrength * scale
             val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = palette.vibrantColor.toArgb()
-                alpha = (180 * styleConfig.glowIntensity * glassOpacity).toInt().coerceIn(0, 255)
-                maskFilter = BlurMaskFilter(80f * styleConfig.glowIntensity * scale, BlurMaskFilter.Blur.NORMAL)
+                color = outerShadowColor
+                alpha = ((if (isInverseShadow) 135f else 190f) * glowStrength).toInt().coerceIn(0, 255)
+                maskFilter = BlurMaskFilter((30f + 78f * glowStrength) * scale, BlurMaskFilter.Blur.NORMAL)
             }
             canvas.drawRoundRect(
-                RectF(artLeft - 20f, artTop - 20f, artRight + 20f, artBottom + 20f),
+                RectF(artLeft - spreadPx, artTop - spreadPx + offsetY, artRight + spreadPx, artBottom + spreadPx + offsetY),
                 artRadius + 12f, artRadius + 12f, glowPaint
             )
         }
@@ -645,6 +675,22 @@ object CardShareManager {
         } else {
             val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = palette.vibrantColor.toArgb() }
             canvas.drawRect(artRect, p)
+        }
+        if (isInverseShadow && glowStrength > 0.01f) {
+            val strokePx = (42f + 66f * glowStrength) * scale
+            val insetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = strokePx
+                color = withAlpha(resolvedShadowColor, (0.72f * glowStrength).coerceIn(0f, 0.85f))
+                maskFilter = BlurMaskFilter((30f + 48f * glowStrength) * scale, BlurMaskFilter.Blur.NORMAL)
+            }
+            val pad = strokePx * 0.25f
+            canvas.drawRoundRect(
+                RectF(artLeft - pad, artTop - pad, artRight + pad, artBottom + pad),
+                artRadius,
+                artRadius,
+                insetPaint
+            )
         }
         canvas.restore()
 
@@ -702,12 +748,50 @@ object CardShareManager {
         val cardRect = RectF(cardLeft, cardTop, cardLeft + cardW, cardTop + cardH)
 
         val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
+        val minShadowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f) * glassOpacity
+        val minCardPath = Path().apply {
+            addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
+        }
+        val resolvedShadow = styleConfig.resolveShadowColor(palette).toArgb()
+        val isMinInverse = styleConfig.cardShadowInverse
+        if (minShadowStrength > 0.01f) {
+            val outerTint = if (isMinInverse && resolvedShadow == AndroidColor.BLACK) {
+                lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.35f)
+            } else {
+                resolvedShadow
+            }
+            val minShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = withAlpha(outerTint, (0.60f * minShadowStrength).coerceIn(0f, 0.78f))
+                maskFilter = BlurMaskFilter((56f * minShadowStrength * scale).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
+            }
+            val offY = (if (isMinInverse) -18f else 18f) * scale
+            val shadowRect = RectF(cardLeft, cardTop + offY, cardLeft + cardW, cardTop + cardH + offY)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val saved = canvas.save()
+                canvas.clipOutPath(minCardPath)
+                canvas.drawRoundRect(shadowRect, cornerRadius, cornerRadius, minShadowPaint)
+                canvas.restoreToCount(saved)
+            } else {
+                canvas.drawRoundRect(shadowRect, cornerRadius, cornerRadius, minShadowPaint)
+            }
+        }
         val bgAlpha = (224f * glassOpacity).roundToInt().coerceIn(0, 255)
         if (bgAlpha > 0) {
             val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = AndroidColor.argb(bgAlpha, 20, 20, 24)
             }
             canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
+        }
+        if (isMinInverse && minShadowStrength > 0.01f) {
+            drawCardInnerInverseShadow(
+                canvas = canvas,
+                cardRect = cardRect,
+                cardPath = minCardPath,
+                cornerRadius = cornerRadius,
+                shadowColorArgb = resolvedShadow,
+                strength = minShadowStrength,
+                scale = scale
+            )
         }
 
         val artLeft = cardLeft + innerPad
@@ -834,25 +918,39 @@ object CardShareManager {
         val cardRect = RectF(cardLeft, cardTop, cardRight, cardBottom)
 
         val glassOpacity = styleConfig.cardOpacity.coerceIn(0.0f, 1.0f)
-        val shadowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale
-        val shadowAlpha = (135f * styleConfig.glowIntensity.coerceAtLeast(0.25f) * glassOpacity)
+        val shadowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f) * glassOpacity
+        val lyricsCardPath = Path().apply {
+            addRoundRect(cardRect, cornerRadius, cornerRadius, Path.Direction.CW)
+        }
+        val resolvedLyricsShadow = styleConfig.resolveShadowColor(palette).toArgb()
+        val isLyricsInverse = styleConfig.cardShadowInverse
+        val shadowAlpha = (165f * shadowStrength)
             .roundToInt()
             .coerceIn(0, 255)
-        if (shadowAlpha > 2) {
-            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = AndroidColor.argb(shadowAlpha, 0, 0, 0)
-                maskFilter = BlurMaskFilter(58f * shadowStrength, BlurMaskFilter.Blur.NORMAL)
+        if (shadowStrength > 0.01f && shadowAlpha > 2) {
+            val shadowTint = if (isLyricsInverse && resolvedLyricsShadow == AndroidColor.BLACK) {
+                lerpArgb(AndroidColor.WHITE, palette.lightVibrantColor.toArgb(), 0.35f)
+            } else {
+                resolvedLyricsShadow
             }
-            canvas.drawRoundRect(
-                RectF(cardLeft, cardTop + (20f * scale), cardRight, cardBottom + (20f * scale)),
-                cornerRadius,
-                cornerRadius,
-                shadowPaint
-            )
+            val offY = (if (isLyricsInverse) -20f else 20f) * scale
+            val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = withAlpha(shadowTint, shadowAlpha / 255f)
+                maskFilter = BlurMaskFilter((64f * shadowStrength * scale).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
+            }
+            val shadowRect = RectF(cardLeft, cardTop + offY, cardRight, cardBottom + offY)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val saved = canvas.save()
+                canvas.clipOutPath(lyricsCardPath)
+                canvas.drawRoundRect(shadowRect, cornerRadius, cornerRadius, shadowPaint)
+                canvas.restoreToCount(saved)
+            } else {
+                canvas.drawRoundRect(shadowRect, cornerRadius, cornerRadius, shadowPaint)
+            }
         }
 
         val albumArt = track.albumArt
-        if (useSongArtBg && albumArt != null) {
+        if (useSongArtBg) {
             if (glassOpacity > 0.01f) {
                 drawBlurredCardCoverBackground(
                     canvas = canvas,
@@ -881,6 +979,17 @@ object CardShareManager {
                 }
                 canvas.drawRoundRect(cardRect, cornerRadius, cornerRadius, cardPaint)
             }
+        }
+        if (isLyricsInverse && shadowStrength > 0.01f) {
+            drawCardInnerInverseShadow(
+                canvas = canvas,
+                cardRect = cardRect,
+                cardPath = lyricsCardPath,
+                cornerRadius = cornerRadius,
+                shadowColorArgb = resolvedLyricsShadow,
+                strength = shadowStrength,
+                scale = scale
+            )
         }
 
         // Header cover thumbnail
@@ -1296,6 +1405,36 @@ object CardShareManager {
         val g = (AndroidColor.green(colorA) + (AndroidColor.green(colorB) - AndroidColor.green(colorA)) * f).roundToInt()
         val b = (AndroidColor.blue(colorA) + (AndroidColor.blue(colorB) - AndroidColor.blue(colorA)) * f).roundToInt()
         return AndroidColor.argb(a, r, g, b)
+    }
+
+    private fun drawCardInnerInverseShadow(
+        canvas: Canvas,
+        cardRect: RectF,
+        cardPath: Path,
+        cornerRadius: Float,
+        shadowColorArgb: Int,
+        strength: Float,
+        scale: Float
+    ) {
+        val s = strength.coerceIn(0f, 1f)
+        if (s <= 0.01f) return
+        val strokePx = (42f + 66f * s) * scale
+        val insetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = strokePx
+            color = withAlpha(shadowColorArgb, (0.72f * s).coerceIn(0f, 0.85f))
+            maskFilter = BlurMaskFilter(((30f + 48f * s) * scale).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
+        }
+        val pad = strokePx * 0.25f
+        val saved = canvas.save()
+        canvas.clipPath(cardPath)
+        canvas.drawRoundRect(
+            RectF(cardRect.left - pad, cardRect.top - pad, cardRect.right + pad, cardRect.bottom + pad),
+            cornerRadius,
+            cornerRadius,
+            insetPaint
+        )
+        canvas.restoreToCount(saved)
     }
 
     private fun withAlpha(color: Int, alphaFraction: Float): Int {

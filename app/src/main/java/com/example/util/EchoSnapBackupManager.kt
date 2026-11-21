@@ -11,14 +11,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import com.example.model.CardBrandMode
 import com.example.model.CardLayoutType
+import com.example.model.CardShadowColorMode
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
+import com.example.model.LiveWallpaperArtworkFillMode
+import com.example.model.LiveWallpaperCornerStyle
 import com.example.model.LogoColorMode
 import com.example.model.LyricsCardBackgroundMode
 import com.example.repository.MediaNotificationRepository
 import com.example.repository.SavedCanvasItem
 import com.example.repository.SavedMediaLibrary
 import com.example.repository.SavedCoverItem
+import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -28,7 +32,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 
 /**
- * Non-sensitive card style settings stored in EchoSnap backup manifests (never stores Spotify tokens/cookies).
+ * Non-sensitive card style settings stored in Echomusic backup manifests (never stores Spotify tokens/cookies).
  */
 data class EchoSnapBackupStyle(
     val brandMode: String,
@@ -52,7 +56,12 @@ data class EchoSnapBackupStyle(
     val waveformForce: Float,
     val waveformColorArgb: Int,
     val lyricsWordSelectionMode: Boolean,
-    val showLogoWordmark: Boolean
+    val showLogoWordmark: Boolean,
+    val liveWallpaperArtworkFillMode: String = LiveWallpaperArtworkFillMode.FLOATING_SQUARE.name,
+    val liveWallpaperCornerStyle: String = LiveWallpaperCornerStyle.CURVED.name,
+    val cardShadowColorMode: String = CardShadowColorMode.ALBUM_DYNAMIC.name,
+    val customShadowColorArgb: Int = 0xFFFF2B44.toInt(),
+    val cardShadowInverse: Boolean = false
 ) {
     fun applyTo(current: CardStyleConfig): CardStyleConfig = current.copy(
         brandMode = enumOrDefault(brandMode, current.brandMode),
@@ -68,6 +77,9 @@ data class EchoSnapBackupStyle(
         lyricsArtBlurRadius = lyricsArtBlurRadius.coerceIn(0f, 40f),
         darkOverlayAlpha = darkOverlayAlpha.coerceIn(0f, 0.7f),
         glowIntensity = glowIntensity.coerceIn(0f, 1f),
+        cardShadowColorMode = enumOrDefault(cardShadowColorMode, current.cardShadowColorMode),
+        customShadowColor = Color(customShadowColorArgb),
+        cardShadowInverse = cardShadowInverse,
         cornerRadiusDp = cornerRadiusDp.coerceIn(0, 32),
         cardScale = cardScale.coerceIn(0.60f, 1.20f),
         enableWaveform = enableWaveform,
@@ -76,7 +88,9 @@ data class EchoSnapBackupStyle(
         waveformForce = waveformForce.coerceIn(0.5f, 2.2f),
         waveformColor = Color(waveformColorArgb),
         lyricsWordSelectionMode = lyricsWordSelectionMode,
-        showLogoWordmark = showLogoWordmark
+        showLogoWordmark = showLogoWordmark,
+        liveWallpaperArtworkFillMode = enumOrDefault(liveWallpaperArtworkFillMode, current.liveWallpaperArtworkFillMode),
+        liveWallpaperCornerStyle = enumOrDefault(liveWallpaperCornerStyle, current.liveWallpaperCornerStyle)
     )
 
     companion object {
@@ -102,7 +116,12 @@ data class EchoSnapBackupStyle(
             waveformForce = cfg.waveformForce,
             waveformColorArgb = cfg.waveformColor.toArgb(),
             lyricsWordSelectionMode = cfg.lyricsWordSelectionMode,
-            showLogoWordmark = cfg.showLogoWordmark
+            showLogoWordmark = cfg.showLogoWordmark,
+            liveWallpaperArtworkFillMode = cfg.liveWallpaperArtworkFillMode.name,
+            liveWallpaperCornerStyle = cfg.liveWallpaperCornerStyle.name,
+            cardShadowColorMode = cfg.cardShadowColorMode.name,
+            customShadowColorArgb = cfg.customShadowColor.toArgb(),
+            cardShadowInverse = cfg.cardShadowInverse
         )
 
         private inline fun <reified T : Enum<T>> enumOrDefault(raw: String, fallback: T): T =
@@ -169,18 +188,152 @@ data class EchoSnapBackupResult(
 )
 
 /**
- * Zero-permission Storage Access Framework (SAF) + File backup engine for EchoSnap.
+ * Zero-permission Storage Access Framework (SAF) + File backup engine for Echomusic.
  * Exports & imports Saved Album Cover Arts, Saved Animated Canvases, Linked Album Song Lists,
- * and Card Visual Styles inside a structured `EchoSnap/` folder.
+ * and Card Visual Styles inside a structured `Echomusic/` folder (scanning legacy `EchoSnap/` too).
  */
 object EchoSnapBackupManager {
 
-    const val BACKUP_FOLDER_NAME = "EchoSnap"
+    const val BACKUP_FOLDER_NAME = "Echomusic"
+    const val LEGACY_BACKUP_FOLDER_NAME = "EchoSnap"
     const val MANIFEST_FILE_NAME = "manifest.json"
     const val COVERS_SUBDIR = "covers"
     const val CANVASES_SUBDIR = "canvases"
     private const val MANIFEST_FORMAT = "echosnap_backup"
     private const val MANIFEST_VERSION = 1
+
+    private const val PREFS_NAME = "echosnap_backup_prefs"
+    private const val KEY_PERSISTED_TREE_URI = "persisted_backup_tree_uri"
+    private const val KEY_HAS_PROMPTED_FOLDER_ACCESS = "has_prompted_folder_access"
+    private const val KEY_LAST_AUTO_IMPORT_FINGERPRINT = "last_auto_import_fingerprint"
+    private const val KEY_SAVED_FOLDER_DISPLAY_NAME = "saved_folder_display_name"
+
+    fun getPersistedBackupTreeUri(context: Context): Uri? {
+        val ctx = context.applicationContext
+        val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_PERSISTED_TREE_URI, null)?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val parsed = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
+        val isRobolectric = Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+        if (!isRobolectric && parsed.scheme == "content") {
+            val hasGrant = ctx.contentResolver.persistedUriPermissions.any { perm ->
+                perm.uri == parsed && perm.isReadPermission && perm.isWritePermission
+            }
+            if (!hasGrant) {
+                prefs.edit()
+                    .remove(KEY_PERSISTED_TREE_URI)
+                    .remove(KEY_SAVED_FOLDER_DISPLAY_NAME)
+                    .apply()
+                return null
+            }
+        }
+        return parsed
+    }
+
+    fun savePersistedBackupTreeUri(context: Context, treeUri: Uri, displayName: String? = null) {
+        val ctx = context.applicationContext
+        takePersistableTreePermission(ctx, treeUri)
+        val resolvedName = displayName?.takeIf { it.isNotBlank() } ?: runCatching {
+            val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
+            queryDocument(ctx.contentResolver, treeUri, rootDocId)?.displayName
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: treeUri.lastPathSegment?.substringAfterLast(':')?.takeIf { it.isNotBlank() }
+            ?: BACKUP_FOLDER_NAME
+        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PERSISTED_TREE_URI, treeUri.toString())
+            .putString(KEY_SAVED_FOLDER_DISPLAY_NAME, resolvedName)
+            .putBoolean(KEY_HAS_PROMPTED_FOLDER_ACCESS, true)
+            .apply()
+    }
+
+    fun clearPersistedBackupTreeUri(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_PERSISTED_TREE_URI)
+            .remove(KEY_SAVED_FOLDER_DISPLAY_NAME)
+            .remove(KEY_LAST_AUTO_IMPORT_FINGERPRINT)
+            .apply()
+    }
+
+    fun getSavedFolderDisplayName(context: Context): String? {
+        return context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_SAVED_FOLDER_DISPLAY_NAME, null)
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    fun hasPromptedInitialFolderAccess(context: Context): Boolean {
+        return context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HAS_PROMPTED_FOLDER_ACCESS, false)
+    }
+
+    fun setPromptedInitialFolderAccess(context: Context, prompted: Boolean = true) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HAS_PROMPTED_FOLDER_ACCESS, prompted)
+            .apply()
+    }
+
+    fun getLastAutoImportedFingerprint(context: Context): String? {
+        return context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_LAST_AUTO_IMPORT_FINGERPRINT, null)
+    }
+
+    fun setLastAutoImportedFingerprint(context: Context, fingerprint: String) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_AUTO_IMPORT_FINGERPRINT, fingerprint)
+            .apply()
+    }
+
+    fun suggestedInitialPickerUri(): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        return runCatching {
+            DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:Download"
+            )
+        }.getOrNull()
+    }
+
+    suspend fun autoSearchAndImportFromTreeUri(
+        context: Context,
+        treeUri: Uri,
+        forceReimport: Boolean = false
+    ): Result<EchoSnapBackupResult?> = withContext(Dispatchers.IO) {
+        val ctx = context.applicationContext
+        savePersistedBackupTreeUri(ctx, treeUri)
+        val scanned = scanBackupFromTreeUri(ctx, treeUri).getOrElse { err ->
+            return@withContext Result.failure(err)
+        }
+        if (scanned.totalItemCount == 0 && scanned.includedStyle == null) {
+            return@withContext Result.success(null)
+        }
+        val fingerprint = "${scanned.folderDisplayName}|${scanned.exportedAtMs}|${scanned.covers.size}|${scanned.canvases.size}|${scanned.totalSongsCount}"
+        val hasExistingLibrary = SavedMediaLibrary.savedCovers.value.isNotEmpty() ||
+            SavedMediaLibrary.savedCanvases.value.isNotEmpty()
+        if (!forceReimport && hasExistingLibrary && fingerprint == getLastAutoImportedFingerprint(ctx)) {
+            return@withContext Result.success(null)
+        }
+        val outcome = importScannedBackup(
+            context = ctx,
+            scanned = scanned,
+            selectedCoverIds = scanned.covers.map { it.id }.toSet(),
+            selectedCanvasIds = scanned.canvases.map { it.id }.toSet(),
+            importStyle = scanned.includedStyle != null,
+            replaceExistingFirst = false
+        ).getOrElse { err ->
+            return@withContext Result.failure(err)
+        }
+        setLastAutoImportedFingerprint(ctx, fingerprint)
+        Result.success(outcome)
+    }
 
     private data class SafDocEntry(
         val documentId: String,
@@ -202,7 +355,7 @@ object EchoSnapBackupManager {
     ): Result<EchoSnapBackupResult> = withContext(Dispatchers.IO) {
         runCatching {
             val ctx = context.applicationContext
-            takePersistableTreePermission(ctx, treeUri)
+            savePersistedBackupTreeUri(ctx, treeUri)
             val resolver = ctx.contentResolver
             val rootDocId = DocumentsContract.getTreeDocumentId(treeUri)
             val rootDoc = queryDocument(resolver, treeUri, rootDocId)
@@ -213,8 +366,8 @@ object EchoSnapBackupManager {
                     uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootDocId)
                 )
 
-            // Export directly into picked folder if already named EchoSnap (case-insensitive),
-            // otherwise create/reuse an EchoSnap subfolder inside it.
+            // Export directly into picked folder if already named Echomusic (case-insensitive),
+            // otherwise create/reuse an Echomusic subfolder inside it.
             val echoSnapDir = if (rootDoc.displayName.equals(BACKUP_FOLDER_NAME, ignoreCase = true)) {
                 rootDoc
             } else {
@@ -311,19 +464,59 @@ object EchoSnapBackupManager {
 
             val rootChildren = listChildren(resolver, treeUri, rootDoc.documentId)
             val directManifest = rootChildren.firstOrNull { !it.isDirectory && it.displayName.equals(MANIFEST_FILE_NAME, true) }
-            val nestedEchoSnapDir = rootChildren.firstOrNull { it.isDirectory && it.displayName.equals(BACKUP_FOLDER_NAME, true) }
+            val hasDirectSubdirs = rootChildren.any {
+                it.isDirectory && (it.displayName.equals(COVERS_SUBDIR, true) || it.displayName.equals(CANVASES_SUBDIR, true))
+            }
+            val nestedEchomusicDir = rootChildren.firstOrNull { it.isDirectory && it.displayName.equals(BACKUP_FOLDER_NAME, true) }
+            val nestedLegacyDir = rootChildren.firstOrNull { it.isDirectory && it.displayName.equals(LEGACY_BACKUP_FOLDER_NAME, true) }
+            var nestedTargetDir = nestedEchomusicDir ?: nestedLegacyDir
+
+            if (directManifest == null && nestedTargetDir == null) {
+                val priorityOrder = listOf("download", "downloads", "music", "documents", "media")
+                val depth1Dirs = rootChildren
+                    .filter {
+                        it.isDirectory &&
+                            !it.displayName.startsWith(".") &&
+                            !it.displayName.equals("Android", ignoreCase = true)
+                    }
+                    .sortedBy { dir ->
+                        val idx = priorityOrder.indexOf(dir.displayName.lowercase())
+                        if (idx >= 0) idx else 100
+                    }
+                    .take(24)
+
+                var depth2Legacy: SafDocEntry? = null
+                for (sub in depth1Dirs) {
+                    val subChildren = listChildren(resolver, treeUri, sub.documentId)
+                    val echoHit = subChildren.firstOrNull {
+                        it.isDirectory && it.displayName.equals(BACKUP_FOLDER_NAME, ignoreCase = true)
+                    }
+                    if (echoHit != null) {
+                        nestedTargetDir = echoHit
+                        break
+                    }
+                    if (depth2Legacy == null) {
+                        depth2Legacy = subChildren.firstOrNull {
+                            it.isDirectory && it.displayName.equals(LEGACY_BACKUP_FOLDER_NAME, ignoreCase = true)
+                        }
+                    }
+                }
+                if (nestedTargetDir == null) {
+                    nestedTargetDir = depth2Legacy
+                }
+            }
 
             val targetDir: SafDocEntry
             val targetChildren: List<SafDocEntry>
             val manifestDoc: SafDocEntry?
 
-            if (directManifest != null || rootChildren.any { it.isDirectory && (it.displayName.equals(COVERS_SUBDIR, true) || it.displayName.equals(CANVASES_SUBDIR, true)) }) {
+            if (directManifest != null || (hasDirectSubdirs && nestedTargetDir == null)) {
                 targetDir = rootDoc
                 targetChildren = rootChildren
                 manifestDoc = directManifest
-            } else if (nestedEchoSnapDir != null) {
-                targetDir = nestedEchoSnapDir
-                targetChildren = listChildren(resolver, treeUri, nestedEchoSnapDir.documentId)
+            } else if (nestedTargetDir != null) {
+                targetDir = nestedTargetDir
+                targetChildren = listChildren(resolver, treeUri, nestedTargetDir.documentId)
                 manifestDoc = targetChildren.firstOrNull { !it.isDirectory && it.displayName.equals(MANIFEST_FILE_NAME, true) }
             } else {
                 targetDir = rootDoc
@@ -649,12 +842,43 @@ object EchoSnapBackupManager {
 
     fun scanBackupFromDirectory(parentOrEchoSnapDir: File): Result<ScannedEchoSnapBackup> = runCatching {
         val directManifest = File(parentOrEchoSnapDir, MANIFEST_FILE_NAME)
-        val nestedDir = parentOrEchoSnapDir.listFiles()?.firstOrNull {
+        val hasDirectSubdirs = File(parentOrEchoSnapDir, COVERS_SUBDIR).isDirectory ||
+            File(parentOrEchoSnapDir, CANVASES_SUBDIR).isDirectory
+        val children = parentOrEchoSnapDir.listFiles().orEmpty()
+        var nestedDir = children.firstOrNull {
             it.isDirectory && it.name.equals(BACKUP_FOLDER_NAME, ignoreCase = true)
+        } ?: children.firstOrNull {
+            it.isDirectory && it.name.equals(LEGACY_BACKUP_FOLDER_NAME, ignoreCase = true)
         }
+
+        if (!directManifest.exists() && nestedDir == null) {
+            val depth1Dirs = children.filter {
+                it.isDirectory && !it.name.startsWith(".") && !it.name.equals("Android", ignoreCase = true)
+            }.take(24)
+            var depth2Legacy: File? = null
+            for (sub in depth1Dirs) {
+                val subChildren = sub.listFiles().orEmpty()
+                val echoHit = subChildren.firstOrNull {
+                    it.isDirectory && it.name.equals(BACKUP_FOLDER_NAME, ignoreCase = true)
+                }
+                if (echoHit != null) {
+                    nestedDir = echoHit
+                    break
+                }
+                if (depth2Legacy == null) {
+                    depth2Legacy = subChildren.firstOrNull {
+                        it.isDirectory && it.name.equals(LEGACY_BACKUP_FOLDER_NAME, ignoreCase = true)
+                    }
+                }
+            }
+            if (nestedDir == null) {
+                nestedDir = depth2Legacy
+            }
+        }
+
         val targetDir = when {
             directManifest.exists() -> parentOrEchoSnapDir
-            File(parentOrEchoSnapDir, COVERS_SUBDIR).isDirectory || File(parentOrEchoSnapDir, CANVASES_SUBDIR).isDirectory -> parentOrEchoSnapDir
+            hasDirectSubdirs && nestedDir == null -> parentOrEchoSnapDir
             nestedDir != null -> nestedDir
             else -> parentOrEchoSnapDir
         }
@@ -942,6 +1166,11 @@ object EchoSnapBackupManager {
         put("waveformColorArgb", s.waveformColorArgb)
         put("lyricsWordSelectionMode", s.lyricsWordSelectionMode)
         put("showLogoWordmark", s.showLogoWordmark)
+        put("liveWallpaperArtworkFillMode", s.liveWallpaperArtworkFillMode)
+        put("liveWallpaperCornerStyle", s.liveWallpaperCornerStyle)
+        put("cardShadowColorMode", s.cardShadowColorMode)
+        put("customShadowColorArgb", s.customShadowColorArgb)
+        put("cardShadowInverse", s.cardShadowInverse)
     }
 
     private fun jsonToStyle(o: JSONObject): EchoSnapBackupStyle {
@@ -968,7 +1197,12 @@ object EchoSnapBackupManager {
             waveformForce = o.optDouble("waveformForce", d.waveformForce.toDouble()).toFloat(),
             waveformColorArgb = o.optInt("waveformColorArgb", d.waveformColor.toArgb()),
             lyricsWordSelectionMode = o.optBoolean("lyricsWordSelectionMode", d.lyricsWordSelectionMode),
-            showLogoWordmark = o.optBoolean("showLogoWordmark", d.showLogoWordmark)
+            showLogoWordmark = o.optBoolean("showLogoWordmark", d.showLogoWordmark),
+            liveWallpaperArtworkFillMode = o.optString("liveWallpaperArtworkFillMode", d.liveWallpaperArtworkFillMode.name),
+            liveWallpaperCornerStyle = o.optString("liveWallpaperCornerStyle", d.liveWallpaperCornerStyle.name),
+            cardShadowColorMode = o.optString("cardShadowColorMode", d.cardShadowColorMode.name),
+            customShadowColorArgb = o.optInt("customShadowColorArgb", d.customShadowColor.toArgb()),
+            cardShadowInverse = o.optBoolean("cardShadowInverse", d.cardShadowInverse)
         )
     }
 

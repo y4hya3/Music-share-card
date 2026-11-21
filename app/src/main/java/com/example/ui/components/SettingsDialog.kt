@@ -82,8 +82,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import com.example.model.CardPalette
+import com.example.model.CardShadowColorMode
 import com.example.model.CardStyleConfig
+import com.example.model.LiveWallpaperArtworkFillMode
+import com.example.model.LiveWallpaperCornerStyle
 import com.example.model.LiveWallpaperMode
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
@@ -117,7 +124,8 @@ fun SettingsDialog(
     isAccessGranted: Boolean,
     onStyleChange: (CardStyleConfig) -> Unit,
     onRequestAudioBeatSync: (Boolean) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    animateWaveformPreview: Boolean = true
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -149,6 +157,9 @@ fun SettingsDialog(
     }
     var localEdgeBlurFade by remember(styleConfig.liveWallpaperEdgeBlurFade) {
         mutableFloatStateOf(styleConfig.liveWallpaperEdgeBlurFade.coerceIn(0f, 1f))
+    }
+    var localShadowDepth by remember(styleConfig.glowIntensity) {
+        mutableFloatStateOf(styleConfig.glowIntensity.coerceIn(0f, 1f))
     }
     var idleDelaySecondsInput by remember(styleConfig.liveWallpaperIdleDelaySec) {
         mutableStateOf(styleConfig.liveWallpaperIdleDelaySec.coerceIn(1, 86_400).toString())
@@ -281,7 +292,7 @@ fun SettingsDialog(
                                         beatSyncEnabled = styleConfig.waveformBeatSync,
                                         speedMultiplier = localSpeed,
                                         forceMultiplier = localForce,
-                                        animateAlways = true,
+                                        animateAlways = animateWaveformPreview,
                                         scale = 1.15f
                                     )
                                 }
@@ -786,12 +797,312 @@ fun SettingsDialog(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        Text(
+                            text = "Artwork Display Style",
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        val isFloatingSquare = styleConfig.liveWallpaperArtworkFillMode == LiveWallpaperArtworkFillMode.FLOATING_SQUARE
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(
+                                            liveWallpaperArtworkFillMode = LiveWallpaperArtworkFillMode.FLOATING_SQUARE
+                                        )
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isFloatingSquare) Color(0xFF1DB954) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isFloatingSquare) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_fill_floating")
+                            ) {
+                                Text(
+                                    text = "Floating Square",
+                                    color = if (isFloatingSquare) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isFloatingSquare) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(
+                                            liveWallpaperArtworkFillMode = LiveWallpaperArtworkFillMode.FULL_SCREEN
+                                        )
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (!isFloatingSquare) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (!isFloatingSquare) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_fill_fullscreen")
+                            ) {
+                                Text(
+                                    text = "Full Screen",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (!isFloatingSquare) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text(
+                            text = if (isFloatingSquare) {
+                                "Square Edges"
+                            } else {
+                                "Square Edges (applies in Floating Square)"
+                            },
+                            color = Color.White.copy(alpha = if (isFloatingSquare) 0.85f else 0.55f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        val isCurvedCorners = styleConfig.liveWallpaperCornerStyle == LiveWallpaperCornerStyle.CURVED
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .graphicsLayer { alpha = if (isFloatingSquare) 1f else 0.58f },
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(liveWallpaperCornerStyle = LiveWallpaperCornerStyle.CURVED)
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isCurvedCorners) Color(0xFF1DB954) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isCurvedCorners) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_corners_curved")
+                            ) {
+                                Text(
+                                    text = "Curved Edges",
+                                    color = if (isCurvedCorners) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isCurvedCorners) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                            Surface(
+                                onClick = {
+                                    onStyleChange(
+                                        styleConfig.copy(liveWallpaperCornerStyle = LiveWallpaperCornerStyle.SHARP)
+                                    )
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (!isCurvedCorners) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.08f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (!isCurvedCorners) Color.Transparent else SettingsGlassBorder
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_live_wallpaper_corners_sharp")
+                            ) {
+                                Text(
+                                    text = "Sharp Edges",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (!isCurvedCorners) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp)
+                                )
+                            }
+                        }
+
+                        if (isFloatingSquare) {
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Square Shadow Depth",
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = if (localShadowDepth <= 0.01f) "Off" else "${(localShadowDepth * 100f).roundToInt()}%",
+                                    color = Color(0xFFFF8A96),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.testTag("settings_lw_shadow_depth_value")
+                                )
+                            }
+                            Slider(
+                                value = localShadowDepth,
+                                onValueChange = { next ->
+                                    val clamped = next.coerceIn(0f, 1f)
+                                    localShadowDepth = clamped
+                                    onStyleChange(styleConfig.copy(glowIntensity = clamped))
+                                },
+                                onValueChangeFinished = {
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                valueRange = 0f..1f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFFF2B44),
+                                    activeTrackColor = Color(0xFFFF2B44),
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                                ),
+                                modifier = Modifier.testTag("settings_lw_shadow_depth_slider")
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = "Inverse Shadow",
+                                        color = Color.White.copy(alpha = 0.90f),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = "Upward glow + recessed inner border depth",
+                                        color = Color.White.copy(alpha = 0.52f),
+                                        fontSize = 10.sp
+                                    )
+                                }
+                                Switch(
+                                    checked = styleConfig.cardShadowInverse,
+                                    onCheckedChange = { checked ->
+                                        onStyleChange(styleConfig.copy(cardShadowInverse = checked))
+                                        MediaNotificationRepository.flushStylePreferences()
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFFFF2B44),
+                                        uncheckedThumbColor = Color.White.copy(alpha = 0.8f),
+                                        uncheckedTrackColor = Color.White.copy(alpha = 0.18f)
+                                    ),
+                                    modifier = Modifier.testTag("settings_lw_shadow_inverse_toggle")
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Square Shadow Color",
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CardShadowColorMode.entries.forEach { mode ->
+                                    val selected = styleConfig.cardShadowColorMode == mode
+                                    val swatchColor = when (mode) {
+                                        CardShadowColorMode.ALBUM_DYNAMIC -> palette.vibrantColor
+                                        CardShadowColorMode.BLACK -> Color.Black
+                                        CardShadowColorMode.RED -> Color(0xFFFF2B44)
+                                        CardShadowColorMode.WHITE -> Color.White
+                                        CardShadowColorMode.PURPLE -> Color(0xFF9D4EDD)
+                                        CardShadowColorMode.CYAN -> Color(0xFF00D2FF)
+                                        CardShadowColorMode.CUSTOM -> styleConfig.customShadowColor
+                                    }
+                                    Surface(
+                                        onClick = {
+                                            onStyleChange(styleConfig.copy(cardShadowColorMode = mode))
+                                            MediaNotificationRepository.flushStylePreferences()
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (selected) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.08f),
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (selected) Color.Transparent else SettingsGlassBorder
+                                        ),
+                                        modifier = Modifier.testTag("settings_lw_shadow_color_${mode.name}")
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(9.dp)
+                                                    .clip(CircleShape)
+                                                    .background(swatchColor)
+                                                    .border(0.8.dp, Color.White.copy(alpha = 0.6f), CircleShape)
+                                            )
+                                            Text(
+                                                text = mode.label,
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = if (styleConfig.liveWallpaperShowCard) {
+                                "Card Overlay is ON — turn off 'Show Music Card on Wallpaper' below to show Floating Square / Full Screen alone."
+                            } else {
+                                "Applies in Artwork Only mode and whenever an Animated Canvas is not active."
+                            },
+                            color = if (styleConfig.liveWallpaperShowCard) {
+                                Color(0xFFFFD166)
+                            } else {
+                                Color.White.copy(alpha = 0.52f)
+                            },
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 5.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         LiveWallpaperMiniPreview(
                             track = currentTrack,
                             palette = palette,
                             centerBlurPx = localWallpaperBlur,
                             edgeBlurFade = localEdgeBlurFade,
                             showCard = styleConfig.liveWallpaperShowCard,
+                            artworkFillMode = styleConfig.liveWallpaperArtworkFillMode,
+                            cornerStyle = styleConfig.liveWallpaperCornerStyle,
+                            shadowDepth = localShadowDepth,
+                            shadowColor = styleConfig.resolveShadowColor(palette),
+                            shadowInverse = styleConfig.cardShadowInverse,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("settings_live_wallpaper_mini_preview")
@@ -1345,6 +1656,11 @@ private fun LiveWallpaperMiniPreview(
     centerBlurPx: Float,
     edgeBlurFade: Float,
     showCard: Boolean,
+    artworkFillMode: LiveWallpaperArtworkFillMode = LiveWallpaperArtworkFillMode.FLOATING_SQUARE,
+    cornerStyle: LiveWallpaperCornerStyle = LiveWallpaperCornerStyle.CURVED,
+    shadowDepth: Float = 0.75f,
+    shadowColor: Color = Color.Black,
+    shadowInverse: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val art = track.albumArt
@@ -1574,18 +1890,75 @@ private fun LiveWallpaperMiniPreview(
                                 }
                             }
                         }
-                    } else if (sharpPreviewBmp != null && centerBlurPx < 24f) {
-                        val coverAlpha = if (centerBlurPx <= 14f) 1f else ((24f - centerBlurPx) / 10f).coerceIn(0f, 1f)
-                        Image(
-                            bitmap = sharpPreviewBmp,
-                            contentDescription = "Un-chopped artwork preview",
-                            contentScale = ContentScale.Fit,
-                            filterQuality = FilterQuality.Medium,
+                    } else if (
+                        artworkFillMode == LiveWallpaperArtworkFillMode.FLOATING_SQUARE &&
+                        sharpPreviewBmp != null
+                    ) {
+                        val artCorner = if (cornerStyle == LiveWallpaperCornerStyle.CURVED) 7.dp else 0.dp
+                        val depth = shadowDepth.coerceIn(0f, 1f)
+                        val isBlackShadow = shadowColor.red < 0.08f && shadowColor.green < 0.08f && shadowColor.blue < 0.08f
+                        val outerColor = if (shadowInverse && isBlackShadow) Color.White.copy(alpha = 0.7f) else shadowColor
+                        Box(
                             modifier = Modifier
-                                .fillMaxWidth(0.84f)
-                                .height(46.dp)
-                                .graphicsLayer { alpha = coverAlpha }
-                        )
+                                .size(50.dp)
+                                .drawBehind {
+                                    if (depth > 0.01f) {
+                                        drawIntoCanvas { canvas ->
+                                            val paint = Paint().asFrameworkPaint().apply {
+                                                isAntiAlias = true
+                                                color = outerColor.copy(alpha = (0.62f * depth).coerceIn(0f, 0.90f)).toArgb()
+                                                maskFilter = android.graphics.BlurMaskFilter(
+                                                    (5.dp.toPx() * (0.4f + depth * 0.9f)).coerceAtLeast(1f),
+                                                    android.graphics.BlurMaskFilter.Blur.NORMAL
+                                                )
+                                            }
+                                            val dy = if (shadowInverse) -2.dp.toPx() * depth else 2.dp.toPx() * depth
+                                            val radiusPx = artCorner.toPx()
+                                            canvas.nativeCanvas.drawRoundRect(
+                                                0f,
+                                                dy,
+                                                size.width,
+                                                size.height + dy,
+                                                radiusPx,
+                                                radiusPx,
+                                                paint
+                                            )
+                                        }
+                                    }
+                                }
+                                .clip(RoundedCornerShape(artCorner))
+                        ) {
+                            Image(
+                                bitmap = sharpPreviewBmp,
+                                contentDescription = "Un-chopped artwork preview",
+                                contentScale = ContentScale.Crop,
+                                filterQuality = FilterQuality.Medium,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .drawWithContent {
+                                        drawContent()
+                                        if (shadowInverse && depth > 0.01f) {
+                                            drawIntoCanvas { canvas ->
+                                                val strokePx = (7.dp.toPx() * (0.45f + 0.55f * depth)).coerceAtLeast(1.5f)
+                                                val paint = Paint().asFrameworkPaint().apply {
+                                                    isAntiAlias = true
+                                                    style = android.graphics.Paint.Style.STROKE
+                                                    strokeWidth = strokePx
+                                                    color = shadowColor.copy(alpha = (0.82f * depth).coerceIn(0f, 0.94f)).toArgb()
+                                                    maskFilter = android.graphics.BlurMaskFilter(
+                                                        (strokePx * 0.65f).coerceAtLeast(1f),
+                                                        android.graphics.BlurMaskFilter.Blur.NORMAL
+                                                    )
+                                                }
+                                                val rPx = artCorner.toPx()
+                                                canvas.nativeCanvas.drawRoundRect(
+                                                    0f, 0f, size.width, size.height, rPx, rPx, paint
+                                                )
+                                            }
+                                        }
+                                    }
+                            )
+                        }
                     } else {
                         Spacer(modifier = Modifier.height(42.dp))
                     }

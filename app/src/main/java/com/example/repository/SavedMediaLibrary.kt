@@ -563,7 +563,7 @@ object SavedMediaLibrary {
         _savedCovers.value = next
     }
 
-    fun loadBitmap(path: String?, maxDimension: Int = 1200): Bitmap? {
+    fun loadBitmap(path: String?, maxDimension: Int = 1440): Bitmap? {
         if (path.isNullOrBlank()) return null
         val file = File(path)
         if (!file.exists()) return null

@@ -224,7 +224,6 @@ fun AnimatedCanvasVideoBackground(
                                         controller.updateVideoSize(vw, vh)
                                         controller.updateBlurRadius(blurRadiusPx)
                                         controller.requestRender()
-                                        isVideoReady = true
                                     },
                                     onError = {
                                         isPrepared = false
@@ -232,6 +231,9 @@ fun AnimatedCanvasVideoBackground(
                                         streamErrored = true
                                     }
                                 )
+                            }
+                            controller.setOnFirstFrameRendered {
+                                isVideoReady = true
                             }
                         }
 
@@ -428,8 +430,23 @@ private class PreviewGlRendererController(
     @Volatile
     private var hasReceivedFrame = false
 
+    @Volatile
+    private var notifiedFirstFrame = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var onFirstFrameRenderedCallback: (() -> Unit)? = null
+
     private val renderPending = AtomicBoolean(false)
     private val texImagePending = AtomicBoolean(false)
+
+    fun setOnFirstFrameRendered(callback: () -> Unit) {
+        onFirstFrameRenderedCallback = callback
+        if (notifiedFirstFrame && !released) {
+            mainHandler.post(callback)
+        }
+    }
 
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -815,6 +832,12 @@ private class PreviewGlRendererController(
             }
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            if (!notifiedFirstFrame) {
+                notifiedFirstFrame = true
+                onFirstFrameRenderedCallback?.let { cb ->
+                    mainHandler.post { if (!released) cb() }
+                }
+            }
         } catch (_: Exception) {
         }
     }

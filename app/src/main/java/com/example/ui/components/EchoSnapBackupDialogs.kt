@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -60,6 +61,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.model.CardStyleConfig
 import com.example.repository.MediaNotificationRepository
 import com.example.repository.SavedMediaLibrary
@@ -82,7 +85,7 @@ private val BackupGlassFill = Color(0x16FFFFFF)
 private val BackupGlassBorder = Color(0x28FFFFFF)
 
 /**
- * Reusable Export / Import / Reset card for EchoSnap folder backups
+ * Reusable Export / Import / Reset card for Echomusic folder backups
  * (covers, animated canvases, linked albums + song lists, and card styles).
  */
 @Composable
@@ -106,20 +109,25 @@ fun EchoSnapBackupSectionCard(
     var lastStatusMessage by remember { mutableStateOf<String?>(null) }
     var scannedBackupForPreview by remember { mutableStateOf<ScannedEchoSnapBackup?>(null) }
     var showResetConfirmDialog by remember { mutableStateOf(false) }
+    var linkedFolderUri by remember {
+        mutableStateOf(EchoSnapBackupManager.getPersistedBackupTreeUri(context))
+    }
+    var linkedFolderName by remember {
+        mutableStateOf(EchoSnapBackupManager.getSavedFolderDisplayName(context))
+    }
 
-    val exportFolderPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { treeUri ->
-        if (treeUri == null) return@rememberLauncherForActivityResult
+    fun runAutoExport(treeUri: Uri) {
         coroutineScope.launch {
             isBusy = true
-            busyMessage = "Exporting to EchoSnap folder..."
+            busyMessage = "Exporting to Echomusic folder..."
             val result = EchoSnapBackupManager.exportBackupToTreeUri(
                 context = context,
                 treeUri = treeUri,
                 styleConfig = styleConfig
             )
             isBusy = false
+            linkedFolderUri = EchoSnapBackupManager.getPersistedBackupTreeUri(context)
+            linkedFolderName = EchoSnapBackupManager.getSavedFolderDisplayName(context)
             result.onSuccess { res ->
                 val summary = "Exported ${res.coversCount} cover(s), ${res.canvasesCount} canvas(es) & ${res.songsCount} song(s) into ${res.folderName}/"
                 lastStatusMessage = summary
@@ -132,13 +140,23 @@ fun EchoSnapBackupSectionCard(
         }
     }
 
+    val exportFolderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri == null) return@rememberLauncherForActivityResult
+        runAutoExport(treeUri)
+    }
+
     val importFolderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { treeUri ->
         if (treeUri == null) return@rememberLauncherForActivityResult
         coroutineScope.launch {
             isBusy = true
-            busyMessage = "Scanning EchoSnap folder..."
+            busyMessage = "Scanning Echomusic folder..."
+            EchoSnapBackupManager.savePersistedBackupTreeUri(context, treeUri)
+            linkedFolderUri = EchoSnapBackupManager.getPersistedBackupTreeUri(context)
+            linkedFolderName = EchoSnapBackupManager.getSavedFolderDisplayName(context)
             val scanned = EchoSnapBackupManager.scanBackupFromTreeUri(context, treeUri)
             isBusy = false
             scanned.onSuccess { backup ->
@@ -173,13 +191,13 @@ fun EchoSnapBackupSectionCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "EchoSnap Backup & Restore",
+                        text = "Echomusic Auto-Backup",
                         color = Color.White,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Export or import saved art, animated canvases & song lists in folder \"EchoSnap\"",
+                        text = "Auto-imports & exports saved art, animated canvases & song lists in folder \"Echomusic\"",
                         color = Color.White.copy(alpha = 0.62f),
                         fontSize = 11.sp
                     )
@@ -190,6 +208,74 @@ fun EchoSnapBackupSectionCard(
                         strokeWidth = 2.dp,
                         modifier = Modifier.size(20.dp)
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Linked Echomusic SAF Folder status bar
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (linkedFolderUri != null) Color(0x1E1DB954) else Color(0x18FFFFFF),
+                border = BorderStroke(
+                    1.dp,
+                    if (linkedFolderUri != null) Color(0x551DB954) else Color.White.copy(alpha = 0.12f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_folder),
+                            contentDescription = "Linked Echomusic folder",
+                            tint = if (linkedFolderUri != null) Color(0xFF9BE7B3) else Color.White.copy(alpha = 0.65f),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (linkedFolderUri != null) {
+                                val displayFolder = linkedFolderName ?: EchoSnapBackupManager.BACKUP_FOLDER_NAME
+                                if (displayFolder.equals(EchoSnapBackupManager.BACKUP_FOLDER_NAME, ignoreCase = true)) {
+                                    "Linked: $displayFolder/"
+                                } else {
+                                    "Linked: $displayFolder/${EchoSnapBackupManager.BACKUP_FOLDER_NAME}/"
+                                }
+                            } else {
+                                "No folder linked yet — tap Export or Change"
+                            },
+                            color = Color.White.copy(alpha = 0.88f),
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        onClick = {
+                            exportFolderPicker.launch(EchoSnapBackupManager.suggestedInitialPickerUri())
+                        },
+                        enabled = !isBusy,
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color.White.copy(alpha = 0.12f),
+                        modifier = Modifier.testTag("change_echosnap_folder_button")
+                    ) {
+                        Text(
+                            text = if (linkedFolderUri != null) "Change" else "Choose",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
                 }
             }
 
@@ -222,7 +308,14 @@ fun EchoSnapBackupSectionCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Button(
-                    onClick = { exportFolderPicker.launch(null) },
+                    onClick = {
+                        val persisted = EchoSnapBackupManager.getPersistedBackupTreeUri(context)
+                        if (persisted != null) {
+                            runAutoExport(persisted)
+                        } else {
+                            exportFolderPicker.launch(EchoSnapBackupManager.suggestedInitialPickerUri())
+                        }
+                    },
                     enabled = !isBusy,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFF1DB954),
@@ -236,7 +329,7 @@ fun EchoSnapBackupSectionCard(
                         .testTag("export_echosnap_folder_button")
                 ) {
                     Text(
-                        text = "Export EchoSnap",
+                        text = "Export Echomusic",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
@@ -245,7 +338,9 @@ fun EchoSnapBackupSectionCard(
                 }
 
                 Button(
-                    onClick = { importFolderPicker.launch(null) },
+                    onClick = {
+                        importFolderPicker.launch(EchoSnapBackupManager.suggestedInitialPickerUri())
+                    },
                     enabled = !isBusy,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Color(0xFFFF2B44),
@@ -661,7 +756,7 @@ fun EchoSnapImportPreviewDialog(
                     if (scanned.totalItemCount == 0 && scanned.includedStyle != null) {
                         item(key = "style_only_notice") {
                             Text(
-                                text = "This EchoSnap backup contains Card Visual Settings (${scanned.includedStyle.cardLayoutType}).",
+                                text = "This Echomusic backup contains Card Visual Settings (${scanned.includedStyle.cardLayoutType}).",
                                 color = Color.White.copy(alpha = 0.78f),
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(12.dp)
@@ -990,7 +1085,7 @@ fun EchoSnapResetConfirmDialog(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Choose what to clear or restore to defaults. Export to your EchoSnap folder first if you want a backup.",
+                    text = "Choose what to clear or restore to defaults. Export to your Echomusic folder first if you want a backup.",
                     color = Color.White.copy(alpha = 0.65f),
                     fontSize = 11.5.sp
                 )

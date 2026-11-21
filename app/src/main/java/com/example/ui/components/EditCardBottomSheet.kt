@@ -107,6 +107,7 @@ import androidx.compose.ui.unit.sp
 import com.example.model.CardBrandMode
 import com.example.model.CardLayoutType
 import com.example.model.CardPalette
+import com.example.model.CardShadowColorMode
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LogoColorMode
@@ -2717,27 +2718,28 @@ fun EditCardBottomSheet(
 
                         Spacer(modifier = Modifier.height(20.dp))
 
-                    // 7. SHADOW & DEPTH INTENSITY
+                    // 7. SHADOW & DEPTH INTENSITY, COLOR & INVERSE
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Card Shadow Depth",
+                            text = "Card & Square Shadow Depth",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White.copy(alpha = 0.92f)
                         )
                         Text(
-                            text = "${(styleConfig.glowIntensity * 100).toInt()}%",
+                            text = if (styleConfig.glowIntensity <= 0.01f) "Off (0%)" else "${(styleConfig.glowIntensity * 100).roundToInt()}%",
                             fontSize = 13.sp,
-                            color = Color.White.copy(alpha = 0.70f)
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (styleConfig.glowIntensity <= 0.01f) Color.White.copy(alpha = 0.55f) else Color(0xFFFF8A96)
                         )
                     }
                     Slider(
                         value = styleConfig.glowIntensity,
-                        onValueChange = { onStyleChange(styleConfig.copy(glowIntensity = it)) },
+                        onValueChange = { onStyleChange(styleConfig.copy(glowIntensity = it.coerceIn(0f, 1f))) },
                         valueRange = 0f..1f,
                         colors = SliderDefaults.colors(
                             thumbColor = Color(0xFFFF2B44),
@@ -2746,6 +2748,206 @@ fun EditCardBottomSheet(
                         ),
                         modifier = Modifier.testTag("glow_intensity_slider")
                     )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val presets = listOf(0f to "Off 0%", 0.35f to "Soft 35%", 0.75f to "Rich 75%", 1.0f to "Deep 100%")
+                        presets.forEach { (presetVal, label) ->
+                            val isActive = kotlin.math.abs(styleConfig.glowIntensity - presetVal) < 0.04f
+                            Surface(
+                                onClick = { onStyleChange(styleConfig.copy(glowIntensity = presetVal)) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isActive) Color(0xFFFF2B44) else GlassCardFill,
+                                border = BorderStroke(1.dp, if (isActive) Color.Transparent else GlassBorderColor),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("shadow_depth_preset_${(presetVal * 100).roundToInt()}")
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 7.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Inverse Shadow Toggle (upward outer rim + recessed inner square depth)
+                    Surface(
+                        onClick = { onStyleChange(styleConfig.copy(cardShadowInverse = !styleConfig.cardShadowInverse)) },
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (styleConfig.cardShadowInverse) Color(0x28FF2B44) else GlassCardFill,
+                        border = BorderStroke(
+                            1.dp,
+                            if (styleConfig.cardShadowInverse) Color(0x88FF2B44) else GlassBorderColor
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shadow_inverse_toggle")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Inverse Shadow (Recessed Edge)",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Inverts shadow upward & carves soft depth inside card and Floating Square edges",
+                                    color = Color.White.copy(alpha = 0.65f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.cardShadowInverse,
+                                onCheckedChange = { checked ->
+                                    onStyleChange(styleConfig.copy(cardShadowInverse = checked))
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFFFF2B44),
+                                    uncheckedThumbColor = Color.White.copy(alpha = 0.8f),
+                                    uncheckedTrackColor = Color.White.copy(alpha = 0.18f)
+                                )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Shadow Color Selector (never locked to black only)
+                    val activeShadowColor = styleConfig.resolveShadowColor(palette)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Shadow Color",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.90f)
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(activeShadowColor)
+                                    .border(1.dp, Color.White.copy(alpha = 0.55f), CircleShape)
+                            )
+                            Text(
+                                text = styleConfig.cardShadowColorMode.label,
+                                fontSize = 12.sp,
+                                color = Color.White.copy(alpha = 0.72f)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CardShadowColorMode.entries.forEach { mode ->
+                            val isSelected = styleConfig.cardShadowColorMode == mode
+                            val swatchColor = when (mode) {
+                                CardShadowColorMode.ALBUM_DYNAMIC -> palette.vibrantColor
+                                CardShadowColorMode.BLACK -> Color.Black
+                                CardShadowColorMode.RED -> Color(0xFFFF2B44)
+                                CardShadowColorMode.WHITE -> Color.White
+                                CardShadowColorMode.PURPLE -> Color(0xFF9D4EDD)
+                                CardShadowColorMode.CYAN -> Color(0xFF00D2FF)
+                                CardShadowColorMode.CUSTOM -> styleConfig.customShadowColor
+                            }
+                            Surface(
+                                onClick = { onStyleChange(styleConfig.copy(cardShadowColorMode = mode)) },
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isSelected) Color(0xFFFF2B44) else GlassCardFill,
+                                border = BorderStroke(1.dp, if (isSelected) Color.Transparent else GlassBorderColor),
+                                modifier = Modifier.testTag("shadow_color_${mode.name}")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(11.dp)
+                                            .clip(CircleShape)
+                                            .background(swatchColor)
+                                            .border(1.dp, Color.White.copy(alpha = 0.6f), CircleShape)
+                                    )
+                                    Text(
+                                        text = mode.label,
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (styleConfig.cardShadowColorMode == CardShadowColorMode.CUSTOM) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val customSwatches = listOf(
+                                Color(0xFFFF2B44),
+                                Color(0xFFFFB703),
+                                Color(0xFF1DB954),
+                                Color(0xFF00D2FF),
+                                Color(0xFF9D4EDD),
+                                Color(0xFFFF4D8D),
+                                Color(0xFFFF6B4A)
+                            )
+                            customSwatches.forEachIndexed { idx, swatch ->
+                                val selected = styleConfig.customShadowColor.toArgb() == swatch.toArgb()
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(CircleShape)
+                                        .background(swatch)
+                                        .border(
+                                            width = if (selected) 2.5.dp else 1.dp,
+                                            color = if (selected) Color.White else Color.White.copy(alpha = 0.35f),
+                                            shape = CircleShape
+                                        )
+                                        .clickable {
+                                            onStyleChange(
+                                                styleConfig.copy(
+                                                    cardShadowColorMode = CardShadowColorMode.CUSTOM,
+                                                    customShadowColor = swatch
+                                                )
+                                            )
+                                        }
+                                        .testTag("custom_shadow_swatch_$idx")
+                                )
+                            }
+                        }
+                    }
 
                     Spacer(modifier = Modifier.height(16.dp))
 

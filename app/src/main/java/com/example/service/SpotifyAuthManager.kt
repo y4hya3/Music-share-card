@@ -408,6 +408,7 @@ object SpotifyAuthManager {
                         webView.settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
+                            @Suppress("DEPRECATION")
                             databaseEnabled = true
                             userAgentString = DESKTOP_BROWSER_UA
                             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
@@ -592,6 +593,7 @@ object SpotifyAuthManager {
                         webView.settings.apply {
                             javaScriptEnabled = true
                             domStorageEnabled = true
+                            @Suppress("DEPRECATION")
                             databaseEnabled = true
                             loadsImagesAutomatically = false
                             userAgentString = DESKTOP_BROWSER_UA

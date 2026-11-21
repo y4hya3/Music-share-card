@@ -27,6 +27,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -106,6 +108,8 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private val appLabelCache = ConcurrentHashMap<String, String>()
         private var sessionsListenerRegistered = false
         private var sessionManagerRef: MediaSessionManager? = null
+        @Volatile
+        private var lastUriLookupTrackKey: String? = null
 
         private val activeSessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
             val appCtx = activeInstance?.applicationContext ?: cachedAppContext ?: return@OnActiveSessionsChangedListener
@@ -391,27 +395,27 @@ class MusicNotificationListenerService : NotificationListenerService() {
             val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
             val isPlaying = controller.playbackState?.state == PlaybackState.STATE_PLAYING
 
-            val candidateBitmaps = mutableListOf<Bitmap>()
+            val candidateBitmaps = mutableListOf<Pair<Bitmap, Int>>()
             metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)?.let {
-                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
+                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it to 3)
             }
             metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)?.let {
-                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
+                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it to 2)
             }
             metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)?.let {
-                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
+                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it to 1)
             }
             notificationBitmapFallback?.let {
-                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
+                if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it to 0)
             }
-            val maxMetadataDim = candidateBitmaps.maxOfOrNull { maxOf(it.width, it.height) } ?: 0
-            if (maxMetadataDim < 720) {
+            val maxMetadataDim = candidateBitmaps.maxOfOrNull { maxOf(it.first.width, it.first.height) } ?: 0
+            if (maxMetadataDim < 720 || candidateBitmaps.none { isNearSquareBitmap(it.first) }) {
                 findNotificationArtworkForPackage(context, controller.packageName)?.let {
-                    if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it)
+                    if (!it.isRecycled && it.width > 0 && it.height > 0) candidateBitmaps.add(it to 0)
                 }
             }
 
-            val bestRawArt = candidateBitmaps.maxByOrNull { it.width.toLong() * it.height.toLong() }
+            val bestRawArt = pickBestScoredCoverBitmap(candidateBitmaps)
             val appName = resolveAppLabel(context, controller.packageName)
             val resolvedArtist = artist?.takeIf { it.isNotBlank() } ?: appName
             val rawMediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
@@ -433,7 +437,12 @@ class MusicNotificationListenerService : NotificationListenerService() {
             val repoArt = repoTrack.albumArt
             val repoPixels = if (repoArt != null && !repoArt.isRecycled) repoArt.width.toLong() * repoArt.height.toLong() else 0L
             val rawPixels = if (bestRawArt != null && !bestRawArt.isRecycled) bestRawArt.width.toLong() * bestRawArt.height.toLong() else 0L
-            if (isSameRepoTrack && repoPixels > 0L && repoPixels >= rawPixels) {
+            val repoIsSquare = repoArt != null && !repoArt.isRecycled && isNearSquareBitmap(repoArt)
+            val rawIsSquare = bestRawArt != null && !bestRawArt.isRecycled && isNearSquareBitmap(bestRawArt)
+            val repoMaxDim = if (repoArt != null && !repoArt.isRecycled) maxOf(repoArt.width, repoArt.height) else 0
+            val lookupKey = "${controller.packageName}|$title|$resolvedArtist"
+            val canShortCircuitLowResUriLookup = (repoIsSquare && repoMaxDim >= 900) || lastUriLookupTrackKey == lookupKey
+            if (isSameRepoTrack && repoPixels > 0L && (repoPixels >= rawPixels || (repoIsSquare && !rawIsSquare)) && canShortCircuitLowResUriLookup) {
                 if (repoTrack.isPlaying == isPlaying) {
                     return true
                 }
@@ -464,38 +473,108 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 spotifyTrackId = spotifyTrackId
             )
 
+            val bestMaxDim = maxOf(safeArt?.width ?: 0, safeArt?.height ?: 0)
+            val bestIsSquare = safeArt != null && !safeArt.isRecycled && isNearSquareBitmap(safeArt)
+            val uris = listOfNotNull(
+                metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
+                metadata.getString(MediaMetadata.METADATA_KEY_ART_URI),
+                metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI),
+                metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
+            ).map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .sortedByDescending { u ->
+                    // Prefer local content:// / file:// / path URIs first so cover upgrades happen in <5ms
+                    if (u.startsWith("content://") || u.startsWith("file://") || u.startsWith("/")) 1 else 0
+                }
+            val localUris = uris.filter { it.startsWith("content://") || it.startsWith("file://") || it.startsWith("/") }
+            val remoteUris = uris.filterNot { it in localUris }
+
+            val needsArtUpgrade = safeArt == null || bestMaxDim < 900 || !bestIsSquare
+            if (needsArtUpgrade && localUris.isNotEmpty() && !isSameRepoTrack) {
+                // Fast local content:// / file:// cover decode (~3-8ms off-main) BEFORE publishing,
+                // preventing any choppy/pixelated square flash on next-song transitions.
+                lastUriLookupTrackKey = lookupKey
+                val appCtxCopy = context.applicationContext
+                val pkgCopy = controller.packageName
+                serviceScope.launch(Dispatchers.IO) {
+                    var bestLocalBmp: Bitmap? = null
+                    var bestLocalPixels = 0L
+                    for (localUri in localUris) {
+                        try {
+                            val raw = fetchBitmapFromUriString(appCtxCopy, localUri)
+                            val trimmed = if (raw != null) {
+                                val t = BitmapBlurUtils.trimLetterboxBarsIfPresent(raw)
+                                if (t !== raw && !raw.isRecycled) raw.recycle()
+                                t
+                            } else null
+                            if (trimmed != null && !trimmed.isRecycled) {
+                                val px = trimmed.width.toLong() * trimmed.height.toLong()
+                                if (px > bestLocalPixels) {
+                                    if (bestLocalBmp != null && bestLocalBmp !== trimmed && !bestLocalBmp.isRecycled) {
+                                        bestLocalBmp.recycle()
+                                    }
+                                    bestLocalBmp = trimmed
+                                    bestLocalPixels = px
+                                } else if (trimmed !== bestLocalBmp) {
+                                    trimmed.recycle()
+                                }
+                                if (maxOf(trimmed.width, trimmed.height) >= 900 && isNearSquareBitmap(trimmed)) {
+                                    break
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to load local album art URI: $localUri", e)
+                        }
+                    }
+
+                    val chosenArt = bestLocalBmp ?: safeArt
+                    if (bestLocalBmp != null && safeArt != null && safeArt !== bestLocalBmp && !safeArt.isRecycled) {
+                        safeArt.recycle()
+                    }
+                    withContext(Dispatchers.Main) {
+                        MediaNotificationRepository.updateTrack(
+                            trackInfo.copy(albumArt = chosenArt)
+                        )
+                        val chosenMax = maxOf(chosenArt?.width ?: 0, chosenArt?.height ?: 0)
+                        val chosenSquare = chosenArt != null && !chosenArt.isRecycled && isNearSquareBitmap(chosenArt)
+                        if (remoteUris.isNotEmpty() && (chosenArt == null || chosenMax < 900 || !chosenSquare)) {
+                            loadArtFromUrisAsync(
+                                context = appCtxCopy,
+                                uriStrings = remoteUris,
+                                packageName = pkgCopy,
+                                title = title,
+                                artist = resolvedArtist
+                            )
+                        }
+                    }
+                }
+                return true
+            }
+
             Log.d(
                 TAG,
                 "Synced track: '${trackInfo.title}' by '${trackInfo.artist}' (art=${safeArt?.width ?: 0}x${safeArt?.height ?: 0})"
             )
             MediaNotificationRepository.updateTrack(trackInfo)
 
-            // Fetch high-resolution art from METADATA_KEY_*_URI whenever embedded art is missing OR below 900px
+            // Fetch high-resolution square art from METADATA_KEY_*_URI whenever embedded art is missing, < 900px, or non-square
             val updatedRepoTrack = MediaNotificationRepository.currentTrack.value
             val repoHasHighResForSameTrack = !updatedRepoTrack.isSample &&
                 updatedRepoTrack.packageName == controller.packageName &&
                 updatedRepoTrack.title == title &&
                 updatedRepoTrack.artist == resolvedArtist &&
-                maxOf(updatedRepoTrack.albumArt?.width ?: 0, updatedRepoTrack.albumArt?.height ?: 0) >= 900
+                updatedRepoTrack.albumArt?.let { !it.isRecycled && isNearSquareBitmap(it) && maxOf(it.width, it.height) >= 900 } == true
 
-            val bestMaxDim = maxOf(safeArt?.width ?: 0, safeArt?.height ?: 0)
-            if (!repoHasHighResForSameTrack && (safeArt == null || bestMaxDim < 900)) {
-                val uris = listOfNotNull(
-                    metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
-                    metadata.getString(MediaMetadata.METADATA_KEY_ART_URI),
-                    metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI),
-                    metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
-                ).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-
-                if (uris.isNotEmpty()) {
-                    loadArtFromUrisAsync(
-                        context = context.applicationContext,
-                        uriStrings = uris,
-                        packageName = controller.packageName,
-                        title = title,
-                        artist = resolvedArtist
-                    )
-                }
+            if (!repoHasHighResForSameTrack && needsArtUpgrade && uris.isNotEmpty()) {
+                lastUriLookupTrackKey = lookupKey
+                loadArtFromUrisAsync(
+                    context = context.applicationContext,
+                    uriStrings = uris,
+                    packageName = controller.packageName,
+                    title = title,
+                    artist = resolvedArtist
+                )
             }
 
             return true
@@ -609,8 +688,8 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     null
                 }
             } else {
-                val uri = Uri.parse(uriString)
-                BitmapBlurUtils.decodeHighResFromUri(context, uri, maxDimension = 1400)
+                val uri = if (uriString.startsWith("/")) Uri.fromFile(File(uriString)) else Uri.parse(uriString)
+                BitmapBlurUtils.decodeHighResFromUri(context, uri, maxDimension = 1440)
             }
         }
 
@@ -629,44 +708,42 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private fun extractNotificationArtwork(context: Context, notification: Notification): Bitmap? {
             return try {
                 val extras = notification.extras
-                val candidates = mutableListOf<Bitmap>()
+                val candidates = mutableListOf<Pair<Bitmap, Int>>()
 
-                fun addDrawableFromIcon(icon: Icon?) {
+                fun addDrawableFromIcon(icon: Icon?, rank: Int) {
                     val drawable = icon?.loadDrawable(context) ?: return
                     if (drawable is android.graphics.drawable.BitmapDrawable && drawable.bitmap != null) {
-                        candidates.add(drawable.bitmap)
+                        candidates.add(drawable.bitmap to rank)
                     } else {
                         val w = drawable.intrinsicWidth.coerceAtLeast(512)
                         val h = drawable.intrinsicHeight.coerceAtLeast(512)
-                        candidates.add(drawable.toBitmap(width = w, height = h, config = Bitmap.Config.ARGB_8888))
+                        candidates.add(drawable.toBitmap(width = w, height = h, config = Bitmap.Config.ARGB_8888) to rank)
                     }
                 }
 
-                addDrawableFromIcon(notification.getLargeIcon())
+                addDrawableFromIcon(notification.getLargeIcon(), rank = 2)
 
                 @Suppress("DEPRECATION")
                 val extraBig = extras?.get(Notification.EXTRA_LARGE_ICON_BIG)
                 when (extraBig) {
-                    is Bitmap -> candidates.add(extraBig)
-                    is Icon -> addDrawableFromIcon(extraBig)
+                    is Bitmap -> candidates.add(extraBig to 2)
+                    is Icon -> addDrawableFromIcon(extraBig, rank = 2)
                 }
 
                 @Suppress("DEPRECATION")
                 val extraStd = extras?.get(Notification.EXTRA_LARGE_ICON)
                 when (extraStd) {
-                    is Bitmap -> candidates.add(extraStd)
-                    is Icon -> addDrawableFromIcon(extraStd)
+                    is Bitmap -> candidates.add(extraStd to 2)
+                    is Icon -> addDrawableFromIcon(extraStd, rank = 2)
                 }
 
                 @Suppress("DEPRECATION")
                 val extraPic = extras?.getParcelable<Bitmap>(Notification.EXTRA_PICTURE)
                 if (extraPic != null) {
-                    candidates.add(extraPic)
+                    candidates.add(extraPic to 0)
                 }
 
-                val best = candidates
-                    .filter { !it.isRecycled && it.width > 0 && it.height > 0 }
-                    .maxByOrNull { it.width.toLong() * it.height.toLong() }
+                val best = pickBestScoredCoverBitmap(candidates)
 
                 val safe = BitmapBlurUtils.toSafeSoftwareBitmap(best, maxDimension = 1400)
                 if (safe != null) {
@@ -682,6 +759,30 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 Log.e(TAG, "Error extracting notification artwork", e)
                 null
             }
+        }
+
+        internal fun isNearSquareBitmap(bitmap: Bitmap): Boolean {
+            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return false
+            val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+            return aspect in 0.85f..1.18f
+        }
+
+        internal fun pickBestScoredCoverBitmap(candidates: List<Pair<Bitmap, Int>>): Bitmap? {
+            return candidates
+                .filter { (bmp, _) -> !bmp.isRecycled && bmp.width > 0 && bmp.height > 0 }
+                .maxByOrNull { (bmp, sourceRank) ->
+                    val minDim = minOf(bmp.width, bmp.height)
+                    val isSquare = isNearSquareBitmap(bmp)
+                    val tier = when {
+                        isSquare && minDim >= 180 -> 3_000_000_000L
+                        isSquare -> 1_000_000_000L
+                        minDim >= 180 -> 200_000_000L
+                        else -> 0L
+                    }
+                    val rankBonus = sourceRank.coerceAtLeast(0).toLong() * 20_000_000L
+                    val pixelArea = (bmp.width.toLong() * bmp.height.toLong()).coerceAtMost(15_000_000L)
+                    tier + rankBonus + pixelArea
+                }?.first
         }
 
         private fun resolveAppLabel(context: Context, packageName: String): String {

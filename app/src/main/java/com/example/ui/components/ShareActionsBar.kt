@@ -30,6 +30,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -252,7 +255,11 @@ private fun ShareActionItemsContent(
 
 @Composable
 private fun PreviewEyeIcon(modifier: Modifier = Modifier) {
-    androidx.compose.foundation.Canvas(modifier = modifier) {
+    androidx.compose.foundation.Canvas(
+        modifier = modifier.semantics {
+            contentDescription = "Preview card"
+        }
+    ) {
         val w = size.width
         val h = size.height
         val cx = w / 2f
@@ -287,7 +294,7 @@ private fun CircularActionItem(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 7.dp, vertical = 6.dp)
             .testTag(tag)
     ) {

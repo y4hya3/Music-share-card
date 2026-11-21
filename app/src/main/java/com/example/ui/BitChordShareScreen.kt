@@ -18,6 +18,7 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -42,6 +43,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredSize
@@ -65,6 +67,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -100,6 +103,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -125,8 +133,10 @@ import com.example.ui.components.NotificationStatusBanner
 import com.example.ui.components.SettingsDialog
 import com.example.ui.components.ShareActionsBar
 import com.example.ui.components.TransparentEditorCheckerboard
+import androidx.compose.ui.graphics.Brush
 import com.example.util.CardShareManager
 import com.example.util.DevicePerformanceTier
+import com.example.util.EchoSnapBackupManager
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -170,6 +180,7 @@ fun BitChordShareScreen(
     var showEditSheet by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showPreviewDialog by remember { mutableStateOf(false) }
+    var showInitialFolderDialog by remember { mutableStateOf(false) }
     var isProcessingAction by remember { mutableStateOf(false) }
     var actionStatusText by remember { mutableStateOf("") }
 
@@ -397,6 +408,64 @@ fun BitChordShareScreen(
                 } finally {
                     isProcessingAction = false
                 }
+            }
+        }
+    }
+
+    val initialFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        EchoSnapBackupManager.setPromptedInitialFolderAccess(context, true)
+        if (treeUri != null) {
+            coroutineScope.launch {
+                val res = EchoSnapBackupManager.autoSearchAndImportFromTreeUri(
+                    context = context,
+                    treeUri = treeUri,
+                    forceReimport = true
+                )
+                res.onSuccess { outcome ->
+                    if (outcome != null && (outcome.coversCount > 0 || outcome.canvasesCount > 0 || outcome.styleApplied)) {
+                        Toast.makeText(
+                            context,
+                            "Auto-imported ${outcome.coversCount} cover(s) & ${outcome.canvasesCount} canvas(es) from ${outcome.folderName}/",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "Folder linked! Future exports will auto-save to Echomusic/",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }.onFailure { err ->
+                    Toast.makeText(
+                        context,
+                        "Could not scan folder: ${err.message ?: "Unknown error"}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(isAppEntered) {
+        if (isAppEntered) {
+            val persistedUri = EchoSnapBackupManager.getPersistedBackupTreeUri(context)
+            if (persistedUri != null) {
+                val outcome = EchoSnapBackupManager.autoSearchAndImportFromTreeUri(
+                    context = context,
+                    treeUri = persistedUri,
+                    forceReimport = false
+                ).getOrNull()
+                if (outcome != null && (outcome.coversCount > 0 || outcome.canvasesCount > 0 || outcome.styleApplied)) {
+                    Toast.makeText(
+                        context,
+                        "Auto-imported ${outcome.coversCount} cover(s) & ${outcome.canvasesCount} canvas(es) from ${outcome.folderName}/",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } else if (!EchoSnapBackupManager.hasPromptedInitialFolderAccess(context)) {
+                showInitialFolderDialog = true
             }
         }
     }
@@ -1132,6 +1201,122 @@ fun BitChordShareScreen(
             }
         )
     }
+
+    if (showInitialFolderDialog) {
+        InitialEchomusicFolderDialog(
+            onAllow = {
+                showInitialFolderDialog = false
+                EchoSnapBackupManager.setPromptedInitialFolderAccess(context, true)
+                initialFolderPickerLauncher.launch(EchoSnapBackupManager.suggestedInitialPickerUri())
+            },
+            onSkip = {
+                showInitialFolderDialog = false
+                EchoSnapBackupManager.setPromptedInitialFolderAccess(context, true)
+            }
+        )
+    }
+}
+
+@Composable
+private fun InitialEchomusicFolderDialog(
+    onAllow: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val glassShape = RoundedCornerShape(24.dp)
+    Dialog(onDismissRequest = onSkip) {
+        Surface(
+            shape = glassShape,
+            color = Color.Transparent,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    brush = Brush.verticalGradient(listOf(Color(0xF0202232), Color(0xF812131C))),
+                    shape = glassShape
+                )
+                .border(1.dp, Color.White.copy(alpha = 0.18f), glassShape)
+                .testTag("initial_echomusic_folder_dialog")
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0x281DB954),
+                        border = BorderStroke(1.dp, Color(0x661DB954))
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_folder),
+                            contentDescription = "Echomusic folder",
+                            tint = Color(0xFF9BE7B3),
+                            modifier = Modifier
+                                .padding(10.dp)
+                                .size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Echomusic Auto-Save Folder",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Auto-import & 1-tap export",
+                            color = Color(0xFF9BE7B3),
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Allow access to a folder (like Downloads) so the app can automatically look for \"Echomusic\", restore your saved covers, animated canvases & song lists, and auto-create \"Echomusic/\" when you export.",
+                    color = Color.White.copy(alpha = 0.78f),
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onSkip,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.24f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("initial_skip_folder_access_button")
+                    ) {
+                        Text("Not Now", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    Button(
+                        onClick = onAllow,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1DB954),
+                            contentColor = Color(0xFF0A0D0B)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        contentPadding = PaddingValues(vertical = 12.dp),
+                        modifier = Modifier
+                            .weight(1.35f)
+                            .heightIn(min = 48.dp)
+                            .testTag("initial_allow_folder_access_button")
+                    ) {
+                        Text("Allow Folder Access", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1235,7 +1420,7 @@ private fun CleanExportPreviewDialog(
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
-                        if (hasAnimatedCanvas && activeCanvasVideoUrl != null) {
+                        if (!styleConfig.useTransparentBackground && activeCanvasVideoUrl != null) {
                             AnimatedCanvasVideoBackground(
                                 videoUrl = activeCanvasVideoUrl,
                                 blurRadiusPx = styleConfig.backgroundBlurRadius,
@@ -1511,9 +1696,9 @@ private fun ShareScreenTopBar(
                     contentColor = Color.Black
                 ),
                 shape = RoundedCornerShape(50),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                 modifier = Modifier
-                    .defaultMinSize(minHeight = 44.dp)
+                    .defaultMinSize(minHeight = 48.dp)
                     .testTag("card_edit_pill_button")
             ) {
                 Icon(
@@ -1551,7 +1736,12 @@ private fun PreviewScaleVectorIcon(
     isFitToScreen: Boolean,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier) {
+    val label = if (isFitToScreen) "Exit fit preview scale" else "Fit preview to screen"
+    Canvas(
+        modifier = modifier.semantics {
+            contentDescription = label
+        }
+    ) {
         val stroke = Stroke(width = size.minDimension * 0.11f, cap = StrokeCap.Round)
         val pad = size.minDimension * 0.12f
         val arm = size.minDimension * 0.22f
@@ -1728,7 +1918,12 @@ private fun QuickControlSliderPill(
                         onClick = { onTabSelect(tab) },
                         shape = RoundedCornerShape(50),
                         color = if (selected) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.10f),
-                        modifier = Modifier.testTag("quick_tab_${tab.name.lowercase()}")
+                        modifier = Modifier
+                            .semantics {
+                                this.selected = selected
+                                role = Role.Tab
+                            }
+                            .testTag("quick_tab_${tab.name.lowercase()}")
                     ) {
                         Text(
                             text = tab.label,

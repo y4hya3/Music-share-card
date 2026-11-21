@@ -109,10 +109,25 @@ fun BlurredAlbumBackground(
     val blurRadius = styleConfig.backgroundBlurRadius.coerceIn(0f, 40f)
     val albumArt = track.albumArt
     val tier = DevicePerformanceTier.rememberDeviceTier()
-    val crispFilter = if (tier.isLegacyRenderTier) FilterQuality.Medium else FilterQuality.High
+    val crispFilter = FilterQuality.High
+    val isUltraLowBlur = blurRadius <= 1f
 
-    val sharpOrGpuBgBitmap = remember(albumArt, tier.bgSourceMaxDim) {
-        albumArt?.let { BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.bgSourceMaxDim) }
+    val sharpOrGpuBgBitmap = remember(albumArt, tier.bgSourceMaxDim, isUltraLowBlur) {
+        albumArt?.let { src ->
+            val minTarget = if (isUltraLowBlur) 768 else 0
+            val prepared = if (minTarget > 0) {
+                BitmapBlurUtils.upscaleLowResArtworkSmoothly(src, minTargetDim = minTarget)
+            } else {
+                BitmapBlurUtils.toSafeSoftwareBitmap(src, maxDimension = tier.bgSourceMaxDim)
+            }
+            if (prepared != null && maxOf(prepared.width, prepared.height) > tier.bgSourceMaxDim) {
+                val capped = BitmapBlurUtils.toSafeSoftwareBitmap(prepared, maxDimension = tier.bgSourceMaxDim)
+                if (prepared !== src && capped !== prepared && !prepared.isRecycled) prepared.recycle()
+                capped
+            } else {
+                prepared
+            }
+        }
     }
 
     var isCanvasOpaque by remember(activeCanvasVideoUrl) { mutableStateOf(false) }
@@ -319,8 +334,16 @@ fun MusicStoryCard(
         RoundedCornerShape(scaledCornerDp.dp)
     }
     val crispArtImageBitmap = remember(track.albumArt, tier.cardArtMaxDim) {
-        track.albumArt?.let {
-            BitmapBlurUtils.toSafeSoftwareBitmap(it, maxDimension = tier.cardArtMaxDim)?.asImageBitmap()
+        track.albumArt?.let { src ->
+            val smooth = BitmapBlurUtils.upscaleLowResArtworkSmoothly(src, minTargetDim = 768)
+            val finalBmp = if (smooth != null && maxOf(smooth.width, smooth.height) > tier.cardArtMaxDim) {
+                val capped = BitmapBlurUtils.toSafeSoftwareBitmap(smooth, maxDimension = tier.cardArtMaxDim)
+                if (smooth !== src && capped !== smooth && !smooth.isRecycled) smooth.recycle()
+                capped
+            } else {
+                smooth
+            }
+            finalBmp?.asImageBitmap()
         }
     }
 
@@ -442,10 +465,14 @@ private fun FloatingGlassShareCard(
         lerp(animDarkMuted, Color(0xFF0C0C10), 0.42f)
     }
 
-    val glowStrength = styleConfig.glowIntensity.coerceAtLeast(0.25f)
-    val shadowAlpha = (0.42f * glowStrength * glassOpacity).coerceIn(0f, 0.52f)
-    val shadowBlurDp = (10f + 8f * blurFrac) * glowStrength * scale
-    val shadowOffsetYDp = 7.dp * scale
+    val shadowColor = remember(styleConfig.cardShadowColorMode, styleConfig.customShadowColor, palette) {
+        styleConfig.resolveShadowColor(palette)
+    }
+    val glowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f)
+    val isInverseShadow = styleConfig.cardShadowInverse
+    val shadowAlpha = (0.56f * glowStrength * glassOpacity).coerceIn(0f, 0.72f)
+    val shadowBlurDp = (8f + 14f * glowStrength + 6f * blurFrac) * glowStrength * scale
+    val shadowOffsetYDp = (if (isInverseShadow) -7f else 7f).dp * scale
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (32 * scale).dp)
     val innerPadding = (16 * scale).dp
     val cornerDpPx = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6).dp
@@ -487,14 +514,19 @@ private fun FloatingGlassShareCard(
                 cardPath.addRoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx, AndroidPath.Direction.CW)
 
                 // Soft outer drop shadow clipped strictly outside the translucent card so sides never stain dark
-                if (shadowAlpha > 0.01f && glassOpacity > 0.01f) {
+                if (glowStrength > 0.01f && shadowAlpha > 0.01f && glassOpacity > 0.01f) {
                     val blurPx = (shadowBlurDp * density).coerceAtLeast(1f)
                     val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
                     if (blurKey != blurFilterState.lastShadowBlurKey || blurFilterState.lastShadowFilter == null) {
                         blurFilterState.lastShadowBlurKey = blurKey
                         blurFilterState.lastShadowFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
                     }
-                    shadowPaint.color = Color.Black.copy(alpha = shadowAlpha).toArgb()
+                    val outerTint = if (isInverseShadow && shadowColor == Color.Black) {
+                        lerp(Color.White, palette.lightVibrantColor, 0.35f)
+                    } else {
+                        shadowColor
+                    }
+                    shadowPaint.color = outerTint.copy(alpha = shadowAlpha).toArgb()
                     shadowPaint.maskFilter = blurFilterState.lastShadowFilter
                     val offsetY = shadowOffsetYDp.toPx()
                     drawIntoCanvas { canvas ->
@@ -619,6 +651,14 @@ private fun FloatingGlassShareCard(
                     .matchParentSize()
                     .graphicsLayer { alpha = (blurFrac * glassOpacity).coerceIn(0f, 1f) }
                     .background(sheenBrush)
+            )
+        }
+        if (isInverseShadow && glowStrength > 0.01f && glassOpacity > 0.01f) {
+            InnerInverseShadowOverlay(
+                shadowColor = shadowColor,
+                strength = glowStrength * glassOpacity,
+                cornerDp = cornerDpPx,
+                modifier = Modifier.matchParentSize()
             )
         }
         Column(
@@ -769,8 +809,8 @@ fun DynamicIslandWaveformBars(
     val latestAnimateAlways by androidx.compose.runtime.rememberUpdatedState(animateAlways)
     val latestActive by androidx.compose.runtime.rememberUpdatedState(isLifecycleActive)
 
-    DisposableEffect(beatSyncEnabled) {
-        if (beatSyncEnabled) {
+    DisposableEffect(beatSyncEnabled, isLifecycleActive) {
+        if (beatSyncEnabled && isLifecycleActive) {
             sampler.startIfPermitted(context)
         } else {
             sampler.stop()
@@ -780,7 +820,9 @@ fun DynamicIslandWaveformBars(
         }
     }
 
-    LaunchedEffect(tier.waveformFrameIntervalNs) {
+    val shouldRunFrameLoop = isLifecycleActive && (animateAlways || track.isPlaying || beatSyncEnabled)
+    LaunchedEffect(shouldRunFrameLoop, tier.waveformFrameIntervalNs) {
+        if (!shouldRunFrameLoop) return@LaunchedEffect
         var lastFrameNanos = 0L
         var lastEmitNanos = 0L
         var lastEnsureNanos = 0L
@@ -906,8 +948,24 @@ private fun FloatingGlowArtwork(
     glassOpacity: Float,
     modifier: Modifier = Modifier
 ) {
-    val glowIntensity = styleConfig.glowIntensity * glassOpacity
+    val rawGlow = styleConfig.glowIntensity.coerceIn(0f, 1f)
+    val glowIntensity = rawGlow * glassOpacity
+    val isInverseShadow = styleConfig.cardShadowInverse
+    val shadowColor = remember(styleConfig.cardShadowColorMode, styleConfig.customShadowColor, palette) {
+        styleConfig.resolveShadowColor(palette)
+    }
     val effectiveWidth = minOf(maxCardWidth, maxArtSize + (16 * scale).dp)
+    val artCornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(0).dp
+    val artShape = remember(artCornerDp) { RoundedCornerShape(artCornerDp) }
+
+    val glowPath = remember { AndroidPath() }
+    val glowPaint = remember { AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG) }
+    val glowBlurState = remember {
+        object {
+            var lastKey = -1
+            var lastFilter: BlurMaskFilter? = null
+        }
+    }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -920,19 +978,75 @@ private fun FloatingGlowArtwork(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
+                .drawBehind {
+                    if (glowIntensity > 0.01f) {
+                        val cornerPx = artCornerDp.toPx()
+                        val blurPx = ((10f + 26f * glowIntensity) * scale * density).coerceAtLeast(1f)
+                        val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+                        if (blurKey != glowBlurState.lastKey || glowBlurState.lastFilter == null) {
+                            glowBlurState.lastKey = blurKey
+                            glowBlurState.lastFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+                        }
+                        val outerTint = if (isInverseShadow && shadowColor == Color.Black) {
+                            lerp(Color.White, palette.lightVibrantColor, 0.35f)
+                        } else {
+                            shadowColor
+                        }
+                        val spreadPx = (if (isInverseShadow) 3f else 6f) * glowIntensity * scale * density
+                        val offsetY = (if (isInverseShadow) -8f else 8f) * glowIntensity * scale * density
+                        glowPaint.color = outerTint.copy(
+                            alpha = (if (isInverseShadow) 0.50f else 0.72f) * glowIntensity
+                        ).toArgb()
+                        glowPaint.maskFilter = glowBlurState.lastFilter
+                        glowPath.reset()
+                        glowPath.addRoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx, AndroidPath.Direction.CW)
+                        drawIntoCanvas { canvas ->
+                            val native = canvas.nativeCanvas
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                val saved = native.save()
+                                native.clipOutPath(glowPath)
+                                native.drawRoundRect(
+                                    -spreadPx,
+                                    -spreadPx + offsetY,
+                                    size.width + spreadPx,
+                                    size.height + spreadPx + offsetY,
+                                    cornerPx + spreadPx * 0.4f,
+                                    cornerPx + spreadPx * 0.4f,
+                                    glowPaint
+                                )
+                                native.restoreToCount(saved)
+                            } else {
+                                native.drawRoundRect(
+                                    -spreadPx,
+                                    -spreadPx + offsetY,
+                                    size.width + spreadPx,
+                                    size.height + spreadPx + offsetY,
+                                    cornerPx + spreadPx * 0.4f,
+                                    cornerPx + spreadPx * 0.4f,
+                                    glowPaint
+                                )
+                            }
+                        }
+                    }
+                }
                 .then(
                     if (glowIntensity > 0.02f) {
+                        val elevTint = if (isInverseShadow && shadowColor == Color.Black) {
+                            lerp(Color.White, palette.lightVibrantColor, 0.35f)
+                        } else {
+                            shadowColor
+                        }
                         Modifier.shadow(
                             elevation = (24 * glowIntensity).dp,
-                            shape = RoundedCornerShape(styleConfig.cornerRadiusDp.dp),
-                            ambientColor = palette.vibrantColor.copy(alpha = 0.6f * glassOpacity),
-                            spotColor = palette.vibrantColor.copy(alpha = 0.75f * glassOpacity)
+                            shape = artShape,
+                            ambientColor = elevTint.copy(alpha = 0.65f * glowIntensity),
+                            spotColor = elevTint.copy(alpha = 0.80f * glowIntensity)
                         )
                     } else {
                         Modifier
                     }
                 )
-                .clip(RoundedCornerShape(styleConfig.cornerRadiusDp.dp))
+                .clip(artShape)
                 .background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
@@ -950,6 +1064,15 @@ private fun FloatingGlowArtwork(
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(56.dp)
+                )
+            }
+
+            if (isInverseShadow && glowIntensity > 0.01f) {
+                InnerInverseShadowOverlay(
+                    shadowColor = shadowColor,
+                    strength = glowIntensity,
+                    cornerDp = artCornerDp,
+                    modifier = Modifier.fillMaxSize()
                 )
             }
         }
@@ -1006,15 +1129,84 @@ private fun MinimalCleanStoryCard(
     modifier: Modifier = Modifier
 ) {
     val effectiveCardWidth = minOf(maxCardWidth, maxArtSize + (28 * scale).dp)
-    val shadowDp = (20 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale * glassOpacity).dp
+    val glowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f) * glassOpacity
+    val shadowDp = (22 * glowStrength * scale).dp
+    val shadowColor = remember(styleConfig.cardShadowColorMode, styleConfig.customShadowColor, palette) {
+        styleConfig.resolveShadowColor(palette)
+    }
+    val isInverseShadow = styleConfig.cardShadowInverse
+    val shadowTint = if (isInverseShadow && shadowColor == Color.Black) {
+        lerp(Color.White, palette.lightVibrantColor, 0.35f)
+    } else {
+        shadowColor
+    }
+    val cornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6).dp
+    val minCardPath = remember { AndroidPath() }
+    val minShadowPaint = remember { AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG) }
+    val minBlurState = remember {
+        object {
+            var lastKey = -1
+            var lastFilter: BlurMaskFilter? = null
+        }
+    }
 
     Box(
         modifier = modifier
             .widthIn(max = effectiveCardWidth)
             .fillMaxWidth((0.78f * scale).coerceIn(0.44f, 0.94f))
+            .drawBehind {
+                if (glowStrength > 0.01f && glassOpacity > 0.01f) {
+                    val cornerPx = cornerDp.toPx()
+                    val blurPx = ((10f + 22f * glowStrength) * scale * density).coerceAtLeast(1f)
+                    val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+                    if (blurKey != minBlurState.lastKey || minBlurState.lastFilter == null) {
+                        minBlurState.lastKey = blurKey
+                        minBlurState.lastFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+                    }
+                    minShadowPaint.color = shadowTint.copy(
+                        alpha = ((if (isInverseShadow) 0.45f else 0.60f) * glowStrength).coerceIn(0f, 0.78f)
+                    ).toArgb()
+                    minShadowPaint.maskFilter = minBlurState.lastFilter
+                    val offsetY = (if (isInverseShadow) -6f else 6f) * glowStrength * scale * density
+                    minCardPath.reset()
+                    minCardPath.addRoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx, AndroidPath.Direction.CW)
+                    drawIntoCanvas { canvas ->
+                        val native = canvas.nativeCanvas
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val saved = native.save()
+                            native.clipOutPath(minCardPath)
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                minShadowPaint
+                            )
+                            native.restoreToCount(saved)
+                        } else {
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                minShadowPaint
+                            )
+                        }
+                    }
+                }
+            }
             .then(
-                if (shadowDp > 0.5.dp) {
-                    Modifier.shadow(elevation = shadowDp, shape = cardShape)
+                if (shadowDp > 0.4.dp) {
+                    Modifier.shadow(
+                        elevation = shadowDp,
+                        shape = cardShape,
+                        ambientColor = shadowTint.copy(alpha = 0.65f * glowStrength),
+                        spotColor = shadowTint.copy(alpha = 0.80f * glowStrength)
+                    )
                 } else {
                     Modifier
                 }
@@ -1030,6 +1222,14 @@ private fun MinimalCleanStoryCard(
             )
             .testTag("music_story_card_container")
     ) {
+        if (isInverseShadow && glowStrength > 0.01f) {
+            InnerInverseShadowOverlay(
+                shadowColor = shadowColor,
+                strength = glowStrength,
+                cornerDp = cornerDp,
+                modifier = Modifier.matchParentSize()
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1125,7 +1325,26 @@ private fun SpotifyLyricsShareCard(
     }
     val isPlaceholder = styleConfig.customLyrics.trim().isEmpty() && lyricsText.startsWith("Add or auto-search")
 
-    val shadowElevation = (22 * styleConfig.glowIntensity.coerceAtLeast(0.25f) * scale * glassOpacity).dp
+    val glowStrength = styleConfig.glowIntensity.coerceIn(0f, 1f) * glassOpacity
+    val shadowElevation = (24 * glowStrength * scale).dp
+    val shadowColor = remember(styleConfig.cardShadowColorMode, styleConfig.customShadowColor, palette) {
+        styleConfig.resolveShadowColor(palette)
+    }
+    val isInverseShadow = styleConfig.cardShadowInverse
+    val shadowTint = if (isInverseShadow && shadowColor == Color.Black) {
+        lerp(Color.White, palette.lightVibrantColor, 0.35f)
+    } else {
+        shadowColor
+    }
+    val cornerDp = (styleConfig.cornerRadiusDp * scale).roundToInt().coerceAtLeast(6).dp
+    val lyricsCardPath = remember { AndroidPath() }
+    val lyricsShadowPaint = remember { AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG) }
+    val lyricsBlurState = remember {
+        object {
+            var lastKey = -1
+            var lastFilter: BlurMaskFilter? = null
+        }
+    }
     val horizontalPad = (20 * scale).dp
     val verticalPad = (20 * scale).dp
     val thumbSize = (44 * scale).dp
@@ -1134,13 +1353,58 @@ private fun SpotifyLyricsShareCard(
         modifier = modifier
             .widthIn(max = maxCardWidth)
             .fillMaxWidth((0.80f * scale).coerceIn(0.46f, 0.94f))
+            .drawBehind {
+                if (glowStrength > 0.01f && glassOpacity > 0.01f) {
+                    val cornerPx = cornerDp.toPx()
+                    val blurPx = ((10f + 24f * glowStrength) * scale * density).coerceAtLeast(1f)
+                    val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+                    if (blurKey != lyricsBlurState.lastKey || lyricsBlurState.lastFilter == null) {
+                        lyricsBlurState.lastKey = blurKey
+                        lyricsBlurState.lastFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+                    }
+                    lyricsShadowPaint.color = shadowTint.copy(
+                        alpha = ((if (isInverseShadow) 0.48f else 0.62f) * glowStrength).coerceIn(0f, 0.78f)
+                    ).toArgb()
+                    lyricsShadowPaint.maskFilter = lyricsBlurState.lastFilter
+                    val offsetY = (if (isInverseShadow) -7f else 7f) * glowStrength * scale * density
+                    lyricsCardPath.reset()
+                    lyricsCardPath.addRoundRect(0f, 0f, size.width, size.height, cornerPx, cornerPx, AndroidPath.Direction.CW)
+                    drawIntoCanvas { canvas ->
+                        val native = canvas.nativeCanvas
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val saved = native.save()
+                            native.clipOutPath(lyricsCardPath)
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                lyricsShadowPaint
+                            )
+                            native.restoreToCount(saved)
+                        } else {
+                            native.drawRoundRect(
+                                0f,
+                                offsetY,
+                                size.width,
+                                size.height + offsetY,
+                                cornerPx,
+                                cornerPx,
+                                lyricsShadowPaint
+                            )
+                        }
+                    }
+                }
+            }
             .then(
-                if (shadowElevation > 0.5.dp) {
+                if (shadowElevation > 0.4.dp) {
                     Modifier.shadow(
                         elevation = shadowElevation,
                         shape = cardShape,
-                        ambientColor = Color.Black.copy(alpha = 0.55f * glassOpacity),
-                        spotColor = Color.Black.copy(alpha = 0.65f * glassOpacity)
+                        ambientColor = shadowTint.copy(alpha = 0.65f * glowStrength),
+                        spotColor = shadowTint.copy(alpha = 0.80f * glowStrength)
                     )
                 } else {
                     Modifier
@@ -1163,12 +1427,20 @@ private fun SpotifyLyricsShareCard(
             )
             .testTag("music_story_card_container")
     ) {
-        if (useSongArtBg && crispArtImageBitmap != null && glassOpacity > 0.01f) {
+        if (useSongArtBg && glassOpacity > 0.01f) {
             BlurredCardCoverLayer(
                 albumArt = track.albumArt,
                 predecodedImageBitmap = crispArtImageBitmap,
                 blurRadius = styleConfig.lyricsArtBlurRadius,
                 layerAlpha = glassOpacity,
+                modifier = Modifier.matchParentSize()
+            )
+        }
+        if (isInverseShadow && glowStrength > 0.01f) {
+            InnerInverseShadowOverlay(
+                shadowColor = shadowColor,
+                strength = glowStrength,
+                cornerDp = cornerDp,
                 modifier = Modifier.matchParentSize()
             )
         }
@@ -1279,7 +1551,7 @@ private fun BlurredCardCoverLayer(
 ) {
     val clampedRadius = blurRadius.coerceIn(0f, 40f)
     val tier = DevicePerformanceTier.rememberDeviceTier()
-    val crispFilter = if (tier.isLegacyRenderTier) FilterQuality.Medium else FilterQuality.High
+    val crispFilter = FilterQuality.High
     val baseScrimBrush = remember {
         Brush.verticalGradient(
             colors = listOf(
@@ -1474,3 +1746,53 @@ fun resolveGradientColors(
     val stops = resolveGradientStops(palette, styleConfig)
     return Pair(stops.first(), stops.last())
 }
+
+@Composable
+private fun InnerInverseShadowOverlay(
+    shadowColor: Color,
+    strength: Float,
+    cornerDp: Dp,
+    modifier: Modifier = Modifier
+) {
+    val s = strength.coerceIn(0f, 1f)
+    if (s <= 0.01f) return
+    val insetPaint = remember {
+        AndroidPaint(AndroidPaint.ANTI_ALIAS_FLAG).apply {
+            style = AndroidPaint.Style.STROKE
+        }
+    }
+    val blurState = remember {
+        object {
+            var lastKey = -1
+            var lastFilter: BlurMaskFilter? = null
+        }
+    }
+    Box(
+        modifier = modifier.drawBehind {
+            val cornerPx = cornerDp.toPx()
+            val strokePx = (14f + 22f * s) * density
+            val blurPx = (10f + 16f * s) * density
+            val blurKey = (blurPx / 2f).roundToInt().coerceAtLeast(1) * 2
+            if (blurKey != blurState.lastKey || blurState.lastFilter == null) {
+                blurState.lastKey = blurKey
+                blurState.lastFilter = BlurMaskFilter(blurKey.toFloat(), BlurMaskFilter.Blur.NORMAL)
+            }
+            insetPaint.strokeWidth = strokePx
+            insetPaint.maskFilter = blurState.lastFilter
+            insetPaint.color = shadowColor.copy(alpha = (0.72f * s).coerceIn(0f, 0.85f)).toArgb()
+            val pad = strokePx * 0.25f
+            drawIntoCanvas { canvas ->
+                canvas.nativeCanvas.drawRoundRect(
+                    -pad,
+                    -pad,
+                    size.width + pad,
+                    size.height + pad,
+                    cornerPx,
+                    cornerPx,
+                    insetPaint
+                )
+            }
+        }
+    )
+}
+

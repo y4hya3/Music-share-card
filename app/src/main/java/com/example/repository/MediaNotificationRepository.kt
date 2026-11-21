@@ -133,6 +133,19 @@ object MediaNotificationRepository {
     private val _lastPlaybackStoppedElapsedMs = MutableStateFlow(0L)
     val lastPlaybackStoppedElapsedMs: StateFlow<Long> = _lastPlaybackStoppedElapsedMs.asStateFlow()
 
+    private val recentTrackHdArtCache = object : LinkedHashMap<String, Bitmap>(24, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 20
+    }
+
+    private val savedCoverBitmapCache = object : LinkedHashMap<String, Bitmap>(14, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 10
+    }
+
+    private val savedCanvasThumbCache = object : LinkedHashMap<String, Bitmap>(12, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 8
+    }
+
+    private var prewarmJob: Job? = null
     private var sampleTracksList: List<MediaTrackInfo> = emptyList()
 
     @Synchronized
@@ -150,6 +163,7 @@ object MediaNotificationRepository {
         initialized = true
         _styleConfig.value = CardStylePreferences.load(ctx)
         SavedMediaLibrary.initialize(ctx)
+        prewarmSavedMediaArtworkCache(ctx)
         checkNotificationAccess(ctx)
         if (_lastPlaybackStoppedElapsedMs.value == 0L && _currentTrack.value.isSample) {
             _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
@@ -247,6 +261,25 @@ object MediaNotificationRepository {
         val currentKey = trackKey(current)
         val isSameTrack = !current.isSample && currentKey == newKey
 
+        val savedCanvasMatch = if (!isSameTrack || (_activeCanvasId.value == "none" && userManuallySelectedCanvasTrackKey != newKey)) {
+            SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+                title = trackInfo.title,
+                album = trackInfo.album,
+                artist = trackInfo.artist
+            )
+        } else {
+            null
+        }
+        val savedCoverMatch = if (!isSameTrack || (_selectedCoverId.value == "player" && userManuallySelectedCoverTrackKey != newKey)) {
+            SavedMediaLibrary.findMatchingSavedCoverForTrack(
+                title = trackInfo.title,
+                album = trackInfo.album,
+                artist = trackInfo.artist
+            )
+        } else {
+            null
+        }
+
         if (!isSameTrack) {
             canvasSearchJob?.cancel()
             applyCanvasJob?.cancel()
@@ -259,16 +292,28 @@ object MediaNotificationRepository {
             _canvasSearchStatus.value = null
             _lyricsCandidates.value = emptyList()
             _lyricsSearchStatus.value = null
-            _activeCanvasUrl.value = null
-            _activeCanvasId.value = "none"
             userManuallySelectedCoverTrackKey = null
             userManuallySelectedCanvasTrackKey = null
-            autoAppliedSavedCanvasTrackKey = null
             autoAppliedSavedCoverTrackKey = null
             lastAutoSearchedTrackKey = null
             lastAutoUpgradedLowResTrackKey = null
             lastAutoCanvasTrackKey = null
             coverLoadJob?.cancel()
+
+            if (savedCanvasMatch != null) {
+                autoAppliedSavedCanvasTrackKey = newKey
+                _activeCanvasId.value = "saved_canvas_${savedCanvasMatch.id}"
+                _activeCanvasUrl.value = savedCanvasMatch.fileUri
+                _canvasSearchStatus.value = if (savedCanvasMatch.linkedAlbumName.isNotBlank()) {
+                    "Offline album canvas: ${savedCanvasMatch.linkedAlbumName}"
+                } else {
+                    "Saved offline canvas: ${savedCanvasMatch.name}"
+                }
+            } else {
+                autoAppliedSavedCanvasTrackKey = null
+                _activeCanvasId.value = "none"
+                _activeCanvasUrl.value = null
+            }
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
             val prevPixels = if (prevOrig != null && !prevOrig.isRecycled) prevOrig.width.toLong() * prevOrig.height.toLong() else 0L
@@ -280,6 +325,20 @@ object MediaNotificationRepository {
 
         val currentArt = current.albumArt
         val incomingArt = trackInfo.albumArt
+        val cachedHdArt = synchronized(recentTrackHdArtCache) {
+            recentTrackHdArtCache[normalizedArtCacheKey(trackInfo.title, trackInfo.artist)]
+        }?.takeIf { !it.isRecycled }
+
+        if (incomingArt != null && !incomingArt.isRecycled && isSquareHighResArt(incomingArt)) {
+            cacheHdArtForTrack(trackInfo.title, trackInfo.artist, incomingArt)
+        }
+
+        val cachedSavedCoverBmp = savedCoverMatch?.let { match ->
+            synchronized(savedCoverBitmapCache) { savedCoverBitmapCache[match.id] }
+        }?.takeIf { !it.isRecycled }
+        val cachedSavedCanvasThumb = savedCanvasMatch?.let { match ->
+            synchronized(savedCanvasThumbCache) { savedCanvasThumbCache[match.id] }
+        }?.takeIf { !it.isRecycled }
 
         val resolvedArt = when {
             isSameTrack && (userManuallySelectedCoverTrackKey == newKey || autoAppliedSavedCoverTrackKey == newKey) &&
@@ -287,16 +346,37 @@ object MediaNotificationRepository {
                 // Respect user's manual or linked offline cover art choice for the active song
                 currentArt
             }
+            cachedSavedCoverBmp != null -> {
+                // Instant 0ms offline Saved Cover Art (prevents choppy player art or black flash)
+                autoAppliedSavedCoverTrackKey = newKey
+                _selectedCoverId.value = "saved_cover_${savedCoverMatch!!.id}"
+                cachedSavedCoverBmp
+            }
             isSameTrack && currentArt != null && !currentArt.isRecycled -> {
                 if (incomingArt == null || incomingArt.isRecycled) {
                     currentArt
                 } else {
-                    val currentPixels = currentArt.width.toLong() * currentArt.height.toLong()
-                    val incomingPixels = incomingArt.width.toLong() * incomingArt.height.toLong()
-                    if (currentPixels > incomingPixels) currentArt else incomingArt
+                    val curPixels = currentArt.width.toLong() * currentArt.height.toLong()
+                    val incPixels = incomingArt.width.toLong() * incomingArt.height.toLong()
+                    val curSquare = isNearSquareArt(currentArt)
+                    val incSquare = isNearSquareArt(incomingArt)
+                    when {
+                        incSquare && !curSquare -> incomingArt
+                        curSquare && !incSquare && maxOf(currentArt.width, currentArt.height) >= 300 -> currentArt
+                        curPixels > incPixels -> currentArt
+                        else -> incomingArt
+                    }
                 }
             }
-            else -> incomingArt
+            incomingArt != null && !incomingArt.isRecycled -> {
+                val incMax = maxOf(incomingArt.width, incomingArt.height)
+                if (cachedHdArt != null && (!isNearSquareArt(incomingArt) || incMax < 600)) {
+                    cachedHdArt
+                } else {
+                    incomingArt
+                }
+            }
+            else -> cachedHdArt ?: cachedSavedCanvasThumb
         }
 
         val finalTrack = if (resolvedArt !== trackInfo.albumArt) {
@@ -317,36 +397,22 @@ object MediaNotificationRepository {
             extractPaletteForTrack(finalTrack)
         }
 
-        // Offline Saved Album / Song Canvas auto-apply (highest priority & works 100% offline)
-        if (!isSameTrack || (_activeCanvasId.value == "none" && userManuallySelectedCanvasTrackKey != newKey)) {
-            val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
-                title = finalTrack.title,
-                album = finalTrack.album,
-                artist = finalTrack.artist
-            )
-            if (savedMatch != null) {
-                autoAppliedSavedCanvasTrackKey = newKey
-                _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
-                _activeCanvasUrl.value = savedMatch.fileUri
-                _canvasSearchStatus.value = if (savedMatch.linkedAlbumName.isNotBlank()) {
-                    "Offline album canvas: ${savedMatch.linkedAlbumName}"
-                } else {
-                    "Saved offline canvas: ${savedMatch.name}"
-                }
+        // Offline Saved Album / Song Canvas auto-apply if same-track had none previously
+        if (isSameTrack && savedCanvasMatch != null) {
+            autoAppliedSavedCanvasTrackKey = newKey
+            _activeCanvasId.value = "saved_canvas_${savedCanvasMatch.id}"
+            _activeCanvasUrl.value = savedCanvasMatch.fileUri
+            _canvasSearchStatus.value = if (savedCanvasMatch.linkedAlbumName.isNotBlank()) {
+                "Offline album canvas: ${savedCanvasMatch.linkedAlbumName}"
+            } else {
+                "Saved offline canvas: ${savedCanvasMatch.name}"
             }
         }
 
         // Offline Saved Album / Song Cover Art auto-apply (highest priority & works 100% offline)
-        if (!isSameTrack || (_selectedCoverId.value == "player" && userManuallySelectedCoverTrackKey != newKey)) {
-            val savedCoverMatch = SavedMediaLibrary.findMatchingSavedCoverForTrack(
-                title = finalTrack.title,
-                album = finalTrack.album,
-                artist = finalTrack.artist
-            )
-            if (savedCoverMatch != null) {
-                autoAppliedSavedCoverTrackKey = newKey
-                applySavedCoverForTrackAsync(finalTrack, savedCoverMatch, isAutoApply = true)
-            }
+        if (savedCoverMatch != null && cachedSavedCoverBmp == null) {
+            autoAppliedSavedCoverTrackKey = newKey
+            applySavedCoverForTrackAsync(finalTrack, savedCoverMatch, isAutoApply = true)
         }
 
         // If Auto-Search Online HD Cover is enabled, look up HD candidates automatically for new live tracks
@@ -364,7 +430,8 @@ object MediaNotificationRepository {
         ) {
             val artMaxSide = finalTrack.albumArt?.takeIf { !it.isRecycled }
                 ?.let { maxOf(it.width, it.height) } ?: 0
-            if (artMaxSide < 600) {
+            val artIsSquare = finalTrack.albumArt?.let { isNearSquareArt(it) } == true
+            if (artMaxSide < 720 || !artIsSquare) {
                 lastAutoUpgradedLowResTrackKey = newKey
                 upgradeLowResArtworkSilently(finalTrack)
             }
@@ -408,7 +475,13 @@ object MediaNotificationRepository {
                 0L
             }
             val newPixels = albumArt.width.toLong() * albumArt.height.toLong()
-            if (existingPixels == 0L || newPixels >= existingPixels) {
+            val existingIsSquare = existing != null && !existing.isRecycled && isNearSquareArt(existing)
+            val newIsSquare = isNearSquareArt(albumArt)
+            if (existingPixels == 0L ||
+                (newIsSquare && !existingIsSquare) ||
+                (newPixels >= existingPixels && (newIsSquare || !existingIsSquare))
+            ) {
+                cacheHdArtForTrack(title, artist, albumArt)
                 val updated = current.copy(albumArt = albumArt)
                 _currentTrack.value = updated
                 extractPaletteForTrack(updated)
@@ -566,6 +639,45 @@ object MediaNotificationRepository {
         }
     }
 
+    fun prewarmSavedMediaArtworkCache(context: Context? = appContext) {
+        val ctx = context?.applicationContext ?: return
+        val coversSnapshot = SavedMediaLibrary.savedCovers.value
+        val canvasesSnapshot = SavedMediaLibrary.savedCanvases.value
+        if (coversSnapshot.isEmpty() && canvasesSnapshot.isEmpty()) return
+
+        prewarmJob?.cancel()
+        prewarmJob = repositoryScope.launch(Dispatchers.IO) {
+            val tier = DevicePerformanceTier.get(ctx)
+            val maxItems = if (tier.isLowRam) 4 else 8
+            val maxCoverDim = maxOf(tier.cardArtMaxDim, 1200)
+
+            coversSnapshot.take(maxItems).forEach { item ->
+                val cached = synchronized(savedCoverBitmapCache) { savedCoverBitmapCache[item.id] }
+                if (cached == null || cached.isRecycled) {
+                    val decoded = SavedMediaLibrary.loadBitmap(item.localImagePath, maxDimension = maxCoverDim)
+                    if (decoded != null && !decoded.isRecycled) {
+                        synchronized(savedCoverBitmapCache) {
+                            savedCoverBitmapCache[item.id] = decoded
+                        }
+                    }
+                }
+            }
+
+            canvasesSnapshot.take(maxItems).forEach { item ->
+                val thumbPath = item.thumbnailPath ?: return@forEach
+                val cached = synchronized(savedCanvasThumbCache) { savedCanvasThumbCache[item.id] }
+                if (cached == null || cached.isRecycled) {
+                    val decoded = SavedMediaLibrary.loadBitmap(thumbPath, maxDimension = maxCoverDim)
+                    if (decoded != null && !decoded.isRecycled) {
+                        synchronized(savedCanvasThumbCache) {
+                            savedCanvasThumbCache[item.id] = decoded
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private fun applySavedCoverForTrackAsync(
         trackSnapshot: MediaTrackInfo,
         matchedCover: SavedCoverItem,
@@ -574,10 +686,16 @@ object MediaNotificationRepository {
         val expectedKey = trackKey(trackSnapshot)
         coverLoadJob?.cancel()
         coverLoadJob = repositoryScope.launch {
-            val maxCoverDim = DevicePerformanceTier.recommendedCoverMaxDim(appContext)
-            val bmp = withContext(Dispatchers.IO) {
+            val cached = synchronized(savedCoverBitmapCache) { savedCoverBitmapCache[matchedCover.id] }
+                ?.takeIf { !it.isRecycled }
+            val maxCoverDim = maxOf(DevicePerformanceTier.recommendedCoverMaxDim(appContext), 1200)
+            val bmp = cached ?: withContext(Dispatchers.IO) {
                 SavedMediaLibrary.loadBitmap(matchedCover.localImagePath, maxDimension = maxCoverDim)
             } ?: return@launch
+            synchronized(savedCoverBitmapCache) {
+                savedCoverBitmapCache[matchedCover.id] = bmp
+            }
+            cacheHdArtForTrack(trackSnapshot.title, trackSnapshot.artist, bmp)
             val current = _currentTrack.value
             if (trackKey(current) != expectedKey) return@launch
             if (isAutoApply && userManuallySelectedCoverTrackKey == expectedKey) return@launch
@@ -723,6 +841,9 @@ object MediaNotificationRepository {
                 cardScale = defaults.cardScale,
                 cardOpacity = defaults.cardOpacity,
                 glowIntensity = defaults.glowIntensity,
+                cardShadowColorMode = defaults.cardShadowColorMode,
+                customShadowColor = defaults.customShadowColor,
+                cardShadowInverse = defaults.cardShadowInverse,
                 darkOverlayAlpha = defaults.darkOverlayAlpha,
                 cornerRadiusDp = defaults.cornerRadiusDp,
                 useTransparentBackground = defaults.useTransparentBackground,
@@ -748,6 +869,7 @@ object MediaNotificationRepository {
     }
 
     fun onSavedMediaLibraryImported() {
+        prewarmSavedMediaArtworkCache()
         recheckSavedAlbumCanvasForCurrentTrack()
         recheckSavedAlbumCoverForCurrentTrack()
     }
@@ -861,7 +983,7 @@ object MediaNotificationRepository {
 
             val hdBitmap = CoverArtSearchService.fetchFullResolutionArt(
                 candidate = bestMatch,
-                maxDimension = DevicePerformanceTier.recommendedCoverMaxDim(appContext)
+                maxDimension = maxOf(DevicePerformanceTier.recommendedCoverMaxDim(appContext), 1200)
             ) ?: return@launch
 
             val current = _currentTrack.value
@@ -873,9 +995,12 @@ object MediaNotificationRepository {
             }
             val curArt = current.albumArt
             val curPixels = if (curArt != null && !curArt.isRecycled) curArt.width.toLong() * curArt.height.toLong() else 0L
+            val curSquare = curArt != null && !curArt.isRecycled && isNearSquareArt(curArt)
             val hdPixels = hdBitmap.width.toLong() * hdBitmap.height.toLong()
             val hdMax = maxOf(hdBitmap.width, hdBitmap.height)
-            if (hdMax >= 600 && hdPixels > curPixels) {
+            val hdSquare = isNearSquareArt(hdBitmap)
+            if (hdMax >= 600 && (hdPixels > curPixels || (hdSquare && !curSquare))) {
+                cacheHdArtForTrack(current.title, current.artist, hdBitmap)
                 _selectedCoverId.value = bestMatch.id
                 val updated = current.copy(albumArt = hdBitmap)
                 _currentTrack.value = updated
@@ -1307,6 +1432,28 @@ object MediaNotificationRepository {
         }
     }
 
+    private fun normalizedArtCacheKey(title: String, artist: String): String =
+        "${AnimatedCanvasSearchService.normalizeQueryText(title).ifBlank { title.trim() }.lowercase()}|${AnimatedCanvasSearchService.normalizeArtistText(artist).lowercase()}"
+
+    private fun isNearSquareArt(bmp: Bitmap): Boolean {
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return false
+        val aspect = bmp.width.toFloat() / bmp.height.toFloat()
+        return aspect in 0.85f..1.18f
+    }
+
+    private fun isSquareHighResArt(bmp: Bitmap): Boolean =
+        isNearSquareArt(bmp) && maxOf(bmp.width, bmp.height) >= 480
+
+    private fun cacheHdArtForTrack(title: String, artist: String, bmp: Bitmap) {
+        if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) return
+        if (maxOf(bmp.width, bmp.height) < 400) return
+        val key = normalizedArtCacheKey(title, artist)
+        if (key == "|") return
+        synchronized(recentTrackHdArtCache) {
+            recentTrackHdArtCache[key] = bmp
+        }
+    }
+
     private fun trackKey(track: MediaTrackInfo): String =
         "${track.packageName}|${track.title}|${track.artist}"
 
@@ -1314,7 +1461,7 @@ object MediaNotificationRepository {
         val art = track.albumArt
         if (art == null) {
             paletteJob?.cancel()
-            _extractedPalette.value = CardPalette.Default
+            _extractedPalette.value = if (track.isSample) CardPalette.Default else CardPalette.NeutralDark
             return
         }
         paletteJob?.cancel()

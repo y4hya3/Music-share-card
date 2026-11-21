@@ -1446,9 +1446,9 @@ class ExampleRobolectricTest {
   fun `device performance tier resolves valid bounded decode dimensions`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val tier = com.example.util.DevicePerformanceTier.get(context)
-    assertTrue(tier.cardArtMaxDim in 640..1024)
-    assertTrue(tier.bgSourceMaxDim in 480..720)
-    assertTrue(tier.pyramidLowDim in 210..340)
+    assertTrue(tier.cardArtMaxDim in 960..1440)
+    assertTrue(tier.bgSourceMaxDim in 960..1440)
+    assertTrue(tier.pyramidLowDim in 240..380)
     assertTrue(tier.previewMaxWidth in 720..1080)
     assertTrue(tier.previewMaxHeight in 1280..1920)
   }
@@ -1535,16 +1535,16 @@ class ExampleRobolectricTest {
       assertEquals(1, exportRes.coversCount)
       assertEquals(1, exportRes.canvasesCount)
       assertEquals(6, exportRes.songsCount)
-      assertEquals("EchoSnap", exportRes.folderName)
+      assertEquals("Echomusic", exportRes.folderName)
 
-      val echoSnapFolder = File(tempRoot, "EchoSnap")
+      val echoSnapFolder = File(tempRoot, "Echomusic")
       assertTrue(echoSnapFolder.isDirectory)
       assertTrue(File(echoSnapFolder, "manifest.json").exists())
 
-      // Scan from parent folder -> auto-resolves nested EchoSnap folder and surfaces everything
+      // Scan from parent folder -> auto-resolves nested Echomusic folder and surfaces everything
       val scanned = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(tempRoot).getOrThrow()
       assertTrue(scanned.hasManifest)
-      assertEquals("EchoSnap", scanned.folderDisplayName)
+      assertEquals("Echomusic", scanned.folderDisplayName)
       assertEquals(1, scanned.covers.size)
       assertEquals(1, scanned.canvases.size)
       assertEquals(6, scanned.totalSongsCount)
@@ -1945,4 +1945,307 @@ class ExampleRobolectricTest {
     )
     assertNull("Expected unrelated candidate to be rejected", rejected)
   }
+
+  @Test
+  fun `wallpaper artwork fill mode and corner style persist cleanly and legacy EchoSnap fallback scans`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val defaults = CardStyleConfig()
+    assertEquals(com.example.model.LiveWallpaperArtworkFillMode.FLOATING_SQUARE, defaults.liveWallpaperArtworkFillMode)
+    assertEquals(com.example.model.LiveWallpaperCornerStyle.CURVED, defaults.liveWallpaperCornerStyle)
+
+    CardStylePreferences.save(
+      context,
+      defaults.copy(
+        liveWallpaperArtworkFillMode = com.example.model.LiveWallpaperArtworkFillMode.FULL_SCREEN,
+        liveWallpaperCornerStyle = com.example.model.LiveWallpaperCornerStyle.SHARP
+      )
+    )
+    val reloaded = CardStylePreferences.load(context)
+    assertEquals(com.example.model.LiveWallpaperArtworkFillMode.FULL_SCREEN, reloaded.liveWallpaperArtworkFillMode)
+    assertEquals(com.example.model.LiveWallpaperCornerStyle.SHARP, reloaded.liveWallpaperCornerStyle)
+
+    // Verify persisted folder prompt helpers
+    com.example.util.EchoSnapBackupManager.clearPersistedBackupTreeUri(context)
+    com.example.util.EchoSnapBackupManager.setPromptedInitialFolderAccess(context, false)
+    assertFalse(com.example.util.EchoSnapBackupManager.hasPromptedInitialFolderAccess(context))
+    val fakeTreeUri = android.net.Uri.parse("content://com.android.externalstorage.documents/tree/primary%3ADownload")
+    com.example.util.EchoSnapBackupManager.savePersistedBackupTreeUri(context, fakeTreeUri, "Download")
+    assertTrue(com.example.util.EchoSnapBackupManager.hasPromptedInitialFolderAccess(context))
+    assertEquals(fakeTreeUri, com.example.util.EchoSnapBackupManager.getPersistedBackupTreeUri(context))
+    assertEquals("Download", com.example.util.EchoSnapBackupManager.getSavedFolderDisplayName(context))
+
+    // Verify legacy "EchoSnap" folder is still discovered as a fallback during scan
+    val legacyParent = File(context.cacheDir, "legacy_scan_${System.currentTimeMillis()}").apply { mkdirs() }
+    try {
+      val legacySub = File(legacyParent, com.example.util.EchoSnapBackupManager.LEGACY_BACKUP_FOLDER_NAME).apply { mkdirs() }
+      File(legacySub, com.example.util.EchoSnapBackupManager.MANIFEST_FILE_NAME).writeText(
+        """{"format":"echosnap_backup","version":1,"exportedAtMs":1000,"covers":[],"canvases":[]}"""
+      )
+      val scannedLegacy = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(legacyParent).getOrThrow()
+      assertTrue(scannedLegacy.hasManifest)
+      assertEquals("EchoSnap", scannedLegacy.folderDisplayName)
+    } finally {
+      legacyParent.deleteRecursively()
+      com.example.util.EchoSnapBackupManager.clearPersistedBackupTreeUri(context)
+    }
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `square album art beats wider cropped banner and offline canvas switches atomically without red flash`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.repository.MediaNotificationRepository.ensureInitialized(context)
+    SavedMediaLibrary.resetAllSavedMedia(context)
+
+    val squareMeta = Bitmap.createBitmap(512, 512, Bitmap.Config.ARGB_8888)
+    val wideNotif = Bitmap.createBitmap(1280, 640, Bitmap.Config.ARGB_8888)
+    try {
+      // Square metadata bitmap must win over a larger 2:1 cropped wide banner
+      val picked = com.example.service.MusicNotificationListenerService.pickBestScoredCoverBitmap(
+        listOf(wideNotif to 0, squareMeta to 3)
+      )
+      assertSame(squareMeta, picked)
+
+      // Prepare two downloaded offline canvases for Song A and Song B
+      val vidA = File(context.cacheDir, "offline_song_a.mp4").apply { writeBytes(ByteArray(512) { 0x11 }) }
+      val vidB = File(context.cacheDir, "offline_song_b.mp4").apply { writeBytes(ByteArray(512) { 0x22 }) }
+      SavedMediaLibrary.upsertImportedMedia(
+        context = context,
+        importedCovers = emptyList(),
+        importedCanvases = listOf(
+          com.example.repository.SavedCanvasItem(
+            id = "can_a",
+            name = "Song A Canvas",
+            artist = "Artist A",
+            localVideoPath = vidA.absolutePath,
+            thumbnailPath = null,
+            resolutionLabel = "1080x1920",
+            createdAtMs = 1L,
+            linkedAlbumName = "Album A",
+            linkedAlbumArtist = "Artist A",
+            linkedTrackTitles = listOf("Track One")
+          ),
+          com.example.repository.SavedCanvasItem(
+            id = "can_b",
+            name = "Song B Canvas",
+            artist = "Artist B",
+            localVideoPath = vidB.absolutePath,
+            thumbnailPath = null,
+            resolutionLabel = "1080x1920",
+            createdAtMs = 2L,
+            linkedAlbumName = "Album B",
+            linkedAlbumArtist = "Artist B",
+            linkedTrackTitles = listOf("Track Two")
+          )
+        ),
+        replaceExisting = true
+      )
+
+      // Play Song One (without art first -> should use NeutralDark, never crimson red CardPalette.Default)
+      com.example.repository.MediaNotificationRepository.updateTrack(
+        MediaTrackInfo(
+          title = "Track One",
+          artist = "Artist A",
+          album = "Album A",
+          appName = "Offline Player",
+          packageName = "com.example.player",
+          albumArt = null,
+          isPlaying = true,
+          isSample = false
+        )
+      )
+      org.robolectric.shadows.ShadowLooper.idleMainLooper()
+      assertEquals("saved_canvas_can_a", com.example.repository.MediaNotificationRepository.activeCanvasId.value)
+      assertEquals(CardPalette.NeutralDark, com.example.repository.MediaNotificationRepository.extractedPalette.value)
+
+      // Immediately switch to Song Two -> offline canvas B must apply atomically + NeutralDark fallback
+      com.example.repository.MediaNotificationRepository.updateTrack(
+        MediaTrackInfo(
+          title = "Track Two",
+          artist = "Artist B",
+          album = "Album B",
+          appName = "Offline Player",
+          packageName = "com.example.player",
+          albumArt = null,
+          isPlaying = true,
+          isSample = false
+        )
+      )
+      org.robolectric.shadows.ShadowLooper.idleMainLooper()
+      assertEquals("saved_canvas_can_b", com.example.repository.MediaNotificationRepository.activeCanvasId.value)
+      assertNotNull(com.example.repository.MediaNotificationRepository.activeCanvasUrl.value)
+      assertNotEquals(CardPalette.Default.vibrantColor, com.example.repository.MediaNotificationRepository.extractedPalette.value.vibrantColor)
+
+      vidA.delete()
+      vidB.delete()
+    } finally {
+      if (!squareMeta.isRecycled) squareMeta.recycle()
+      if (!wideNotif.isRecycled) wideNotif.recycle()
+      SavedMediaLibrary.resetAllSavedMedia(context)
+    }
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `upscaleLowResArtworkSmoothly smooths small offline thumbnails without modifying HD covers`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val tier = com.example.util.DevicePerformanceTier.get(context)
+    assertTrue("Expected cardArtMaxDim >= 960 (got ${tier.cardArtMaxDim})", tier.cardArtMaxDim >= 960)
+    assertTrue("Expected bgSourceMaxDim >= 960 (got ${tier.bgSourceMaxDim})", tier.bgSourceMaxDim >= 960)
+
+    val smallOffline = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
+    val hdOffline = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
+    try {
+      val upscaled = com.example.util.BitmapBlurUtils.upscaleLowResArtworkSmoothly(smallOffline, minTargetDim = 768)
+      assertNotNull(upscaled)
+      assertEquals(768, upscaled!!.width)
+      assertEquals(768, upscaled.height)
+      assertFalse("Original source bitmap must stay intact", smallOffline.isRecycled)
+      if (upscaled !== smallOffline) upscaled.recycle()
+
+      val untouched = com.example.util.BitmapBlurUtils.upscaleLowResArtworkSmoothly(hdOffline, minTargetDim = 768)
+      assertSame("HD 1024x1024 bitmap should not be reallocated", hdOffline, untouched)
+    } finally {
+      if (!smallOffline.isRecycled) smallOffline.recycle()
+      if (!hdOffline.isRecycled) hdOffline.recycle()
+    }
+  }
+
+  @Test
+  fun `depth-2 Echomusic folder discovery finds nested Download Echomusic manifest`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val storageRoot = File(context.cacheDir, "storage_root_${System.currentTimeMillis()}").apply { mkdirs() }
+    try {
+      val downloadDir = File(storageRoot, "Download").apply { mkdirs() }
+      val echoDir = File(downloadDir, com.example.util.EchoSnapBackupManager.BACKUP_FOLDER_NAME).apply { mkdirs() }
+      File(echoDir, com.example.util.EchoSnapBackupManager.MANIFEST_FILE_NAME).writeText(
+        """{"format":"echosnap_backup","version":1,"exportedAtMs":2000,"covers":[],"canvases":[]}"""
+      )
+
+      val scanned = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(storageRoot).getOrThrow()
+      assertTrue(scanned.hasManifest)
+      assertEquals("Echomusic", scanned.folderDisplayName)
+    } finally {
+      storageRoot.deleteRecursively()
+    }
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `card shadow depth 0 to 100 inverse shadow and non-black shadow colors persist and render`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val palette = CardPalette(
+      vibrantColor = Color(0xFF1E88E5),
+      darkVibrantColor = Color(0xFF0D47A1),
+      lightVibrantColor = Color(0xFF90CAF9),
+      mutedColor = Color(0xFF3949AB),
+      darkMutedColor = Color(0xFF1A237E),
+      dominantColor = Color(0xFF1565C0)
+    )
+
+    // 1. Default shadow color uses vibrant album color (not restricted to black only)
+    val defaults = CardStyleConfig()
+    assertEquals(com.example.model.CardShadowColorMode.ALBUM_DYNAMIC, defaults.cardShadowColorMode)
+    assertFalse(defaults.cardShadowInverse)
+    assertEquals(palette.vibrantColor, defaults.resolveShadowColor(palette))
+
+    // 2. Explicit Red, Purple, Cyan, White, Black, and Custom color resolution
+    assertEquals(
+      Color(0xFFFF2B44),
+      defaults.copy(cardShadowColorMode = com.example.model.CardShadowColorMode.RED).resolveShadowColor(palette)
+    )
+    assertEquals(
+      Color(0xFF9D4EDD),
+      defaults.copy(cardShadowColorMode = com.example.model.CardShadowColorMode.PURPLE).resolveShadowColor(palette)
+    )
+    assertEquals(
+      Color(0xFF00D2FF),
+      defaults.copy(cardShadowColorMode = com.example.model.CardShadowColorMode.CYAN).resolveShadowColor(palette)
+    )
+    assertEquals(
+      Color(0xFFFFB703),
+      defaults.copy(
+        cardShadowColorMode = com.example.model.CardShadowColorMode.CUSTOM,
+        customShadowColor = Color(0xFFFFB703)
+      ).resolveShadowColor(palette)
+    )
+
+    // 3. SharedPreferences persistence including 0% depth & inverse shadow
+    val customConfig = defaults.copy(
+      glowIntensity = 0f,
+      cardShadowInverse = true,
+      cardShadowColorMode = com.example.model.CardShadowColorMode.RED,
+      customShadowColor = Color(0xFFFFB703)
+    )
+    CardStylePreferences.save(context, customConfig)
+    val reloaded = CardStylePreferences.load(context)
+    assertEquals(0f, reloaded.glowIntensity, 0.001f)
+    assertTrue(reloaded.cardShadowInverse)
+    assertEquals(com.example.model.CardShadowColorMode.RED, reloaded.cardShadowColorMode)
+    assertEquals(Color(0xFFFFB703).toArgb(), reloaded.customShadowColor.toArgb())
+
+    // 4. Backup export/import preserves shadow color, depth, and inverse toggle
+    val backupParent = File(context.cacheDir, "shadow_backup_${System.currentTimeMillis()}").apply { mkdirs() }
+    val art = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+    try {
+      com.example.util.EchoSnapBackupManager.exportBackupToDirectory(
+        parentOrEchoSnapDir = backupParent,
+        styleConfig = customConfig.copy(glowIntensity = 0.85f)
+      ).getOrThrow()
+      val scanned = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(backupParent).getOrThrow()
+      val restored = scanned.includedStyle?.applyTo(CardStyleConfig())
+      assertNotNull(restored)
+      assertEquals(0.85f, restored!!.glowIntensity, 0.01f)
+      assertTrue(restored.cardShadowInverse)
+      assertEquals(com.example.model.CardShadowColorMode.RED, restored.cardShadowColorMode)
+
+      // 5. Render smoke tests for Floating Glow Art at 0% and 100% Inverse Red
+      val track = MediaTrackInfo(
+        title = "Shadow Test",
+        artist = "EchoSnap Artist",
+        album = "Test Album",
+        appName = "Spotify",
+        packageName = "com.spotify.music",
+        albumArt = art,
+        isPlaying = true,
+        isSample = false
+      )
+      val (zeroShadowBmp, inverseRedBmp) = runBlocking {
+        val zero = CardShareManager.generateStoryBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = defaults.copy(
+            cardLayoutType = CardLayoutType.FLOATING_ARTWORK,
+            glowIntensity = 0f,
+            cardShadowInverse = false
+          ),
+          targetWidth = 540,
+          targetHeight = 960
+        )
+        val inv = CardShareManager.generateStoryBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = defaults.copy(
+            cardLayoutType = CardLayoutType.FLOATING_ARTWORK,
+            glowIntensity = 1f,
+            cardShadowInverse = true,
+            cardShadowColorMode = com.example.model.CardShadowColorMode.RED
+          ),
+          targetWidth = 540,
+          targetHeight = 960
+        )
+        zero to inv
+      }
+      assertEquals(540, zeroShadowBmp.width)
+      assertEquals(540, inverseRedBmp.width)
+      zeroShadowBmp.recycle()
+      inverseRedBmp.recycle()
+    } finally {
+      if (!art.isRecycled) art.recycle()
+      backupParent.deleteRecursively()
+    }
+  }
 }
+

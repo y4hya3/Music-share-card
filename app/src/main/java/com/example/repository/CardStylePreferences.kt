@@ -5,8 +5,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import com.example.model.CardBrandMode
 import com.example.model.CardLayoutType
+import com.example.model.CardShadowColorMode
 import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
+import com.example.model.LiveWallpaperArtworkFillMode
+import com.example.model.LiveWallpaperCornerStyle
 import com.example.model.LiveWallpaperMode
 import com.example.model.LogoColorMode
 import com.example.model.LyricsCardBackgroundMode
@@ -32,6 +35,9 @@ object CardStylePreferences {
     private const val KEY_LYRICS_ART_BLUR = "lyrics_art_blur_radius"
     private const val KEY_DARK_OVERLAY_ALPHA = "dark_overlay_alpha"
     private const val KEY_GLOW_INTENSITY = "glow_intensity"
+    private const val KEY_SHADOW_COLOR_MODE = "card_shadow_color_mode"
+    private const val KEY_CUSTOM_SHADOW_COLOR = "custom_shadow_color"
+    private const val KEY_SHADOW_INVERSE = "card_shadow_inverse"
     private const val KEY_CORNER_RADIUS_DP = "corner_radius_dp"
     private const val KEY_CARD_SCALE = "card_scale"
     private const val KEY_FIT_TO_SCREEN_PREVIEW = "fit_to_screen_preview"
@@ -48,6 +54,8 @@ object CardStylePreferences {
     private const val KEY_AUTO_SEARCH_CANVAS = "auto_search_canvas"
     private const val KEY_LIVE_WALLPAPER_ENABLED = "live_wallpaper_enabled"
     private const val KEY_LIVE_WALLPAPER_MODE = "live_wallpaper_mode"
+    private const val KEY_LIVE_WALLPAPER_ART_FILL_MODE = "live_wallpaper_art_fill_mode"
+    private const val KEY_LIVE_WALLPAPER_CORNER_STYLE = "live_wallpaper_corner_style"
     private const val KEY_LIVE_WALLPAPER_BLUR = "live_wallpaper_blur_radius"
     private const val KEY_LIVE_WALLPAPER_EDGE_BLUR = "live_wallpaper_edge_blur_fade"
     private const val KEY_LIVE_WALLPAPER_SHOW_CARD = "live_wallpaper_show_card"
@@ -90,8 +98,21 @@ object CardStylePreferences {
             prefs.getString(KEY_LIVE_WALLPAPER_MODE, defaults.liveWallpaperMode.name),
             defaults.liveWallpaperMode
         )
+        val liveWallpaperArtworkFillMode = enumValueOrDefault(
+            prefs.getString(KEY_LIVE_WALLPAPER_ART_FILL_MODE, defaults.liveWallpaperArtworkFillMode.name),
+            defaults.liveWallpaperArtworkFillMode
+        )
+        val liveWallpaperCornerStyle = enumValueOrDefault(
+            prefs.getString(KEY_LIVE_WALLPAPER_CORNER_STYLE, defaults.liveWallpaperCornerStyle.name),
+            defaults.liveWallpaperCornerStyle
+        )
+        val shadowColorMode = enumValueOrDefault(
+            prefs.getString(KEY_SHADOW_COLOR_MODE, defaults.cardShadowColorMode.name),
+            defaults.cardShadowColorMode
+        )
 
         val customColorArgb = prefs.getInt(KEY_CUSTOM_LOGO_COLOR, defaults.customLogoColor.toArgb())
+        val customShadowColorArgb = prefs.getInt(KEY_CUSTOM_SHADOW_COLOR, defaults.customShadowColor.toArgb())
         val waveformColorArgb = prefs.getInt(KEY_WAVEFORM_COLOR, defaults.waveformColor.toArgb())
 
         return CardStyleConfig(
@@ -109,6 +130,9 @@ object CardStylePreferences {
             lyricsArtBlurRadius = prefs.getFloat(KEY_LYRICS_ART_BLUR, defaults.lyricsArtBlurRadius).coerceIn(0f, 40f),
             darkOverlayAlpha = prefs.getFloat(KEY_DARK_OVERLAY_ALPHA, defaults.darkOverlayAlpha).coerceIn(0f, 0.7f),
             glowIntensity = prefs.getFloat(KEY_GLOW_INTENSITY, defaults.glowIntensity).coerceIn(0f, 1f),
+            cardShadowColorMode = shadowColorMode,
+            customShadowColor = Color(customShadowColorArgb),
+            cardShadowInverse = prefs.getBoolean(KEY_SHADOW_INVERSE, defaults.cardShadowInverse),
             cornerRadiusDp = prefs.getInt(KEY_CORNER_RADIUS_DP, defaults.cornerRadiusDp).coerceIn(0, 32),
             cardScale = prefs.getFloat(KEY_CARD_SCALE, defaults.cardScale).coerceIn(0.60f, 1.20f),
             isFitToScreenPreview = prefs.getBoolean(KEY_FIT_TO_SCREEN_PREVIEW, defaults.isFitToScreenPreview),
@@ -123,6 +147,8 @@ object CardStylePreferences {
             autoSearchAnimatedCanvas = prefs.getBoolean(KEY_AUTO_SEARCH_CANVAS, defaults.autoSearchAnimatedCanvas),
             liveWallpaperEnabled = prefs.getBoolean(KEY_LIVE_WALLPAPER_ENABLED, defaults.liveWallpaperEnabled),
             liveWallpaperMode = liveWallpaperMode,
+            liveWallpaperArtworkFillMode = liveWallpaperArtworkFillMode,
+            liveWallpaperCornerStyle = liveWallpaperCornerStyle,
             liveWallpaperBlurRadius = prefs.getFloat(KEY_LIVE_WALLPAPER_BLUR, defaults.liveWallpaperBlurRadius).coerceIn(0f, 40f),
             liveWallpaperEdgeBlurFade = prefs.getFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, defaults.liveWallpaperEdgeBlurFade).coerceIn(0f, 1f),
             liveWallpaperShowCard = prefs.getBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, defaults.liveWallpaperShowCard),
@@ -174,6 +200,9 @@ object CardStylePreferences {
             .putFloat(KEY_LYRICS_ART_BLUR, config.lyricsArtBlurRadius.coerceIn(0f, 40f))
             .putFloat(KEY_DARK_OVERLAY_ALPHA, config.darkOverlayAlpha.coerceIn(0f, 0.7f))
             .putFloat(KEY_GLOW_INTENSITY, config.glowIntensity.coerceIn(0f, 1f))
+            .putString(KEY_SHADOW_COLOR_MODE, config.cardShadowColorMode.name)
+            .putInt(KEY_CUSTOM_SHADOW_COLOR, config.customShadowColor.toArgb())
+            .putBoolean(KEY_SHADOW_INVERSE, config.cardShadowInverse)
             .putInt(KEY_CORNER_RADIUS_DP, config.cornerRadiusDp.coerceIn(0, 32))
             .putFloat(KEY_CARD_SCALE, config.cardScale.coerceIn(0.60f, 1.20f))
             .putBoolean(KEY_FIT_TO_SCREEN_PREVIEW, config.isFitToScreenPreview)
@@ -188,6 +217,8 @@ object CardStylePreferences {
             .putBoolean(KEY_AUTO_SEARCH_CANVAS, config.autoSearchAnimatedCanvas)
             .putBoolean(KEY_LIVE_WALLPAPER_ENABLED, config.liveWallpaperEnabled)
             .putString(KEY_LIVE_WALLPAPER_MODE, config.liveWallpaperMode.name)
+            .putString(KEY_LIVE_WALLPAPER_ART_FILL_MODE, config.liveWallpaperArtworkFillMode.name)
+            .putString(KEY_LIVE_WALLPAPER_CORNER_STYLE, config.liveWallpaperCornerStyle.name)
             .putFloat(KEY_LIVE_WALLPAPER_BLUR, config.liveWallpaperBlurRadius.coerceIn(0f, 40f))
             .putFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, config.liveWallpaperEdgeBlurFade.coerceIn(0f, 1f))
             .putBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, config.liveWallpaperShowCard)

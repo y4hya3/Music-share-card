@@ -110,6 +110,59 @@ object BitmapBlurUtils {
         return current
     }
 
+    /**
+     * Smoothly upscales low-resolution offline player thumbnails (< 768px) in progressive filtered
+     * steps so small 128px-360px offline covers render cleanly without jagged pixel grid blocks.
+     * Returns [source] unchanged (or ARGB_8888 copy) if already >= [minTargetDim].
+     */
+    fun upscaleLowResArtworkSmoothly(source: Bitmap?, minTargetDim: Int = 768): Bitmap? {
+        if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) {
+            return null
+        }
+        val software = toSafeSoftwareBitmap(source, maxDimension = 2048) ?: return null
+        val maxSide = max(software.width, software.height).coerceAtLeast(1)
+        if (minTargetDim <= 0 || maxSide >= minTargetDim) {
+            return software
+        }
+        return try {
+            val scale = minTargetDim.toFloat() / maxSide.toFloat()
+            val targetW = (software.width * scale).roundToInt().coerceAtLeast(1)
+            val targetH = (software.height * scale).roundToInt().coerceAtLeast(1)
+            var current = software
+            var curW = software.width
+            var curH = software.height
+            while (curW * 2 < targetW && curH * 2 < targetH) {
+                val nextW = (curW * 2).coerceAtMost(targetW)
+                val nextH = (curH * 2).coerceAtMost(targetH)
+                if (nextW == curW && nextH == curH) break
+                val stepped = drawScaledBitmap(current, nextW, nextH)
+                if (current !== source && current !== software && current !== stepped && !current.isRecycled) {
+                    current.recycle()
+                }
+                current = stepped
+                curW = nextW
+                curH = nextH
+            }
+            if (curW != targetW || curH != targetH) {
+                val finalBmp = drawScaledBitmap(current, targetW, targetH)
+                if (current !== source && current !== software && current !== finalBmp && !current.isRecycled) {
+                    current.recycle()
+                }
+                if (software !== source && software !== finalBmp && !software.isRecycled) {
+                    software.recycle()
+                }
+                finalBmp
+            } else {
+                if (software !== source && software !== current && !software.isRecycled) {
+                    software.recycle()
+                }
+                current
+            }
+        } catch (_: Exception) {
+            software
+        }
+    }
+
     private fun drawScaledBitmap(source: Bitmap, dstW: Int, dstH: Int): Bitmap {
         val out = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
@@ -311,7 +364,7 @@ object BitmapBlurUtils {
      * Compares full stream decode, Android Q+ ContentResolver.loadThumbnail(maxDimension), and
      * ID3 embedded art so offline music players never display choppy 128px/256px thumbnails.
      */
-    fun decodeHighResFromUri(context: Context, uri: Uri, maxDimension: Int = 1200): Bitmap? {
+    fun decodeHighResFromUri(context: Context, uri: Uri, maxDimension: Int = 1440): Bitmap? {
         var best: Bitmap? = decodeSampledFromUri(context, uri, maxDimension = maxDimension)
         var bestPixels = if (best != null && !best.isRecycled) best.width.toLong() * best.height.toLong() else 0L
 
@@ -337,7 +390,7 @@ object BitmapBlurUtils {
         }
 
         val maxSide = maxOf(best?.width ?: 0, best?.height ?: 0)
-        if (maxSide < 720) {
+        if (maxSide < 900) {
             val embedded = decodeEmbeddedAudioArtFromUri(context, uri, maxDimension = maxDimension)
             if (embedded != null && !embedded.isRecycled) {
                 val embPixels = embedded.width.toLong() * embedded.height.toLong()
