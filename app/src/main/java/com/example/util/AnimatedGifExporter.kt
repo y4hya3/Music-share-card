@@ -44,7 +44,8 @@ object AnimatedGifExporter {
         wfRectInOutput: RectF,
         outputFile: File,
         durationSec: Float = DEFAULT_DURATION_SEC,
-        fps: Int = DEFAULT_FPS
+        fps: Int = DEFAULT_FPS,
+        onProgress: ((Int) -> Unit)? = null
     ): File? = withContext(Dispatchers.IO) {
         try {
             if (outputFile.exists()) outputFile.delete()
@@ -57,7 +58,8 @@ object AnimatedGifExporter {
                     wfRectInOutput = wfRectInOutput,
                     out = out,
                     durationSec = durationSec,
-                    fps = fps
+                    fps = fps,
+                    onProgress = onProgress
                 )
                 out.flush()
                 if (!ok) {
@@ -104,7 +106,8 @@ object AnimatedGifExporter {
         wfRectInOutput: RectF,
         out: OutputStream,
         durationSec: Float,
-        fps: Int
+        fps: Int,
+        onProgress: ((Int) -> Unit)? = null
     ): Boolean {
         val w = overlayWithoutWaveform.width
         val h = overlayWithoutWaveform.height
@@ -208,6 +211,8 @@ object AnimatedGifExporter {
                 lzwEncoder.encode(firstFrameIndices, out)
 
                 // Frames 1..N: encode only the opaque wfW x wfH dirty rectangle (overwrites previous bars cleanly)
+                var lastPct = 10
+                onProgress?.invoke(10)
                 for (frameIdx in 1 until totalFrames) {
                     val timeSec = frameIdx.toFloat() / clampedFps.toFloat()
                     wfBmp.setPixels(wfBasePixels, 0, wfW, 0, 0, wfW, wfH)
@@ -237,8 +242,15 @@ object AnimatedGifExporter {
                     writeShortLE(out, wfH)
                     out.write(0x00)
                     lzwEncoder.encode(wfFrameIndices, out)
+                    val pct = (10 + (frameIdx * 88) / totalFrames.coerceAtLeast(1)).coerceIn(10, 98)
+                    if (pct - lastPct >= 10) {
+                        lastPct = pct
+                        onProgress?.invoke(pct)
+                    }
                 }
             } else {
+                var lastPct = 10
+                onProgress?.invoke(10)
                 for (frameIdx in 0 until totalFrames) {
                     val timeSec = frameIdx.toFloat() / clampedFps.toFloat()
                     System.arraycopy(baseIndices, 0, frameIndices, 0, baseIndices.size)
@@ -277,6 +289,11 @@ object AnimatedGifExporter {
                     writeShortLE(out, h)
                     out.write(0x00)
                     lzwEncoder.encode(frameIndices, out)
+                    val pct = (10 + (frameIdx * 88) / totalFrames.coerceAtLeast(1)).coerceIn(10, 98)
+                    if (pct - lastPct >= 10) {
+                        lastPct = pct
+                        onProgress?.invoke(pct)
+                    }
                 }
             }
         } finally {
@@ -285,6 +302,7 @@ object AnimatedGifExporter {
 
         // GIF Trailer
         out.write(0x3B)
+        onProgress?.invoke(100)
         return true
     }
 

@@ -58,12 +58,16 @@ object CoverArtSearchService {
 
     suspend fun fetchFullResolutionArt(
         candidate: OnlineCoverCandidate,
-        maxDimension: Int = 1024
+        maxDimension: Int = 1440
     ): Bitmap? = withContext(Dispatchers.IO) {
-        val targetUrl = if (maxDimension >= 1500 && candidate.fullResUrl.contains("1000x1000bb")) {
-            candidate.fullResUrl.replace("1000x1000bb", "3000x3000bb")
-        } else {
-            candidate.fullResUrl
+        val targetUrl = when {
+            candidate.fullResUrl.contains("1000x1000bb") && maxDimension >= 1500 ->
+                candidate.fullResUrl.replace("1000x1000bb", "2000x2000bb")
+            candidate.fullResUrl.contains("1000x1000bb") && maxDimension >= 1200 ->
+                candidate.fullResUrl.replace("1000x1000bb", "1400x1400bb")
+            candidate.fullResUrl.contains("/1000x1000-") && maxDimension >= 1200 ->
+                candidate.fullResUrl.replace("/1000x1000-", "/1400x1400-")
+            else -> candidate.fullResUrl
         }
         val full = downloadBitmap(targetUrl, maxDimension = maxDimension)
             ?: if (targetUrl != candidate.fullResUrl) {

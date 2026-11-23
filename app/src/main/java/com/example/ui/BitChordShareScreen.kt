@@ -51,6 +51,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -68,7 +69,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -351,6 +351,13 @@ fun BitChordShareScreen(
         }
     }
 
+    var promptedExportNotificationPermission by remember { mutableStateOf(false) }
+    val exportNotifPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        triggerSaveToGallery()
+    }
+
     val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -371,6 +378,18 @@ fun BitChordShareScreen(
                 legacyStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 return
             }
+        }
+        val latestStyle = MediaNotificationRepository.styleConfig.value
+        val latestCanvas = MediaNotificationRepository.activeCanvasUrl.value
+        val willEncodeAnimated = isGifExportExpected(latestStyle) || isVideoExportExpected(latestStyle, latestCanvas)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            willEncodeAnimated &&
+            !promptedExportNotificationPermission &&
+            !com.example.util.ExportNotificationHelper.hasNotificationPermission(context)
+        ) {
+            promptedExportNotificationPermission = true
+            exportNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
         }
         triggerSaveToGallery()
     }
@@ -516,7 +535,9 @@ fun BitChordShareScreen(
             )
             val fullCardSlotHeight = (screenHeight - topChromeReserve - bottomChromeReserve - 20.dp).coerceAtLeast(220.dp)
             val canonicalRefWidth = 360.dp
-            val maxZoomByHeight = (fullCardSlotHeight / 470.dp).coerceIn(0.62f, 1.35f)
+            val isAppMusic = effectiveStyleConfig.cardLayoutType == CardLayoutType.APP_MUSIC_CARD
+            val heightRefDp = if (isAppMusic) 560.dp else 470.dp
+            val maxZoomByHeight = (fullCardSlotHeight / heightRefDp).coerceIn(0.62f, 1.35f)
             val fullCardZoom = minOf(
                 if (isPortraitTablet) {
                     (screenWidth * 0.75f / canonicalRefWidth).coerceIn(0.95f, 1.30f)
@@ -527,7 +548,7 @@ fun BitChordShareScreen(
             )
             val fitCardZoom = (fitWidth / canonicalRefWidth).coerceAtLeast(0.32f)
             val cardZoom = androidx.compose.ui.util.lerp(fullCardZoom, fitCardZoom, fitProgress)
-            val fullCenterY = ((topChromeReserve - bottomChromeReserve) * 0.30f)
+            val fullCenterY = ((topChromeReserve - bottomChromeReserve) * if (isAppMusic) 0.42f else 0.30f)
             val cardOffsetY = lerp(fullCenterY, 0.dp, fitProgress)
 
             Box(
@@ -573,7 +594,8 @@ fun BitChordShareScreen(
                             scaleY = cardZoom * entScale * dragScaleRatio
                             translationY = (1f - ent) * 28.dp.toPx()
                             alpha = ent
-                        },
+                        }
+                        .testTag("center_story_card"),
                     contentAlignment = Alignment.Center
                 ) {
                     MusicStoryCard(
@@ -581,8 +603,7 @@ fun BitChordShareScreen(
                         palette = palette,
                         styleConfig = stageRenderStyleConfig,
                         maxCardWidth = 340.dp,
-                        maxArtSize = 310.dp,
-                        modifier = Modifier.testTag("center_story_card")
+                        maxArtSize = 310.dp
                     )
                 }
             }
@@ -612,17 +633,12 @@ fun BitChordShareScreen(
             }
         }
 
-        // FIXED OVERLAY CHROME LAYER (Controls stay anchored in exact positions regardless of Preview Scale toggle)
-        Scaffold(
-            modifier = Modifier.fillMaxSize(),
-            containerColor = Color.Transparent,
-            contentWindowInsets = WindowInsets.safeDrawing
-        ) { innerPadding ->
-            BoxWithConstraints(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-            ) {
+        // FIXED OVERLAY CHROME LAYER (Non-blocking layout so interactive cards behind middle spacer receive all touches)
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+        ) {
                 if (isWideLandscape) {
                     Row(
                         modifier = Modifier
@@ -672,7 +688,8 @@ fun BitChordShareScreen(
                                             .graphicsLayer {
                                                 scaleX = paneCardZoom * dragScaleRatio
                                                 scaleY = paneCardZoom * dragScaleRatio
-                                            },
+                                            }
+                                            .testTag("center_story_card"),
                                         contentAlignment = Alignment.Center
                                     ) {
                                         MusicStoryCard(
@@ -680,20 +697,14 @@ fun BitChordShareScreen(
                                             palette = palette,
                                             styleConfig = stageRenderStyleConfig,
                                             maxCardWidth = 340.dp,
-                                            maxArtSize = 310.dp,
-                                            modifier = Modifier.testTag("center_story_card")
+                                            maxArtSize = 310.dp
                                         )
                                     }
                                 }
                             } else {
                                 val adaptiveArtMax = (maxHeight - 170.dp).coerceIn(150.dp, 360.dp)
                                 val adaptiveCardMax = minOf(maxWidth * 0.85f, 380.dp)
-                                MusicStoryCard(
-                                    track = currentTrack,
-                                    palette = palette,
-                                    styleConfig = stageRenderStyleConfig,
-                                    maxCardWidth = adaptiveCardMax,
-                                    maxArtSize = adaptiveArtMax,
+                                Box(
                                     modifier = Modifier
                                         .graphicsLayer {
                                             val ent = stageEntrance.value
@@ -703,8 +714,17 @@ fun BitChordShareScreen(
                                             translationY = (1f - ent) * 24.dp.toPx()
                                             alpha = ent
                                         }
-                                        .testTag("center_story_card")
-                                )
+                                        .testTag("center_story_card"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    MusicStoryCard(
+                                        track = currentTrack,
+                                        palette = palette,
+                                        styleConfig = stageRenderStyleConfig,
+                                        maxCardWidth = adaptiveCardMax,
+                                        maxArtSize = adaptiveArtMax
+                                    )
+                                }
                             }
 
                             if (isProcessingAction) {
@@ -1121,7 +1141,6 @@ fun BitChordShareScreen(
                 }
             }
         }
-    }
 
     if (showEditSheet) {
         EditCardBottomSheet(

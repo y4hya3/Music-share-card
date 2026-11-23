@@ -34,6 +34,7 @@ object BitmapBlurUtils {
     )
 
     private val mipPyramidCache = LruCache<String, Triple<Bitmap, Bitmap, Bitmap>>(2)
+    private val crispArtworkCache = LruCache<String, Bitmap>(6)
 
     fun toSafeSoftwareBitmap(source: Bitmap?, maxDimension: Int = 1024): Bitmap? {
         if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) {
@@ -110,57 +111,315 @@ object BitmapBlurUtils {
         return current
     }
 
+    private fun resolveCrispCacheKey(
+        source: Bitmap,
+        minTargetDim: Int,
+        maxDimension: Int,
+        sharpenStrength: Float
+    ): String {
+        val sharpBucket = (sharpenStrength * 100f).roundToInt()
+        return "${System.identityHashCode(source)}_${source.generationId}_${source.width}x${source.height}_${minTargetDim}_${maxDimension}_$sharpBucket"
+    }
+
+    fun getCachedCrispArtworkIfReady(
+        source: Bitmap?,
+        minTargetDim: Int = 1024,
+        maxDimension: Int = 1440,
+        sharpenStrength: Float = -1f
+    ): Bitmap? {
+        if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) return null
+        val origMaxSide = max(source.width, source.height)
+        val resolvedSharp = resolveEffectiveSharpenStrength(origMaxSide, sharpenStrength)
+        val key = resolveCrispCacheKey(source, minTargetDim, maxDimension, resolvedSharp)
+        synchronized(crispArtworkCache) {
+            val cached = crispArtworkCache.get(key)
+            if (cached != null && !cached.isRecycled) {
+                return cached
+            }
+            if (cached != null) crispArtworkCache.remove(key)
+        }
+        return null
+    }
+
+    private fun resolveEffectiveSharpenStrength(origMaxSide: Int, requestedStrength: Float): Float {
+        if (requestedStrength >= 0f) return requestedStrength.coerceIn(0f, 0.85f)
+        return when {
+            origMaxSide <= 360 -> 0.52f
+            origMaxSide <= 640 -> 0.40f
+            origMaxSide < 1000 -> 0.28f
+            else -> 0.18f
+        }
+    }
+
     /**
-     * Smoothly upscales low-resolution offline player thumbnails (< 768px) in progressive filtered
-     * steps so small 128px-360px offline covers render cleanly without jagged pixel grid blocks.
-     * Returns [source] unchanged (or ARGB_8888 copy) if already >= [minTargetDim].
+     * Prepares crisp, unblurred album artwork for both online and offline tracks with LRU caching:
+     * - Normalizes HARDWARE / non-ARGB_8888 bitmaps safely.
+     * - Upsacles low/medium-res covers via separable Catmull-Rom bicubic interpolation (zero
+     *   multi-pass bilinear mushiness and zero nearest-neighbor stair-stepping).
+     * - Applies Contrast-Adaptive Sharpening (CAS) tuned to source resolution so text and cover
+     *   details stay sharp without halo artifacts.
      */
-    fun upscaleLowResArtworkSmoothly(source: Bitmap?, minTargetDim: Int = 768): Bitmap? {
+    fun prepareCrispArtwork(
+        source: Bitmap?,
+        minTargetDim: Int = 1024,
+        maxDimension: Int = 1440,
+        sharpenStrength: Float = -1f
+    ): Bitmap? {
         if (source == null || source.isRecycled || source.width <= 0 || source.height <= 0) {
             return null
         }
-        val software = toSafeSoftwareBitmap(source, maxDimension = 2048) ?: return null
-        val maxSide = max(software.width, software.height).coerceAtLeast(1)
-        if (minTargetDim <= 0 || maxSide >= minTargetDim) {
-            return software
+        val origMaxSide = max(source.width, source.height)
+        val resolvedSharp = resolveEffectiveSharpenStrength(origMaxSide, sharpenStrength)
+        val cacheKey = resolveCrispCacheKey(source, minTargetDim, maxDimension, resolvedSharp)
+        synchronized(crispArtworkCache) {
+            val cached = crispArtworkCache.get(cacheKey)
+            if (cached != null && !cached.isRecycled) {
+                return cached
+            }
+            if (cached != null) crispArtworkCache.remove(cacheKey)
         }
+
+        val cappedMaxDim = maxDimension.coerceAtLeast(minTargetDim.coerceAtLeast(1))
+        val software = toSafeSoftwareBitmap(source, maxDimension = cappedMaxDim) ?: return null
+        val curMaxSide = max(software.width, software.height).coerceAtLeast(1)
+        val effectiveMinTarget = minTargetDim.coerceAtMost(cappedMaxDim)
+
         return try {
-            val scale = minTargetDim.toFloat() / maxSide.toFloat()
-            val targetW = (software.width * scale).roundToInt().coerceAtLeast(1)
-            val targetH = (software.height * scale).roundToInt().coerceAtLeast(1)
-            var current = software
-            var curW = software.width
-            var curH = software.height
-            while (curW * 2 < targetW && curH * 2 < targetH) {
-                val nextW = (curW * 2).coerceAtMost(targetW)
-                val nextH = (curH * 2).coerceAtMost(targetH)
-                if (nextW == curW && nextH == curH) break
-                val stepped = drawScaledBitmap(current, nextW, nextH)
-                if (current !== source && current !== software && current !== stepped && !current.isRecycled) {
-                    current.recycle()
+            val upscaled = if (effectiveMinTarget > 0 && curMaxSide < effectiveMinTarget) {
+                val scale = effectiveMinTarget.toFloat() / curMaxSide.toFloat()
+                val targetW = (software.width * scale).roundToInt().coerceAtLeast(1)
+                val targetH = (software.height * scale).roundToInt().coerceAtLeast(1)
+                val catmull = if (targetW.toLong() * targetH.toLong() <= 1600L * 1600L) {
+                    scaleBitmapCatmullRom(software, targetW, targetH)
+                } else {
+                    drawScaledBitmap(software, targetW, targetH)
                 }
-                current = stepped
-                curW = nextW
-                curH = nextH
-            }
-            if (curW != targetW || curH != targetH) {
-                val finalBmp = drawScaledBitmap(current, targetW, targetH)
-                if (current !== source && current !== software && current !== finalBmp && !current.isRecycled) {
-                    current.recycle()
-                }
-                if (software !== source && software !== finalBmp && !software.isRecycled) {
+                if (software !== source && software !== catmull && !software.isRecycled) {
                     software.recycle()
                 }
-                finalBmp
+                catmull
             } else {
-                if (software !== source && software !== current && !software.isRecycled) {
-                    software.recycle()
-                }
-                current
+                software
             }
+
+            val finalBitmap = if (resolvedSharp > 0.02f &&
+                upscaled.width >= 4 &&
+                upscaled.height >= 4 &&
+                upscaled.width.toLong() * upscaled.height.toLong() <= 1600L * 1600L
+            ) {
+                val sharpened = applyContrastAdaptiveSharpen(upscaled, strength = resolvedSharp)
+                if (upscaled !== source && upscaled !== sharpened && !upscaled.isRecycled) {
+                    upscaled.recycle()
+                }
+                sharpened
+            } else {
+                upscaled
+            }
+
+            if (!finalBitmap.isRecycled) {
+                synchronized(crispArtworkCache) {
+                    crispArtworkCache.put(cacheKey, finalBitmap)
+                }
+            }
+            finalBitmap
         } catch (_: Exception) {
             software
         }
+    }
+
+    /**
+     * Smoothly upscales low-resolution offline player thumbnails using crisp Catmull-Rom + CAS.
+     * Kept as an API wrapper for callers & exports.
+     */
+    fun upscaleLowResArtworkSmoothly(source: Bitmap?, minTargetDim: Int = 768): Bitmap? =
+        prepareCrispArtwork(
+            source = source,
+            minTargetDim = minTargetDim,
+            maxDimension = 2048
+        )
+
+    private fun scaleBitmapCatmullRom(source: Bitmap, dstW: Int, dstH: Int): Bitmap {
+        val srcW = source.width
+        val srcH = source.height
+        if (srcW == dstW && srcH == dstH) return source
+        if (srcW < 2 || srcH < 2 || dstW < 2 || dstH < 2) {
+            return drawScaledBitmap(source, dstW, dstH)
+        }
+
+        val srcPixels = IntArray(srcW * srcH)
+        source.getPixels(srcPixels, 0, srcW, 0, 0, srcW, srcH)
+
+        // Precompute horizontal Catmull-Rom weights in 12-bit fixed point (scale = 4096)
+        val xIdx0 = IntArray(dstW)
+        val xIdx1 = IntArray(dstW)
+        val xIdx2 = IntArray(dstW)
+        val xIdx3 = IntArray(dstW)
+        val xW0 = IntArray(dstW)
+        val xW1 = IntArray(dstW)
+        val xW2 = IntArray(dstW)
+        val xW3 = IntArray(dstW)
+        val scaleX = srcW.toFloat() / dstW.toFloat()
+        for (dx in 0 until dstW) {
+            val fx = ((dx + 0.5f) * scaleX - 0.5f).coerceIn(0f, (srcW - 1).toFloat())
+            val ix = fx.toInt()
+            val t = fx - ix
+            val t2 = t * t
+            val t3 = t2 * t
+            xIdx0[dx] = (ix - 1).coerceIn(0, srcW - 1)
+            xIdx1[dx] = ix.coerceIn(0, srcW - 1)
+            xIdx2[dx] = (ix + 1).coerceIn(0, srcW - 1)
+            xIdx3[dx] = (ix + 2).coerceIn(0, srcW - 1)
+            xW0[dx] = ((-0.5f * t + t2 - 0.5f * t3) * 4096f).roundToInt()
+            xW1[dx] = ((1.0f - 2.5f * t2 + 1.5f * t3) * 4096f).roundToInt()
+            xW2[dx] = ((0.5f * t + 2.0f * t2 - 1.5f * t3) * 4096f).roundToInt()
+            xW3[dx] = ((-0.5f * t2 + 0.5f * t3) * 4096f).roundToInt()
+        }
+
+        // Pass 1: Horizontal resample srcW x srcH -> dstW x srcH
+        val tempPixels = IntArray(dstW * srcH)
+        for (sy in 0 until srcH) {
+            val rowOff = sy * srcW
+            val outOff = sy * dstW
+            for (dx in 0 until dstW) {
+                val p0 = srcPixels[rowOff + xIdx0[dx]]
+                val p1 = srcPixels[rowOff + xIdx1[dx]]
+                val p2 = srcPixels[rowOff + xIdx2[dx]]
+                val p3 = srcPixels[rowOff + xIdx3[dx]]
+                val w0 = xW0[dx]
+                val w1 = xW1[dx]
+                val w2 = xW2[dx]
+                val w3 = xW3[dx]
+
+                val a = ((((p0 ushr 24) and 0xFF) * w0 + ((p1 ushr 24) and 0xFF) * w1 + ((p2 ushr 24) and 0xFF) * w2 + ((p3 ushr 24) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val r = ((((p0 ushr 16) and 0xFF) * w0 + ((p1 ushr 16) and 0xFF) * w1 + ((p2 ushr 16) and 0xFF) * w2 + ((p3 ushr 16) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val g = ((((p0 ushr 8) and 0xFF) * w0 + ((p1 ushr 8) and 0xFF) * w1 + ((p2 ushr 8) and 0xFF) * w2 + ((p3 ushr 8) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val b = (((p0 and 0xFF) * w0 + (p1 and 0xFF) * w1 + (p2 and 0xFF) * w2 + (p3 and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                tempPixels[outOff + dx] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+
+        // Precompute vertical Catmull-Rom weights
+        val yIdx0 = IntArray(dstH)
+        val yIdx1 = IntArray(dstH)
+        val yIdx2 = IntArray(dstH)
+        val yIdx3 = IntArray(dstH)
+        val yW0 = IntArray(dstH)
+        val yW1 = IntArray(dstH)
+        val yW2 = IntArray(dstH)
+        val yW3 = IntArray(dstH)
+        val scaleY = srcH.toFloat() / dstH.toFloat()
+        for (dy in 0 until dstH) {
+            val fy = ((dy + 0.5f) * scaleY - 0.5f).coerceIn(0f, (srcH - 1).toFloat())
+            val iy = fy.toInt()
+            val t = fy - iy
+            val t2 = t * t
+            val t3 = t2 * t
+            yIdx0[dy] = (iy - 1).coerceIn(0, srcH - 1) * dstW
+            yIdx1[dy] = iy.coerceIn(0, srcH - 1) * dstW
+            yIdx2[dy] = (iy + 1).coerceIn(0, srcH - 1) * dstW
+            yIdx3[dy] = (iy + 2).coerceIn(0, srcH - 1) * dstW
+            yW0[dy] = ((-0.5f * t + t2 - 0.5f * t3) * 4096f).roundToInt()
+            yW1[dy] = ((1.0f - 2.5f * t2 + 1.5f * t3) * 4096f).roundToInt()
+            yW2[dy] = ((0.5f * t + 2.0f * t2 - 1.5f * t3) * 4096f).roundToInt()
+            yW3[dy] = ((-0.5f * t2 + 0.5f * t3) * 4096f).roundToInt()
+        }
+
+        // Pass 2: Vertical resample dstW x srcH -> dstW x dstH
+        val outPixels = IntArray(dstW * dstH)
+        for (dy in 0 until dstH) {
+            val row0 = yIdx0[dy]
+            val row1 = yIdx1[dy]
+            val row2 = yIdx2[dy]
+            val row3 = yIdx3[dy]
+            val w0 = yW0[dy]
+            val w1 = yW1[dy]
+            val w2 = yW2[dy]
+            val w3 = yW3[dy]
+            val outOff = dy * dstW
+            for (dx in 0 until dstW) {
+                val p0 = tempPixels[row0 + dx]
+                val p1 = tempPixels[row1 + dx]
+                val p2 = tempPixels[row2 + dx]
+                val p3 = tempPixels[row3 + dx]
+
+                val a = ((((p0 ushr 24) and 0xFF) * w0 + ((p1 ushr 24) and 0xFF) * w1 + ((p2 ushr 24) and 0xFF) * w2 + ((p3 ushr 24) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val r = ((((p0 ushr 16) and 0xFF) * w0 + ((p1 ushr 16) and 0xFF) * w1 + ((p2 ushr 16) and 0xFF) * w2 + ((p3 ushr 16) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val g = ((((p0 ushr 8) and 0xFF) * w0 + ((p1 ushr 8) and 0xFF) * w1 + ((p2 ushr 8) and 0xFF) * w2 + ((p3 ushr 8) and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                val b = (((p0 and 0xFF) * w0 + (p1 and 0xFF) * w1 + (p2 and 0xFF) * w2 + (p3 and 0xFF) * w3 + 2048) shr 12).coerceIn(0, 255)
+                outPixels[outOff + dx] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+
+        val out = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
+        out.setPixels(outPixels, 0, dstW, 0, 0, dstW, dstH)
+        return out
+    }
+
+    /**
+     * Contrast-Adaptive 5-tap unsharp clarity pass clamped by local neighborhood bounds
+     * so unblurred cover art looks crisp without halo ringing or noise amplification.
+     */
+    private fun applyContrastAdaptiveSharpen(source: Bitmap, strength: Float): Bitmap {
+        val w = source.width
+        val h = source.height
+        if (w < 4 || h < 4 || strength <= 0.01f) return source
+
+        val srcPix = IntArray(w * h)
+        source.getPixels(srcPix, 0, w, 0, 0, w, h)
+        val outPix = srcPix.copyOf()
+        val strengthFixed = (strength.coerceIn(0f, 0.85f) * 256f).roundToInt()
+
+        for (y in 1 until h - 1) {
+            val row = y * w
+            val rowUp = row - w
+            val rowDn = row + w
+            for (x in 1 until w - 1) {
+                val idx = row + x
+                val c = srcPix[idx]
+                val u = srcPix[rowUp + x]
+                val d = srcPix[rowDn + x]
+                val l = srcPix[idx - 1]
+                val r = srcPix[idx + 1]
+
+                val a = c ushr 24
+
+                val cr = (c ushr 16) and 0xFF
+                val ur = (u ushr 16) and 0xFF
+                val dr = (d ushr 16) and 0xFF
+                val lr = (l ushr 16) and 0xFF
+                val rr = (r ushr 16) and 0xFF
+                val mnR = min(cr, min(min(ur, dr), min(lr, rr)))
+                val mxR = max(cr, max(max(ur, dr), max(lr, rr)))
+                val avgR = (ur + dr + lr + rr + 2) shr 2
+                val outR = (cr + (((cr - avgR) * strengthFixed) shr 8)).coerceIn(max(0, mnR - 3), min(255, mxR + 3))
+
+                val cg = (c ushr 8) and 0xFF
+                val ug = (u ushr 8) and 0xFF
+                val dg = (d ushr 8) and 0xFF
+                val lg = (l ushr 8) and 0xFF
+                val rg = (r ushr 8) and 0xFF
+                val mnG = min(cg, min(min(ug, dg), min(lg, rg)))
+                val mxG = max(cg, max(max(ug, dg), max(lg, rg)))
+                val avgG = (ug + dg + lg + rg + 2) shr 2
+                val outG = (cg + (((cg - avgG) * strengthFixed) shr 8)).coerceIn(max(0, mnG - 3), min(255, mxG + 3))
+
+                val cb = c and 0xFF
+                val ub = u and 0xFF
+                val db = d and 0xFF
+                val lb = l and 0xFF
+                val rb = r and 0xFF
+                val mnB = min(cb, min(min(ub, db), min(lb, rb)))
+                val mxB = max(cb, max(max(ub, db), max(lb, rb)))
+                val avgB = (ub + db + lb + rb + 2) shr 2
+                val outB = (cb + (((cb - avgB) * strengthFixed) shr 8)).coerceIn(max(0, mnB - 3), min(255, mxB + 3))
+
+                outPix[idx] = (a shl 24) or (outR shl 16) or (outG shl 8) or outB
+            }
+        }
+
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(outPix, 0, w, 0, 0, w, h)
+        return out
     }
 
     private fun drawScaledBitmap(source: Bitmap, dstW: Int, dstH: Int): Bitmap {

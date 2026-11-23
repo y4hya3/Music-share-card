@@ -82,9 +82,12 @@ object CanvasVideoExporter {
         overlayBitmap: Bitmap,
         blurRadiusPx: Float,
         outputFileName: String,
-        waveformSpec: WaveformExportSpec? = null
+        waveformSpec: WaveformExportSpec? = null,
+        onProgress: ((Int) -> Unit)? = null
     ): File? = withContext(Dispatchers.IO) {
+        onProgress?.invoke(3)
         val sourceFile = resolveVideoFile(context, canvasVideoUrl) ?: return@withContext null
+        onProgress?.invoke(15)
 
         val outDir = prepareOutputDir(context)
         val outFile = File(outDir, outputFileName)
@@ -95,10 +98,12 @@ object CanvasVideoExporter {
             outFile = outFile,
             overlayBitmap = overlayBitmap,
             blurIntensity = (blurRadiusPx / 40f).coerceIn(0f, 1f),
-            waveformSpec = waveformSpec
+            waveformSpec = waveformSpec,
+            onProgress = onProgress
         )
 
         if (success && outFile.exists() && outFile.length() > 4096L) {
+            onProgress?.invoke(100)
             outFile
         } else {
             outFile.delete()
@@ -115,11 +120,13 @@ object CanvasVideoExporter {
         backgroundBitmap: Bitmap,
         overlayBitmap: Bitmap,
         waveformSpec: WaveformExportSpec,
-        outputFileName: String
+        outputFileName: String,
+        onProgress: ((Int) -> Unit)? = null
     ): File? = withContext(Dispatchers.IO) {
         val outDir = prepareOutputDir(context)
         val outFile = File(outDir, outputFileName)
         if (outFile.exists()) outFile.delete()
+        onProgress?.invoke(4)
 
         var encoder: MediaCodec? = null
         var muxer: MediaMuxer? = null
@@ -231,14 +238,21 @@ object CanvasVideoExporter {
 
             val totalFrames = STATIC_WAVEFORM_DURATION_SEC * TARGET_FPS
             val frameDurationNs = 1_000_000_000L / TARGET_FPS
+            var lastReportedPct = 4
             for (frameIdx in 0 until totalFrames) {
                 val timeSec = frameIdx.toFloat() / TARGET_FPS.toFloat()
                 renderer.drawStaticFrame(timeSec = timeSec)
                 EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, frameIdx.toLong() * frameDurationNs)
                 EGL14.eglSwapBuffers(eglDisplay, eglSurface)
                 drainEncoder(endOfStream = false)
+                val pct = (5 + (frameIdx * 93) / totalFrames.coerceAtLeast(1)).coerceIn(5, 98)
+                if (pct - lastReportedPct >= 8) {
+                    lastReportedPct = pct
+                    onProgress?.invoke(pct)
+                }
             }
             drainEncoder(endOfStream = true)
+            if (muxerStarted) onProgress?.invoke(100)
             muxerStarted
         } catch (e: Exception) {
             Log.e(TAG, "Static background 8s waveform export failed", e)
@@ -517,7 +531,8 @@ object CanvasVideoExporter {
         outFile: File,
         overlayBitmap: Bitmap,
         blurIntensity: Float,
-        waveformSpec: WaveformExportSpec?
+        waveformSpec: WaveformExportSpec?,
+        onProgress: ((Int) -> Unit)? = null
     ): Boolean {
         var extractor: MediaExtractor? = null
         var decoder: MediaCodec? = null
@@ -702,6 +717,7 @@ object CanvasVideoExporter {
             }
 
             val transcodeDeadlineMs = System.currentTimeMillis() + 45_000L
+            var lastTranscodePct = 15
             while (!outputDone) {
                 if (System.currentTimeMillis() > transcodeDeadlineMs) {
                     Log.w(TAG, "Video export timed out after 45s; aborting cleanly")
@@ -760,6 +776,11 @@ object CanvasVideoExporter {
                                 EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, safePtsUs * 1000L)
                                 EGL14.eglSwapBuffers(eglDisplay, eglSurface)
                                 drainEncoder(endOfStream = false)
+                                val pct = (18 + ((safePtsUs * 80L) / targetDurationUs.coerceAtLeast(1L)).toInt()).coerceIn(18, 98)
+                                if (pct - lastTranscodePct >= 8) {
+                                    lastTranscodePct = pct
+                                    onProgress?.invoke(pct)
+                                }
                             }
                         }
 

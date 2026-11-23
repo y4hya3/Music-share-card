@@ -1,10 +1,15 @@
 package com.example.ui.components
 
+import android.Manifest
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -33,6 +38,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,8 +52,10 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -58,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -65,8 +74,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -81,17 +93,15 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Paint
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
 import com.example.model.CardPalette
 import com.example.model.CardShadowColorMode
 import com.example.model.CardStyleConfig
 import com.example.model.LiveWallpaperArtworkFillMode
 import com.example.model.LiveWallpaperCornerStyle
 import com.example.model.LiveWallpaperMode
+import com.example.model.LiveWallpaperTransitionStyle
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
 import com.example.repository.SavedMediaLibrary
@@ -99,7 +109,9 @@ import com.example.service.EchoSnapLiveWallpaperService
 import com.example.service.MusicNotificationListenerService
 import com.example.ui.SpotifyLoginActivity
 import com.example.util.AudioBeatMonitor
+import com.example.util.BatteryAndSystemHelper
 import com.example.util.BitmapBlurUtils
+import com.example.util.ExportNotificationHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -136,10 +148,30 @@ fun SettingsDialog(
     var isSystemWallpaperActive by remember {
         mutableStateOf(EchoSnapLiveWallpaperService.isLiveWallpaperActive(context))
     }
+    var batteryIgnoring by remember {
+        mutableStateOf(BatteryAndSystemHelper.isIgnoringBatteryOptimizations(context))
+    }
+    var listenerBound by remember {
+        mutableStateOf(MusicNotificationListenerService.hasActiveListenerBinding())
+    }
+    var hasExportNotifPerm by remember {
+        mutableStateOf(ExportNotificationHelper.hasNotificationPermission(context))
+    }
+    val detectedMediaApps by MediaNotificationRepository.detectedMediaApps.collectAsStateWithLifecycle()
+
+    val exportNotifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasExportNotifPerm = granted || ExportNotificationHelper.hasNotificationPermission(context)
+    }
+
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 isSystemWallpaperActive = EchoSnapLiveWallpaperService.isLiveWallpaperActive(context)
+                batteryIgnoring = BatteryAndSystemHelper.isIgnoringBatteryOptimizations(context)
+                listenerBound = MusicNotificationListenerService.hasActiveListenerBinding()
+                hasExportNotifPerm = ExportNotificationHelper.hasNotificationPermission(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -161,6 +193,10 @@ fun SettingsDialog(
     var localShadowDepth by remember(styleConfig.glowIntensity) {
         mutableFloatStateOf(styleConfig.glowIntensity.coerceIn(0f, 1f))
     }
+    var localDimAmount by remember(styleConfig.liveWallpaperDimAmount) {
+        mutableFloatStateOf(styleConfig.liveWallpaperDimAmount.coerceIn(0f, 0.70f))
+    }
+    var transitionPreviewTick by remember { mutableIntStateOf(0) }
     var idleDelaySecondsInput by remember(styleConfig.liveWallpaperIdleDelaySec) {
         mutableStateOf(styleConfig.liveWallpaperIdleDelaySec.coerceIn(1, 86_400).toString())
     }
@@ -795,6 +831,105 @@ fun SettingsDialog(
                             modifier = Modifier.padding(top = 6.dp)
                         )
 
+                        AnimatedVisibility(visible = styleConfig.liveWallpaperMode == LiveWallpaperMode.ARTWORK_ONLY) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 12.dp)
+                                    .testTag("settings_lw_transition_section")
+                            ) {
+                                Text(
+                                    text = "Next-Song Transition",
+                                    color = Color.White.copy(alpha = 0.88f),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Animates wallpaper artwork change when the next song plays",
+                                    color = Color.White.copy(alpha = 0.56f),
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(top = 1.dp, bottom = 7.dp)
+                                )
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    LiveWallpaperTransitionStyle.entries.forEach { transitionStyle ->
+                                        val selected = styleConfig.liveWallpaperArtTransition == transitionStyle
+                                        Surface(
+                                            onClick = {
+                                                onStyleChange(styleConfig.copy(liveWallpaperArtTransition = transitionStyle))
+                                                MediaNotificationRepository.flushStylePreferences()
+                                                transitionPreviewTick++
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (selected) Color(0xFFFF2B44) else Color.White.copy(alpha = 0.08f),
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (selected) Color.Transparent else SettingsGlassBorder
+                                            ),
+                                            modifier = Modifier.testTag("settings_lw_transition_${transitionStyle.name}")
+                                        ) {
+                                            Text(
+                                                text = transitionStyle.label,
+                                                color = Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                AnimatedVisibility(visible = styleConfig.liveWallpaperArtTransition != LiveWallpaperTransitionStyle.NONE) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Speed",
+                                            color = Color.White.copy(alpha = 0.72f),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        listOf(
+                                            220 to "Fast",
+                                            360 to "Smooth",
+                                            540 to "Slow"
+                                        ).forEach { (ms, speedLabel) ->
+                                            val speedSelected = kotlin.math.abs(styleConfig.liveWallpaperArtTransitionDurationMs - ms) < 60
+                                            Surface(
+                                                onClick = {
+                                                    onStyleChange(styleConfig.copy(liveWallpaperArtTransitionDurationMs = ms))
+                                                    MediaNotificationRepository.flushStylePreferences()
+                                                    transitionPreviewTick++
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (speedSelected) Color(0xFF1DB954) else Color.White.copy(alpha = 0.08f),
+                                                border = BorderStroke(
+                                                    1.dp,
+                                                    if (speedSelected) Color.Transparent else SettingsGlassBorder
+                                                ),
+                                                modifier = Modifier.testTag("settings_lw_transition_speed_$ms")
+                                            ) {
+                                                Text(
+                                                    text = speedLabel,
+                                                    color = if (speedSelected) Color.Black else Color.White,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = if (speedSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Text(
@@ -1103,6 +1238,14 @@ fun SettingsDialog(
                             shadowDepth = localShadowDepth,
                             shadowColor = styleConfig.resolveShadowColor(palette),
                             shadowInverse = styleConfig.cardShadowInverse,
+                            dimAmount = if (styleConfig.liveWallpaperDimEnabled) localDimAmount else 0f,
+                            artTransitionStyle = if (styleConfig.liveWallpaperMode == LiveWallpaperMode.ARTWORK_ONLY) {
+                                styleConfig.liveWallpaperArtTransition
+                            } else {
+                                LiveWallpaperTransitionStyle.CROSSFADE
+                            },
+                            artTransitionDurationMs = styleConfig.liveWallpaperArtTransitionDurationMs,
+                            transitionPreviewTick = transitionPreviewTick,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("settings_live_wallpaper_mini_preview")
@@ -1194,6 +1337,120 @@ fun SettingsDialog(
                             ),
                             modifier = Modifier.testTag("settings_live_wallpaper_edge_slider")
                         )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Wallpaper Brightness Dimmer",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = if (styleConfig.liveWallpaperDimEnabled) {
+                                        "Dims wallpaper by ${(localDimAmount * 100f).roundToInt()}% so app icons & clock stay legible"
+                                    } else {
+                                        "Off — full artwork brightness on home & lock screen"
+                                    },
+                                    color = Color.White.copy(alpha = 0.60f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.liveWallpaperDimEnabled,
+                                onCheckedChange = { enabled ->
+                                    onStyleChange(styleConfig.copy(liveWallpaperDimEnabled = enabled))
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFF1DB954)
+                                ),
+                                modifier = Modifier.testTag("settings_lw_dim_switch")
+                            )
+                        }
+
+                        AnimatedVisibility(visible = styleConfig.liveWallpaperDimEnabled) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Dim Strength",
+                                        color = Color.White.copy(alpha = 0.85f),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    Text(
+                                        text = "${(localDimAmount * 100f).roundToInt()}%",
+                                        color = Color(0xFF9BE7B3),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.testTag("settings_lw_dim_value")
+                                    )
+                                }
+                                Slider(
+                                    value = localDimAmount,
+                                    onValueChange = { next ->
+                                        val clamped = next.coerceIn(0f, 0.70f)
+                                        localDimAmount = clamped
+                                        onStyleChange(styleConfig.copy(liveWallpaperDimAmount = clamped))
+                                    },
+                                    onValueChangeFinished = {
+                                        MediaNotificationRepository.flushStylePreferences()
+                                    },
+                                    valueRange = 0f..0.70f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = Color.White,
+                                        activeTrackColor = Color(0xFF1DB954),
+                                        inactiveTrackColor = Color.White.copy(alpha = 0.22f)
+                                    ),
+                                    modifier = Modifier.testTag("settings_lw_dim_slider")
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text(
+                                    text = "Battery Saver Auto-Pause Canvas",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "Switches video canvas to crisp HD artwork in Battery Saver or <=15%",
+                                    color = Color.White.copy(alpha = 0.60f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Switch(
+                                checked = styleConfig.liveWallpaperPowerSavePauseCanvas,
+                                onCheckedChange = { pauseOnPowerSave ->
+                                    onStyleChange(styleConfig.copy(liveWallpaperPowerSavePauseCanvas = pauseOnPowerSave))
+                                    MediaNotificationRepository.flushStylePreferences()
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Color(0xFF1DB954)
+                                ),
+                                modifier = Modifier.testTag("settings_lw_power_save_switch")
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -1642,7 +1899,340 @@ fun SettingsDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // 4. ECHOSNAP FOLDER BACKUP (EXPORT / IMPORT / RESET)
+                // 4. BACKGROUND, BATTERY HEALTH & MEDIA APP FILTER
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = SettingsGlassFill,
+                    border = BorderStroke(1.dp, SettingsGlassBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("settings_battery_health_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = "Background & Battery Health",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Keep music sync reliable when Android sleeps in the background",
+                                color = Color.White.copy(alpha = 0.60f),
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        // Status pills
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isAccessGranted && listenerBound) Color(0x221DB954) else Color(0x28FF2B44),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isAccessGranted && listenerBound) Color(0x551DB954) else Color(0x66FF2B44)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                when {
+                                                    isAccessGranted && listenerBound -> Color(0xFF1DB954)
+                                                    isAccessGranted -> Color(0xFFFFD166)
+                                                    else -> Color(0xFFFF2B44)
+                                                }
+                                            )
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = when {
+                                            isAccessGranted && listenerBound -> "Listener: Bound"
+                                            isAccessGranted -> "Listener: Stale"
+                                            else -> "Listener: Off"
+                                        },
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("settings_listener_status_text")
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (batteryIgnoring) Color(0x221DB954) else Color(0x22FFD166),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (batteryIgnoring) Color(0x551DB954) else Color(0x55FFD166)
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(if (batteryIgnoring) Color(0xFF1DB954) else Color(0xFFFFD166))
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (batteryIgnoring) "Battery: Unrestricted" else "Battery: Optimized",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.testTag("settings_battery_status_text")
+                                    )
+                                }
+                            }
+                        }
+
+                        // Action buttons row
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                onClick = {
+                                    if (!isAccessGranted) {
+                                        MusicNotificationListenerService.openNotificationAccessSettings(context)
+                                    } else {
+                                        MusicNotificationListenerService.rebindIfPossible(context)
+                                        MediaNotificationRepository.refreshFromActiveMedia(context, force = true)
+                                        listenerBound = MusicNotificationListenerService.hasActiveListenerBinding()
+                                        Toast.makeText(
+                                            context,
+                                            if (listenerBound) "Listener rebound & synced" else "Rebind requested — check active player",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color.White.copy(alpha = 0.11f),
+                                border = BorderStroke(1.dp, SettingsGlassBorder),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("settings_rebind_listener_button")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Rebind media listener",
+                                        tint = Color(0xFF9BE7B3),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Rebind Listener",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                onClick = {
+                                    if (!BatteryAndSystemHelper.openBatteryOptimizationSettings(context)) {
+                                        Toast.makeText(
+                                            context,
+                                            "Open App Info > Battery > Unrestricted",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color.White.copy(alpha = 0.11f),
+                                border = BorderStroke(1.dp, SettingsGlassBorder),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("settings_battery_settings_button")
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Text(
+                                        text = "Battery Settings",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                onClick = {
+                                    if (!BatteryAndSystemHelper.openOemBackgroundSettings(context)) {
+                                        Toast.makeText(
+                                            context,
+                                            "Check device App Battery / Autostart settings",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = Color.White.copy(alpha = 0.11f),
+                                border = BorderStroke(1.dp, SettingsGlassBorder),
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("settings_oem_background_button")
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                                ) {
+                                    Text(
+                                        text = "OEM Autostart",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (hasExportNotifPerm) {
+                                        "Export Progress Notifications: On"
+                                    } else {
+                                        "Allow export progress alerts"
+                                    },
+                                    color = Color.White.copy(alpha = 0.80f),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                                )
+                                if (!hasExportNotifPerm) {
+                                    Surface(
+                                        onClick = {
+                                            exportNotifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        },
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0x331DB954),
+                                        border = BorderStroke(1.dp, Color(0x661DB954)),
+                                        modifier = Modifier.testTag("settings_export_notif_button")
+                                    ) {
+                                        Text(
+                                            text = "Enable",
+                                            color = Color(0xFF9BE7B3),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.10f))
+
+                        Column {
+                            Text(
+                                text = "Ignore Video & Social Apps",
+                                color = Color.White.copy(alpha = 0.90f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Prevents videos or voice notes from replacing your music artwork",
+                                color = Color.White.copy(alpha = 0.56f),
+                                fontSize = 10.sp
+                            )
+                        }
+
+                        val filterCandidates = remember(detectedMediaApps) {
+                            linkedMapOf(
+                                "com.google.android.youtube" to "YouTube",
+                                "com.zhiliaoapp.musically" to "TikTok",
+                                "com.instagram.android" to "Instagram",
+                                "com.whatsapp" to "WhatsApp",
+                                "com.android.chrome" to "Chrome"
+                            ).apply {
+                                detectedMediaApps.forEach { (pkg, label) ->
+                                    if (!containsKey(pkg)) {
+                                        put(pkg, label)
+                                    }
+                                }
+                            }
+                        }
+
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            filterCandidates.forEach { (pkg, label) ->
+                                val isIgnored = pkg in styleConfig.ignoredMediaPackages
+                                Surface(
+                                    onClick = {
+                                        MediaNotificationRepository.toggleIgnoredMediaPackage(pkg)
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isIgnored) Color(0x44FF2B44) else Color.White.copy(alpha = 0.08f),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isIgnored) Color(0xAAFF2B44) else SettingsGlassBorder
+                                    ),
+                                    modifier = Modifier.testTag("settings_ignore_pkg_$pkg")
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                    ) {
+                                        if (isIgnored) {
+                                            Icon(
+                                                imageVector = Icons.Default.Close,
+                                                contentDescription = null,
+                                                tint = Color(0xFFFF8A96),
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        Text(
+                                            text = label,
+                                            color = if (isIgnored) Color(0xFFFFB3BC) else Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isIgnored) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // 5. ECHOSNAP FOLDER BACKUP (EXPORT / IMPORT / RESET)
                 EchoSnapBackupSectionCard(styleConfig = styleConfig)
             }
         }
@@ -1661,11 +2251,33 @@ private fun LiveWallpaperMiniPreview(
     shadowDepth: Float = 0.75f,
     shadowColor: Color = Color.Black,
     shadowInverse: Boolean = false,
+    dimAmount: Float = 0f,
+    artTransitionStyle: LiveWallpaperTransitionStyle = LiveWallpaperTransitionStyle.CROSSFADE,
+    artTransitionDurationMs: Int = 360,
+    transitionPreviewTick: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val art = track.albumArt
     val centerNorm = (centerBlurPx / 40f).coerceIn(0f, 1f)
     val edgeFade = edgeBlurFade.coerceIn(0f, 1f)
+    val transitionAnim = remember { Animatable(1f) }
+    LaunchedEffect(transitionPreviewTick) {
+        if (transitionPreviewTick > 0) {
+            if (artTransitionStyle == LiveWallpaperTransitionStyle.NONE) {
+                transitionAnim.snapTo(1f)
+            } else {
+                transitionAnim.snapTo(0f)
+                transitionAnim.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(
+                        durationMillis = artTransitionDurationMs.coerceIn(180, 700),
+                        easing = FastOutSlowInEasing
+                    )
+                )
+            }
+        }
+    }
+    val animT = transitionAnim.value
 
     // Precompute compact preview mipmaps once per track artwork so scrubbing BOTH sliders runs at 60fps
     val mipImages by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
@@ -1718,60 +2330,86 @@ private fun LiveWallpaperMiniPreview(
                         )
                     )
             ) {
-                // 1. Center Wallpaper Layer (uniform center blur 0..40px)
-                if (sharpPreviewBmp != null) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        Image(
-                            bitmap = sharpPreviewBmp,
-                            contentDescription = "Wallpaper center blur preview",
-                            contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.Medium,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .then(
-                                    if (centerBlurPx > 0.4f) {
-                                        Modifier.blur(
-                                            radius = (centerBlurPx * 0.36f).dp,
-                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
-                                        )
-                                    } else {
-                                        Modifier
+                // 1. Center Wallpaper Layer (uniform center blur 0..40px + Artwork transition demo)
+                val previewExtraBlur = if (artTransitionStyle == LiveWallpaperTransitionStyle.BLUR_DISSOLVE && animT < 0.99f) {
+                    (1f - animT) * 14f
+                } else {
+                    0f
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            if (animT < 0.999f) {
+                                when (artTransitionStyle) {
+                                    LiveWallpaperTransitionStyle.CROSSFADE -> alpha = animT
+                                    LiveWallpaperTransitionStyle.SLIDE_LEFT -> translationX = (1f - animT) * size.width
+                                    LiveWallpaperTransitionStyle.ZOOM_FADE -> {
+                                        val s = 1f + (1f - animT) * 0.16f
+                                        scaleX = s
+                                        scaleY = s
+                                        alpha = animT
                                     }
-                                )
-                        )
-                    } else {
-                        Image(
-                            bitmap = sharpPreviewBmp,
-                            contentDescription = "Wallpaper center blur preview",
-                            contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.Low,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                        val mips = mipImages
-                        if (mips != null && centerBlurPx > 0.4f) {
-                            val midAlpha = (centerNorm * 1.4f).coerceIn(0f, 1f)
-                            val highAlpha = ((centerNorm - 0.35f) / 0.65f).coerceIn(0f, 1f)
-                            if (midAlpha > 0.01f) {
-                                Image(
-                                    bitmap = mips.first,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    filterQuality = FilterQuality.Low,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .graphicsLayer { alpha = midAlpha }
-                                )
+                                    LiveWallpaperTransitionStyle.BLUR_DISSOLVE -> alpha = animT
+                                    LiveWallpaperTransitionStyle.NONE -> Unit
+                                }
                             }
-                            if (highAlpha > 0.01f) {
-                                Image(
-                                    bitmap = mips.second,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    filterQuality = FilterQuality.Low,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .graphicsLayer { alpha = highAlpha }
-                                )
+                        }
+                ) {
+                    if (sharpPreviewBmp != null) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            Image(
+                                bitmap = sharpPreviewBmp,
+                                contentDescription = "Wallpaper center blur preview",
+                                contentScale = ContentScale.Crop,
+                                filterQuality = FilterQuality.Medium,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .then(
+                                        if (centerBlurPx + previewExtraBlur > 0.4f) {
+                                            Modifier.blur(
+                                                radius = ((centerBlurPx + previewExtraBlur) * 0.36f).dp,
+                                                edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                            )
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
+                            )
+                        } else {
+                            Image(
+                                bitmap = sharpPreviewBmp,
+                                contentDescription = "Wallpaper center blur preview",
+                                contentScale = ContentScale.Crop,
+                                filterQuality = FilterQuality.Low,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            val mips = mipImages
+                            if (mips != null && centerBlurPx > 0.4f) {
+                                val midAlpha = (centerNorm * 1.4f).coerceIn(0f, 1f)
+                                val highAlpha = ((centerNorm - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                                if (midAlpha > 0.01f) {
+                                    Image(
+                                        bitmap = mips.first,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        filterQuality = FilterQuality.Low,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .graphicsLayer { alpha = midAlpha }
+                                    )
+                                }
+                                if (highAlpha > 0.01f) {
+                                    Image(
+                                        bitmap = mips.second,
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        filterQuality = FilterQuality.Low,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .graphicsLayer { alpha = highAlpha }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1825,6 +2463,15 @@ private fun LiveWallpaperMiniPreview(
                                 .background(Color.Black.copy(alpha = edgeFade * 0.22f))
                         )
                     }
+                }
+
+                // Wallpaper Brightness Dimmer scrim
+                if (dimAmount > 0.005f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = dimAmount.coerceIn(0f, 0.70f)))
+                    )
                 }
 
                 // 3. Simulated Lock/Home Clock in top band + Dock dots in bottom band
@@ -1901,6 +2548,25 @@ private fun LiveWallpaperMiniPreview(
                         Box(
                             modifier = Modifier
                                 .size(50.dp)
+                                .graphicsLayer {
+                                    if (animT < 0.999f) {
+                                        when (artTransitionStyle) {
+                                            LiveWallpaperTransitionStyle.CROSSFADE -> alpha = animT
+                                            LiveWallpaperTransitionStyle.SLIDE_LEFT -> {
+                                                translationX = (1f - animT) * 28.dp.toPx()
+                                                alpha = animT
+                                            }
+                                            LiveWallpaperTransitionStyle.ZOOM_FADE -> {
+                                                val s = 0.88f + animT * 0.12f
+                                                scaleX = s
+                                                scaleY = s
+                                                alpha = animT
+                                            }
+                                            LiveWallpaperTransitionStyle.BLUR_DISSOLVE -> alpha = animT
+                                            LiveWallpaperTransitionStyle.NONE -> Unit
+                                        }
+                                    }
+                                }
                                 .drawBehind {
                                     if (depth > 0.01f) {
                                         drawIntoCanvas { canvas ->
@@ -1958,6 +2624,13 @@ private fun LiveWallpaperMiniPreview(
                                         }
                                     }
                             )
+                            if (dimAmount > 0.005f) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black.copy(alpha = dimAmount.coerceIn(0f, 0.70f)))
+                                )
+                            }
                         }
                     } else {
                         Spacer(modifier = Modifier.height(42.dp))
@@ -2000,6 +2673,13 @@ private fun LiveWallpaperMiniPreview(
                     color = Color(0xFFA6F4C5),
                     fontSize = 10.sp
                 )
+                if (dimAmount > 0.005f) {
+                    Text(
+                        text = "• Dimmer (${(dimAmount * 100f).roundToInt()}%) softens brightness behind your icons.",
+                        color = Color(0xFFFFD166),
+                        fontSize = 10.sp
+                    )
+                }
             }
         }
     }

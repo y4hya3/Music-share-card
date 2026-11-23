@@ -16,6 +16,7 @@ import com.example.model.CardStyleConfig
 import com.example.model.GradientStyle
 import com.example.model.LiveWallpaperArtworkFillMode
 import com.example.model.LiveWallpaperCornerStyle
+import com.example.model.LiveWallpaperTransitionStyle
 import com.example.model.LogoColorMode
 import com.example.model.LyricsCardBackgroundMode
 import com.example.repository.MediaNotificationRepository
@@ -23,7 +24,12 @@ import com.example.repository.SavedCanvasItem
 import com.example.repository.SavedMediaLibrary
 import com.example.repository.SavedCoverItem
 import android.os.Build
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -59,6 +65,13 @@ data class EchoSnapBackupStyle(
     val showLogoWordmark: Boolean,
     val liveWallpaperArtworkFillMode: String = LiveWallpaperArtworkFillMode.FLOATING_SQUARE.name,
     val liveWallpaperCornerStyle: String = LiveWallpaperCornerStyle.CURVED.name,
+    val liveWallpaperArtTransition: String = LiveWallpaperTransitionStyle.CROSSFADE.name,
+    val liveWallpaperArtTransitionDurationMs: Int = 360,
+    val liveWallpaperDimEnabled: Boolean = false,
+    val liveWallpaperDimAmount: Float = 0.28f,
+    val liveWallpaperPowerSavePauseCanvas: Boolean = true,
+    val ignoredMediaPackages: List<String> = emptyList(),
+    val backupAutoSyncEnabled: Boolean = false,
     val cardShadowColorMode: String = CardShadowColorMode.ALBUM_DYNAMIC.name,
     val customShadowColorArgb: Int = 0xFFFF2B44.toInt(),
     val cardShadowInverse: Boolean = false
@@ -90,7 +103,14 @@ data class EchoSnapBackupStyle(
         lyricsWordSelectionMode = lyricsWordSelectionMode,
         showLogoWordmark = showLogoWordmark,
         liveWallpaperArtworkFillMode = enumOrDefault(liveWallpaperArtworkFillMode, current.liveWallpaperArtworkFillMode),
-        liveWallpaperCornerStyle = enumOrDefault(liveWallpaperCornerStyle, current.liveWallpaperCornerStyle)
+        liveWallpaperCornerStyle = enumOrDefault(liveWallpaperCornerStyle, current.liveWallpaperCornerStyle),
+        liveWallpaperArtTransition = enumOrDefault(liveWallpaperArtTransition, current.liveWallpaperArtTransition),
+        liveWallpaperArtTransitionDurationMs = liveWallpaperArtTransitionDurationMs.coerceIn(160, 800),
+        liveWallpaperDimEnabled = liveWallpaperDimEnabled,
+        liveWallpaperDimAmount = liveWallpaperDimAmount.coerceIn(0f, 0.70f),
+        liveWallpaperPowerSavePauseCanvas = liveWallpaperPowerSavePauseCanvas,
+        ignoredMediaPackages = ignoredMediaPackages.map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
+        backupAutoSyncEnabled = backupAutoSyncEnabled
     )
 
     companion object {
@@ -119,6 +139,13 @@ data class EchoSnapBackupStyle(
             showLogoWordmark = cfg.showLogoWordmark,
             liveWallpaperArtworkFillMode = cfg.liveWallpaperArtworkFillMode.name,
             liveWallpaperCornerStyle = cfg.liveWallpaperCornerStyle.name,
+            liveWallpaperArtTransition = cfg.liveWallpaperArtTransition.name,
+            liveWallpaperArtTransitionDurationMs = cfg.liveWallpaperArtTransitionDurationMs,
+            liveWallpaperDimEnabled = cfg.liveWallpaperDimEnabled,
+            liveWallpaperDimAmount = cfg.liveWallpaperDimAmount,
+            liveWallpaperPowerSavePauseCanvas = cfg.liveWallpaperPowerSavePauseCanvas,
+            ignoredMediaPackages = cfg.ignoredMediaPackages.sorted(),
+            backupAutoSyncEnabled = cfg.backupAutoSyncEnabled,
             cardShadowColorMode = cfg.cardShadowColorMode.name,
             customShadowColorArgb = cfg.customShadowColor.toArgb(),
             cardShadowInverse = cfg.cardShadowInverse
@@ -207,6 +234,24 @@ object EchoSnapBackupManager {
     private const val KEY_HAS_PROMPTED_FOLDER_ACCESS = "has_prompted_folder_access"
     private const val KEY_LAST_AUTO_IMPORT_FINGERPRINT = "last_auto_import_fingerprint"
     private const val KEY_SAVED_FOLDER_DISPLAY_NAME = "saved_folder_display_name"
+
+    private val backupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var autoSyncJob: Job? = null
+
+    fun scheduleAutoBackupIfEnabled(context: Context) {
+        val ctx = context.applicationContext
+        val cfg = MediaNotificationRepository.styleConfig.value
+        if (!cfg.backupAutoSyncEnabled) return
+        val persistedUri = getPersistedBackupTreeUri(ctx) ?: return
+        autoSyncJob?.cancel()
+        autoSyncJob = backupScope.launch {
+            delay(1800L)
+            val latestCfg = MediaNotificationRepository.styleConfig.value
+            if (latestCfg.backupAutoSyncEnabled) {
+                exportBackupToTreeUri(ctx, persistedUri, latestCfg)
+            }
+        }
+    }
 
     fun getPersistedBackupTreeUri(context: Context): Uri? {
         val ctx = context.applicationContext
@@ -1168,6 +1213,13 @@ object EchoSnapBackupManager {
         put("showLogoWordmark", s.showLogoWordmark)
         put("liveWallpaperArtworkFillMode", s.liveWallpaperArtworkFillMode)
         put("liveWallpaperCornerStyle", s.liveWallpaperCornerStyle)
+        put("liveWallpaperArtTransition", s.liveWallpaperArtTransition)
+        put("liveWallpaperArtTransitionDurationMs", s.liveWallpaperArtTransitionDurationMs)
+        put("liveWallpaperDimEnabled", s.liveWallpaperDimEnabled)
+        put("liveWallpaperDimAmount", s.liveWallpaperDimAmount.toDouble())
+        put("liveWallpaperPowerSavePauseCanvas", s.liveWallpaperPowerSavePauseCanvas)
+        put("ignoredMediaPackages", JSONArray(s.ignoredMediaPackages))
+        put("backupAutoSyncEnabled", s.backupAutoSyncEnabled)
         put("cardShadowColorMode", s.cardShadowColorMode)
         put("customShadowColorArgb", s.customShadowColorArgb)
         put("cardShadowInverse", s.cardShadowInverse)
@@ -1200,6 +1252,16 @@ object EchoSnapBackupManager {
             showLogoWordmark = o.optBoolean("showLogoWordmark", d.showLogoWordmark),
             liveWallpaperArtworkFillMode = o.optString("liveWallpaperArtworkFillMode", d.liveWallpaperArtworkFillMode.name),
             liveWallpaperCornerStyle = o.optString("liveWallpaperCornerStyle", d.liveWallpaperCornerStyle.name),
+            liveWallpaperArtTransition = o.optString("liveWallpaperArtTransition", d.liveWallpaperArtTransition.name),
+            liveWallpaperArtTransitionDurationMs = o.optInt("liveWallpaperArtTransitionDurationMs", d.liveWallpaperArtTransitionDurationMs),
+            liveWallpaperDimEnabled = o.optBoolean("liveWallpaperDimEnabled", d.liveWallpaperDimEnabled),
+            liveWallpaperDimAmount = o.optDouble("liveWallpaperDimAmount", d.liveWallpaperDimAmount.toDouble()).toFloat(),
+            liveWallpaperPowerSavePauseCanvas = o.optBoolean(
+                "liveWallpaperPowerSavePauseCanvas",
+                d.liveWallpaperPowerSavePauseCanvas
+            ),
+            ignoredMediaPackages = parseSongsArray(o.optJSONArray("ignoredMediaPackages")),
+            backupAutoSyncEnabled = o.optBoolean("backupAutoSyncEnabled", d.backupAutoSyncEnabled),
             cardShadowColorMode = o.optString("cardShadowColorMode", d.cardShadowColorMode.name),
             customShadowColorArgb = o.optInt("customShadowColorArgb", d.customShadowColor.toArgb()),
             cardShadowInverse = o.optBoolean("cardShadowInverse", d.cardShadowInverse)

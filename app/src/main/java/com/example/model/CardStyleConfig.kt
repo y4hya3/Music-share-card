@@ -31,7 +31,8 @@ enum class CardLayoutType(val label: String) {
     SPOTIFY_INNER_CARD("Floating Glass Card"),
     FLOATING_ARTWORK("Floating Glow Art"),
     MINIMAL_CLEAN("Minimal Story"),
-    SPOTIFY_LYRICS_CARD("Lyrics Card")
+    SPOTIFY_LYRICS_CARD("Lyrics Card"),
+    APP_MUSIC_CARD("App Music Card")
 }
 
 enum class LyricsCardBackgroundMode(val label: String) {
@@ -62,6 +63,14 @@ enum class CardShadowColorMode(val label: String) {
     PURPLE("Violet"),
     CYAN("Cyan"),
     CUSTOM("Custom")
+}
+
+enum class LiveWallpaperTransitionStyle(val label: String) {
+    CROSSFADE("Smooth Fade"),
+    SLIDE_LEFT("Slide Sweep"),
+    ZOOM_FADE("Cinematic Zoom"),
+    BLUR_DISSOLVE("Blur Dissolve"),
+    NONE("Instant")
 }
 
 @Immutable
@@ -99,12 +108,19 @@ data class CardStyleConfig(
     val liveWallpaperMode: LiveWallpaperMode = LiveWallpaperMode.ANIMATED_CANVAS,
     val liveWallpaperArtworkFillMode: LiveWallpaperArtworkFillMode = LiveWallpaperArtworkFillMode.FLOATING_SQUARE,
     val liveWallpaperCornerStyle: LiveWallpaperCornerStyle = LiveWallpaperCornerStyle.CURVED,
+    val liveWallpaperArtTransition: LiveWallpaperTransitionStyle = LiveWallpaperTransitionStyle.CROSSFADE,
+    val liveWallpaperArtTransitionDurationMs: Int = 360, // 180..700ms when ARTWORK_ONLY is active
     val liveWallpaperBlurRadius: Float = 10f, // 0f..40f real-time wallpaper blur
     val liveWallpaperEdgeBlurFade: Float = 0.65f, // 0f..1f progressive top & bottom edge frosted blur (keeps middle clear)
+    val liveWallpaperDimEnabled: Boolean = false, // Toggleable wallpaper brightness dimmer scrim
+    val liveWallpaperDimAmount: Float = 0.28f, // 0.0f..0.70f darken factor for readability behind icons
+    val liveWallpaperPowerSavePauseCanvas: Boolean = true, // Pauses video canvas during Power Saver / low battery
     val liveWallpaperShowCard: Boolean = true,
     val liveWallpaperIdleRevertEnabled: Boolean = false,
     val liveWallpaperIdleDelaySec: Int = 60, // 1..86400 seconds (up to 1 day) after song stops
     val liveWallpaperIdlePhotoPath: String = "",
+    val ignoredMediaPackages: Set<String> = emptySet(),
+    val backupAutoSyncEnabled: Boolean = false,
     val spotifyAccessToken: String = "",
     val spotifySpDcCookie: String = "",
     val spotifyRefreshToken: String = "",

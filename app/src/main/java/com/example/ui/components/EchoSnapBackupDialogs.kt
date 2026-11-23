@@ -44,6 +44,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -277,6 +279,53 @@ fun EchoSnapBackupSectionCard(
                         )
                     }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Auto-sync Echomusic folder toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                    Text(
+                        text = "Auto-sync Echomusic folder",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Automatically updates linked folder whenever library or style changes",
+                        color = Color.White.copy(alpha = 0.58f),
+                        fontSize = 11.sp
+                    )
+                }
+                Switch(
+                    checked = styleConfig.backupAutoSyncEnabled,
+                    onCheckedChange = { enabled ->
+                        MediaNotificationRepository.updateStyleConfig(saveImmediately = true) { current ->
+                            current.copy(backupAutoSyncEnabled = enabled)
+                        }
+                        MediaNotificationRepository.flushStylePreferences()
+                        if (enabled) {
+                            val persisted = EchoSnapBackupManager.getPersistedBackupTreeUri(context)
+                            if (persisted == null) {
+                                exportFolderPicker.launch(EchoSnapBackupManager.suggestedInitialPickerUri())
+                            } else {
+                                EchoSnapBackupManager.scheduleAutoBackupIfEnabled(context)
+                            }
+                        }
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Color(0xFF1DB954)
+                    ),
+                    modifier = Modifier.testTag("settings_backup_auto_sync_switch")
+                )
             }
 
             Spacer(modifier = Modifier.height(10.dp))

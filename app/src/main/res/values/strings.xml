@@ -11,4 +11,7 @@
     <string name="permission_required_title">Notification Access Required</string>
     <string name="permission_required_desc">EchoSnap needs Notification Listener Access to detect active playback, title, artist, and album artwork from Spotify, YouTube Music, etc.</string>
     <string name="enable_access">Enable Access</string>
+    <string name="tile_live_wallpaper_label">Music Wallpaper</string>
+    <string name="export_notification_channel_name">Media Exports</string>
+    <string name="export_notification_channel_desc">Shows live progress and completion alerts when saving animated videos or GIFs.</string>
 </resources>

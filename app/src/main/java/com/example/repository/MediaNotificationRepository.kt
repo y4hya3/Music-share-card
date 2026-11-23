@@ -7,10 +7,12 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Shader
 import android.net.Uri
+import android.os.SystemClock
 import com.example.R
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.LiveWallpaperMode
+import com.example.model.MediaPlaybackProgress
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
 import com.example.service.AnimatedCanvasCandidate
@@ -24,6 +26,7 @@ import com.example.service.SpotifyAuthManager
 import com.example.util.BitmapBlurUtils
 import com.example.util.CanvasVideoExporter
 import com.example.util.DevicePerformanceTier
+import com.example.util.EchoSnapBackupManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -68,6 +71,9 @@ object MediaNotificationRepository {
     private var autoAppliedSavedCanvasTrackKey: String? = null
     private var autoAppliedSavedCoverTrackKey: String? = null
 
+    private const val PREFS_FAVORITES = "echosnap_favorites"
+    private const val KEY_FAVORITE_KEYS = "favorite_track_keys"
+
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
             title = "SICKO MODE",
@@ -77,10 +83,26 @@ object MediaNotificationRepository {
             packageName = "",
             albumArt = null,
             isPlaying = true,
-            isSample = true
+            isSample = true,
+            durationMs = 138_000L,
+            positionMs = 29_000L
         )
     )
     val currentTrack: StateFlow<MediaTrackInfo> = _currentTrack.asStateFlow()
+
+    private val _playbackProgress = MutableStateFlow(
+        MediaPlaybackProgress(
+            positionMs = 29_000L,
+            durationMs = 138_000L,
+            playbackSpeed = 1f,
+            lastUpdateElapsedMs = SystemClock.elapsedRealtime(),
+            isPlaying = true
+        )
+    )
+    val playbackProgress: StateFlow<MediaPlaybackProgress> = _playbackProgress.asStateFlow()
+
+    private val _favoriteTrackKeys = MutableStateFlow<Set<String>>(emptySet())
+    val favoriteTrackKeys: StateFlow<Set<String>> = _favoriteTrackKeys.asStateFlow()
 
     private val _extractedPalette = MutableStateFlow(CardPalette.Default)
     val extractedPalette: StateFlow<CardPalette> = _extractedPalette.asStateFlow()
@@ -133,6 +155,9 @@ object MediaNotificationRepository {
     private val _lastPlaybackStoppedElapsedMs = MutableStateFlow(0L)
     val lastPlaybackStoppedElapsedMs: StateFlow<Long> = _lastPlaybackStoppedElapsedMs.asStateFlow()
 
+    private val _detectedMediaApps = MutableStateFlow<Map<String, String>>(emptyMap())
+    val detectedMediaApps: StateFlow<Map<String, String>> = _detectedMediaApps.asStateFlow()
+
     private val recentTrackHdArtCache = object : LinkedHashMap<String, Bitmap>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 20
     }
@@ -162,11 +187,16 @@ object MediaNotificationRepository {
         appContext = ctx
         initialized = true
         _styleConfig.value = CardStylePreferences.load(ctx)
+        _favoriteTrackKeys.value = ctx
+            .getSharedPreferences(PREFS_FAVORITES, Context.MODE_PRIVATE)
+            .getStringSet(KEY_FAVORITE_KEYS, emptySet())
+            .orEmpty()
+            .toSet()
         SavedMediaLibrary.initialize(ctx)
         prewarmSavedMediaArtworkCache(ctx)
         checkNotificationAccess(ctx)
         if (_lastPlaybackStoppedElapsedMs.value == 0L && _currentTrack.value.isSample) {
-            _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
+            _lastPlaybackStoppedElapsedMs.value = SystemClock.elapsedRealtime()
         }
 
         val initialTrack = MediaTrackInfo(
@@ -177,7 +207,9 @@ object MediaNotificationRepository {
             packageName = "",
             albumArt = null,
             isPlaying = true,
-            isSample = true
+            isSample = true,
+            durationMs = 138_000L,
+            positionMs = 29_000L
         )
 
         val weekndStub = MediaTrackInfo(
@@ -188,7 +220,9 @@ object MediaNotificationRepository {
             packageName = "",
             albumArt = null,
             isPlaying = true,
-            isSample = true
+            isSample = true,
+            durationMs = 200_000L,
+            positionMs = 42_000L
         )
         val daftStub = MediaTrackInfo(
             title = "Get Lucky (feat. Pharrell)",
@@ -198,7 +232,9 @@ object MediaNotificationRepository {
             packageName = "",
             albumArt = null,
             isPlaying = true,
-            isSample = true
+            isSample = true,
+            durationMs = 248_000L,
+            positionMs = 54_000L
         )
         val billieStub = MediaTrackInfo(
             title = "BIRDS OF A FEATHER",
@@ -208,11 +244,20 @@ object MediaNotificationRepository {
             packageName = "",
             albumArt = null,
             isPlaying = true,
-            isSample = true
+            isSample = true,
+            durationMs = 210_000L,
+            positionMs = 31_000L
         )
 
         sampleTracksList = listOf(initialTrack, weekndStub, daftStub, billieStub)
         _currentTrack.value = initialTrack
+        _playbackProgress.value = MediaPlaybackProgress(
+            positionMs = initialTrack.positionMs,
+            durationMs = initialTrack.durationMs,
+            playbackSpeed = 1f,
+            lastUpdateElapsedMs = SystemClock.elapsedRealtime(),
+            isPlaying = initialTrack.isPlaying
+        )
         _selectedCoverId.value = "player"
 
         // Decode bundled sample artwork & build fallback cards off the main thread so cold launch stays instant
@@ -286,6 +331,15 @@ object MediaNotificationRepository {
             onlineSearchJob?.cancel()
             lowResCoverUpgradeJob?.cancel()
             _originalPlayerArt.value = trackInfo.albumArt
+            if (trackInfo.durationMs <= 0L && trackInfo.positionMs <= 0L) {
+                _playbackProgress.value = MediaPlaybackProgress(
+                    positionMs = 0L,
+                    durationMs = 0L,
+                    playbackSpeed = if (trackInfo.isPlaying) 1f else 0f,
+                    lastUpdateElapsedMs = SystemClock.elapsedRealtime(),
+                    isPlaying = trackInfo.isPlaying
+                )
+            }
             _selectedCoverId.value = "player"
             _onlineCoverCandidates.value = emptyList()
             _animatedCanvasCandidates.value = emptyList()
@@ -431,7 +485,7 @@ object MediaNotificationRepository {
             val artMaxSide = finalTrack.albumArt?.takeIf { !it.isRecycled }
                 ?.let { maxOf(it.width, it.height) } ?: 0
             val artIsSquare = finalTrack.albumArt?.let { isNearSquareArt(it) } == true
-            if (artMaxSide < 720 || !artIsSquare) {
+            if (artMaxSide < 800 || !artIsSquare) {
                 lastAutoUpgradedLowResTrackKey = newKey
                 upgradeLowResArtworkSilently(finalTrack)
             }
@@ -505,11 +559,157 @@ object MediaNotificationRepository {
 
     fun markCurrentTrackStopped() {
         val cur = _currentTrack.value
+        val curProg = _playbackProgress.value
+        val frozenPos = curProg.currentPositionAt(SystemClock.elapsedRealtime())
+        _playbackProgress.value = curProg.copy(
+            positionMs = frozenPos,
+            lastUpdateElapsedMs = SystemClock.elapsedRealtime(),
+            isPlaying = false
+        )
         if (!cur.isSample && cur.isPlaying) {
-            _currentTrack.value = cur.copy(isPlaying = false)
+            _currentTrack.value = cur.copy(isPlaying = false, positionMs = frozenPos)
         }
         if (_lastPlaybackStoppedElapsedMs.value == 0L || cur.isPlaying) {
-            _lastPlaybackStoppedElapsedMs.value = android.os.SystemClock.elapsedRealtime()
+            _lastPlaybackStoppedElapsedMs.value = SystemClock.elapsedRealtime()
+        }
+    }
+
+    fun updatePlaybackProgress(
+        positionMs: Long,
+        durationMs: Long,
+        playbackSpeed: Float,
+        lastUpdateElapsedMs: Long,
+        isPlaying: Boolean
+    ) {
+        val safeDur = durationMs.coerceAtLeast(0L)
+        val safePos = if (safeDur > 0L) positionMs.coerceIn(0L, safeDur) else positionMs.coerceAtLeast(0L)
+        _playbackProgress.value = MediaPlaybackProgress(
+            positionMs = safePos,
+            durationMs = safeDur,
+            playbackSpeed = if (playbackSpeed <= 0f) 1f else playbackSpeed,
+            lastUpdateElapsedMs = if (lastUpdateElapsedMs > 0L) lastUpdateElapsedMs else SystemClock.elapsedRealtime(),
+            isPlaying = isPlaying
+        )
+    }
+
+    fun favoriteKeyFor(track: MediaTrackInfo): String =
+        "${track.title.trim().lowercase()}|${track.artist.trim().lowercase()}"
+
+    fun isTrackFavorited(
+        track: MediaTrackInfo = _currentTrack.value,
+        keys: Set<String> = _favoriteTrackKeys.value
+    ): Boolean = favoriteKeyFor(track) in keys
+
+    fun toggleFavoriteCurrentTrack(context: Context): Boolean {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        val key = favoriteKeyFor(_currentTrack.value)
+        val current = _favoriteTrackKeys.value
+        val nowFavorited = key !in current
+        val next = if (nowFavorited) current + key else current - key
+        _favoriteTrackKeys.value = next
+        ctx.getSharedPreferences(PREFS_FAVORITES, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_FAVORITE_KEYS, next)
+            .apply()
+        if (!_currentTrack.value.isSample) {
+            MusicNotificationListenerService.sendHeartRatingIfSupported(ctx, nowFavorited)
+        }
+        return nowFavorited
+    }
+
+    fun togglePlayPauseCurrentTrack(context: Context) {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        val cur = _currentTrack.value
+        val now = SystemClock.elapsedRealtime()
+        val curProg = _playbackProgress.value
+        val snapshotPos = curProg.currentPositionAt(now)
+        val dispatched = if (!cur.isSample) {
+            MusicNotificationListenerService.togglePlayPause(ctx)
+        } else {
+            false
+        }
+        val nextPlaying = !cur.isPlaying
+        _playbackProgress.value = curProg.copy(
+            positionMs = snapshotPos,
+            lastUpdateElapsedMs = now,
+            isPlaying = nextPlaying
+        )
+        _currentTrack.value = cur.copy(isPlaying = nextPlaying, positionMs = snapshotPos)
+        if (!cur.isSample) {
+            if (nextPlaying) {
+                _lastPlaybackStoppedElapsedMs.value = 0L
+            } else {
+                _lastPlaybackStoppedElapsedMs.value = now
+            }
+            if (dispatched) {
+                repositoryScope.launch {
+                    delay(180)
+                    MusicNotificationListenerService.syncNow(ctx)
+                }
+            }
+        }
+    }
+
+    fun skipNextCurrentTrack(context: Context) {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        val cur = _currentTrack.value
+        if (!cur.isSample) {
+            if (MusicNotificationListenerService.skipToNext(ctx)) {
+                repositoryScope.launch {
+                    delay(220)
+                    MusicNotificationListenerService.syncNow(ctx)
+                }
+            }
+            return
+        }
+        val list = sampleTracksList
+        if (list.isNotEmpty()) {
+            val idx = list.indexOfFirst { it.title == cur.title && it.artist == cur.artist }
+            val nextTrack = list[if (idx < 0) 0 else (idx + 1) % list.size]
+            selectSampleTrack(nextTrack)
+        }
+    }
+
+    fun skipPreviousCurrentTrack(context: Context) {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        val cur = _currentTrack.value
+        if (!cur.isSample) {
+            if (MusicNotificationListenerService.skipToPrevious(ctx)) {
+                repositoryScope.launch {
+                    delay(220)
+                    MusicNotificationListenerService.syncNow(ctx)
+                }
+            }
+            return
+        }
+        val list = sampleTracksList
+        if (list.isNotEmpty()) {
+            val idx = list.indexOfFirst { it.title == cur.title && it.artist == cur.artist }
+            val prevTrack = list[if (idx <= 0) list.lastIndex else (idx - 1)]
+            selectSampleTrack(prevTrack)
+        }
+    }
+
+    fun seekCurrentTrackTo(context: Context, targetPositionMs: Long) {
+        val ctx = context.applicationContext
+        ensureInitialized(ctx)
+        val curProg = _playbackProgress.value
+        val cur = _currentTrack.value
+        val maxDur = curProg.durationMs.coerceAtLeast(cur.durationMs).coerceAtLeast(0L)
+        val clamped = if (maxDur > 0L) targetPositionMs.coerceIn(0L, maxDur) else targetPositionMs.coerceAtLeast(0L)
+        val now = SystemClock.elapsedRealtime()
+        _playbackProgress.value = curProg.copy(
+            positionMs = clamped,
+            durationMs = maxDur,
+            lastUpdateElapsedMs = now
+        )
+        _currentTrack.value = cur.copy(positionMs = clamped, durationMs = maxDur)
+        if (!cur.isSample) {
+            MusicNotificationListenerService.seekTo(ctx, clamped)
         }
     }
 
@@ -580,6 +780,13 @@ object MediaNotificationRepository {
         }
 
         _currentTrack.value = track
+        _playbackProgress.value = MediaPlaybackProgress(
+            positionMs = track.positionMs.coerceAtLeast(0L),
+            durationMs = track.durationMs.coerceAtLeast(138_000L),
+            playbackSpeed = 1f,
+            lastUpdateElapsedMs = SystemClock.elapsedRealtime(),
+            isPlaying = track.isPlaying
+        )
         extractPaletteForTrack(track)
 
         val savedCoverMatch = SavedMediaLibrary.findMatchingSavedCoverForTrack(
@@ -786,6 +993,96 @@ object MediaNotificationRepository {
             }
             CardStylePreferences.save(ctx, _styleConfig.value)
         }
+        val onlySpotifyTokenChanged = previous.spotifyAccessToken != updated.spotifyAccessToken &&
+            previous.copy(
+                spotifyAccessToken = updated.spotifyAccessToken,
+                spotifySpDcCookie = updated.spotifySpDcCookie,
+                spotifyRefreshToken = updated.spotifyRefreshToken,
+                spotifyTokenExpiryMs = updated.spotifyTokenExpiryMs,
+                spotifyTokenLastRefreshedMs = updated.spotifyTokenLastRefreshedMs,
+                spotifyAccountLabel = updated.spotifyAccountLabel
+            ) == updated
+        if (!onlySpotifyTokenChanged && updated.backupAutoSyncEnabled) {
+            EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
+        }
+    }
+
+    fun recordDetectedMediaApp(packageName: String, appLabel: String) {
+        val pkg = packageName.trim()
+        if (pkg.isEmpty()) return
+        val label = appLabel.trim().ifBlank { pkg }
+        val existing = _detectedMediaApps.value
+        if (existing[pkg] == label) return
+        _detectedMediaApps.value = existing + (pkg to label)
+    }
+
+    fun toggleIgnoredMediaPackage(packageName: String) {
+        val pkg = packageName.trim()
+        if (pkg.isEmpty()) return
+        updateStyleConfig(saveImmediately = true) { current ->
+            val nextSet = if (pkg in current.ignoredMediaPackages) {
+                current.ignoredMediaPackages - pkg
+            } else {
+                current.ignoredMediaPackages + pkg
+            }
+            current.copy(ignoredMediaPackages = nextSet)
+        }
+        val active = _currentTrack.value
+        if (!active.isSample && active.packageName == pkg && pkg in _styleConfig.value.ignoredMediaPackages) {
+            markCurrentTrackStopped()
+            val ctx = appContext
+            if (ctx != null) {
+                val resynced = MusicNotificationListenerService.syncNow(ctx)
+                if (!resynced) {
+                    sampleTracksList.firstOrNull()?.let { selectSampleTrack(it) }
+                }
+            }
+        }
+    }
+
+    fun prewarmQueueTrackArtwork(title: String, artist: String, album: String = "") {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return
+        val ctx = appContext ?: return
+        val matchedCover = SavedMediaLibrary.findMatchingSavedCoverForTrack(
+            title = cleanTitle,
+            album = album,
+            artist = artist
+        )
+        val matchedCanvas = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+            title = cleanTitle,
+            album = album,
+            artist = artist
+        )
+        if (matchedCover == null && matchedCanvas == null) return
+
+        repositoryScope.launch(Dispatchers.IO) {
+            val maxDim = maxOf(DevicePerformanceTier.recommendedCoverMaxDim(ctx), 1200)
+            if (matchedCover != null) {
+                val cached = synchronized(savedCoverBitmapCache) { savedCoverBitmapCache[matchedCover.id] }
+                if (cached == null || cached.isRecycled) {
+                    val bmp = SavedMediaLibrary.loadBitmap(matchedCover.localImagePath, maxDimension = maxDim)
+                    if (bmp != null && !bmp.isRecycled) {
+                        synchronized(savedCoverBitmapCache) {
+                            savedCoverBitmapCache[matchedCover.id] = bmp
+                        }
+                        cacheHdArtForTrack(cleanTitle, artist, bmp)
+                    }
+                }
+            }
+            val thumbPath = matchedCanvas?.thumbnailPath
+            if (matchedCanvas != null && !thumbPath.isNullOrBlank()) {
+                val cached = synchronized(savedCanvasThumbCache) { savedCanvasThumbCache[matchedCanvas.id] }
+                if (cached == null || cached.isRecycled) {
+                    val bmp = SavedMediaLibrary.loadBitmap(thumbPath, maxDimension = maxDim)
+                    if (bmp != null && !bmp.isRecycled) {
+                        synchronized(savedCanvasThumbCache) {
+                            savedCanvasThumbCache[matchedCanvas.id] = bmp
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fun triggerAutoCanvasForCurrentTrackIfNeeded(customQuery: String? = null) {
@@ -954,7 +1251,11 @@ object MediaNotificationRepository {
         candidate: OnlineCoverCandidate,
         markAsManual: Boolean
     ) {
-        val hdBitmap = CoverArtSearchService.fetchFullResolutionArt(candidate) ?: return
+        val maxDim = maxOf(DevicePerformanceTier.recommendedCoverMaxDim(appContext), 1200)
+        val hdBitmap = CoverArtSearchService.fetchFullResolutionArt(
+            candidate = candidate,
+            maxDimension = maxDim
+        ) ?: return
         val current = _currentTrack.value
         if (markAsManual) {
             userManuallySelectedCoverTrackKey = trackKey(current)

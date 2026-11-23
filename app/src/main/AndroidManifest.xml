@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -92,6 +93,18 @@
             <meta-data
                 android:name="android.service.wallpaper"
                 android:resource="@xml/echosnap_wallpaper" />
+        </service>
+
+        <!-- Quick Settings Tile for 1-tap Live Wallpaper toggle -->
+        <service
+            android:name=".service.EchoSnapTileService"
+            android:icon="@drawable/ic_music_note"
+            android:label="@string/tile_live_wallpaper_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <!-- FileProvider for sharing generated music story cards -->

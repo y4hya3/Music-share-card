@@ -11,6 +11,7 @@ import com.example.model.GradientStyle
 import com.example.model.LiveWallpaperArtworkFillMode
 import com.example.model.LiveWallpaperCornerStyle
 import com.example.model.LiveWallpaperMode
+import com.example.model.LiveWallpaperTransitionStyle
 import com.example.model.LogoColorMode
 import com.example.model.LyricsCardBackgroundMode
 
@@ -56,12 +57,19 @@ object CardStylePreferences {
     private const val KEY_LIVE_WALLPAPER_MODE = "live_wallpaper_mode"
     private const val KEY_LIVE_WALLPAPER_ART_FILL_MODE = "live_wallpaper_art_fill_mode"
     private const val KEY_LIVE_WALLPAPER_CORNER_STYLE = "live_wallpaper_corner_style"
+    private const val KEY_LIVE_WALLPAPER_ART_TRANSITION = "live_wallpaper_art_transition"
+    private const val KEY_LIVE_WALLPAPER_ART_TRANSITION_MS = "live_wallpaper_art_transition_ms"
     private const val KEY_LIVE_WALLPAPER_BLUR = "live_wallpaper_blur_radius"
     private const val KEY_LIVE_WALLPAPER_EDGE_BLUR = "live_wallpaper_edge_blur_fade"
+    private const val KEY_LIVE_WALLPAPER_DIM_ENABLED = "live_wallpaper_dim_enabled"
+    private const val KEY_LIVE_WALLPAPER_DIM_AMOUNT = "live_wallpaper_dim_amount"
+    private const val KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE = "live_wallpaper_power_save_pause_canvas"
     private const val KEY_LIVE_WALLPAPER_SHOW_CARD = "live_wallpaper_show_card"
     private const val KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED = "live_wallpaper_idle_revert_enabled"
     private const val KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC = "live_wallpaper_idle_delay_sec"
     private const val KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH = "live_wallpaper_idle_photo_path"
+    private const val KEY_IGNORED_MEDIA_PACKAGES = "ignored_media_packages"
+    private const val KEY_BACKUP_AUTO_SYNC = "backup_auto_sync_enabled"
     private const val KEY_SPOTIFY_ACCESS_TOKEN = "spotify_access_token"
     private const val KEY_SPOTIFY_SP_DC_COOKIE = "spotify_sp_dc_cookie"
     private const val KEY_SPOTIFY_REFRESH_TOKEN = "spotify_refresh_token"
@@ -106,6 +114,10 @@ object CardStylePreferences {
             prefs.getString(KEY_LIVE_WALLPAPER_CORNER_STYLE, defaults.liveWallpaperCornerStyle.name),
             defaults.liveWallpaperCornerStyle
         )
+        val liveWallpaperArtTransition = enumValueOrDefault(
+            prefs.getString(KEY_LIVE_WALLPAPER_ART_TRANSITION, defaults.liveWallpaperArtTransition.name),
+            defaults.liveWallpaperArtTransition
+        )
         val shadowColorMode = enumValueOrDefault(
             prefs.getString(KEY_SHADOW_COLOR_MODE, defaults.cardShadowColorMode.name),
             defaults.cardShadowColorMode
@@ -114,6 +126,11 @@ object CardStylePreferences {
         val customColorArgb = prefs.getInt(KEY_CUSTOM_LOGO_COLOR, defaults.customLogoColor.toArgb())
         val customShadowColorArgb = prefs.getInt(KEY_CUSTOM_SHADOW_COLOR, defaults.customShadowColor.toArgb())
         val waveformColorArgb = prefs.getInt(KEY_WAVEFORM_COLOR, defaults.waveformColor.toArgb())
+        val ignoredPkgs = prefs.getStringSet(KEY_IGNORED_MEDIA_PACKAGES, emptySet())
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet()
 
         return CardStyleConfig(
             brandMode = brandMode,
@@ -149,8 +166,19 @@ object CardStylePreferences {
             liveWallpaperMode = liveWallpaperMode,
             liveWallpaperArtworkFillMode = liveWallpaperArtworkFillMode,
             liveWallpaperCornerStyle = liveWallpaperCornerStyle,
+            liveWallpaperArtTransition = liveWallpaperArtTransition,
+            liveWallpaperArtTransitionDurationMs = prefs.getInt(
+                KEY_LIVE_WALLPAPER_ART_TRANSITION_MS,
+                defaults.liveWallpaperArtTransitionDurationMs
+            ).coerceIn(160, 800),
             liveWallpaperBlurRadius = prefs.getFloat(KEY_LIVE_WALLPAPER_BLUR, defaults.liveWallpaperBlurRadius).coerceIn(0f, 40f),
             liveWallpaperEdgeBlurFade = prefs.getFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, defaults.liveWallpaperEdgeBlurFade).coerceIn(0f, 1f),
+            liveWallpaperDimEnabled = prefs.getBoolean(KEY_LIVE_WALLPAPER_DIM_ENABLED, defaults.liveWallpaperDimEnabled),
+            liveWallpaperDimAmount = prefs.getFloat(KEY_LIVE_WALLPAPER_DIM_AMOUNT, defaults.liveWallpaperDimAmount).coerceIn(0f, 0.70f),
+            liveWallpaperPowerSavePauseCanvas = prefs.getBoolean(
+                KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE,
+                defaults.liveWallpaperPowerSavePauseCanvas
+            ),
             liveWallpaperShowCard = prefs.getBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, defaults.liveWallpaperShowCard),
             liveWallpaperIdleRevertEnabled = prefs.getBoolean(
                 KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED,
@@ -164,6 +192,8 @@ object CardStylePreferences {
                 KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH,
                 defaults.liveWallpaperIdlePhotoPath
             ) ?: "",
+            ignoredMediaPackages = ignoredPkgs,
+            backupAutoSyncEnabled = prefs.getBoolean(KEY_BACKUP_AUTO_SYNC, defaults.backupAutoSyncEnabled),
             spotifyAccessToken = prefs.getString(KEY_SPOTIFY_ACCESS_TOKEN, defaults.spotifyAccessToken) ?: "",
             spotifySpDcCookie = prefs.getString(KEY_SPOTIFY_SP_DC_COOKIE, defaults.spotifySpDcCookie) ?: "",
             spotifyRefreshToken = prefs.getString(KEY_SPOTIFY_REFRESH_TOKEN, defaults.spotifyRefreshToken) ?: "",
@@ -219,12 +249,19 @@ object CardStylePreferences {
             .putString(KEY_LIVE_WALLPAPER_MODE, config.liveWallpaperMode.name)
             .putString(KEY_LIVE_WALLPAPER_ART_FILL_MODE, config.liveWallpaperArtworkFillMode.name)
             .putString(KEY_LIVE_WALLPAPER_CORNER_STYLE, config.liveWallpaperCornerStyle.name)
+            .putString(KEY_LIVE_WALLPAPER_ART_TRANSITION, config.liveWallpaperArtTransition.name)
+            .putInt(KEY_LIVE_WALLPAPER_ART_TRANSITION_MS, config.liveWallpaperArtTransitionDurationMs.coerceIn(160, 800))
             .putFloat(KEY_LIVE_WALLPAPER_BLUR, config.liveWallpaperBlurRadius.coerceIn(0f, 40f))
             .putFloat(KEY_LIVE_WALLPAPER_EDGE_BLUR, config.liveWallpaperEdgeBlurFade.coerceIn(0f, 1f))
+            .putBoolean(KEY_LIVE_WALLPAPER_DIM_ENABLED, config.liveWallpaperDimEnabled)
+            .putFloat(KEY_LIVE_WALLPAPER_DIM_AMOUNT, config.liveWallpaperDimAmount.coerceIn(0f, 0.70f))
+            .putBoolean(KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE, config.liveWallpaperPowerSavePauseCanvas)
             .putBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, config.liveWallpaperShowCard)
             .putBoolean(KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED, config.liveWallpaperIdleRevertEnabled)
             .putInt(KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC, config.liveWallpaperIdleDelaySec.coerceIn(1, 86_400))
             .putString(KEY_LIVE_WALLPAPER_IDLE_PHOTO_PATH, config.liveWallpaperIdlePhotoPath)
+            .putStringSet(KEY_IGNORED_MEDIA_PACKAGES, HashSet(config.ignoredMediaPackages))
+            .putBoolean(KEY_BACKUP_AUTO_SYNC, config.backupAutoSyncEnabled)
             .putString(KEY_SPOTIFY_ACCESS_TOKEN, config.spotifyAccessToken)
             .putString(KEY_SPOTIFY_SP_DC_COOKIE, config.spotifySpDcCookie)
             .putString(KEY_SPOTIFY_REFRESH_TOKEN, config.spotifyRefreshToken)

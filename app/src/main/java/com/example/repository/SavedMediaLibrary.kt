@@ -11,6 +11,7 @@ import com.example.service.CoverArtSearchService
 import com.example.service.OnlineCoverCandidate
 import com.example.service.SpotifyAuthManager
 import com.example.util.BitmapBlurUtils
+import com.example.util.EchoSnapBackupManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -202,6 +203,7 @@ object SavedMediaLibrary {
         val next = listOf(item) + readCanvasIndex(ctx).filter { File(it.localVideoPath).exists() }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
         item
     }
 
@@ -261,6 +263,7 @@ object SavedMediaLibrary {
         val next = listOf(item) + readCanvasIndex(ctx).filter { File(it.localVideoPath).exists() }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
         item
     }
 
@@ -271,6 +274,7 @@ object SavedMediaLibrary {
         val next = readCanvasIndex(ctx).map { if (it.id == id) it.copy(name = clean) else it }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     fun updateCanvasMetadata(
@@ -300,6 +304,7 @@ object SavedMediaLibrary {
         }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     /**
@@ -438,6 +443,7 @@ object SavedMediaLibrary {
         val next = current.filterNot { it.id == id }
         writeCanvasIndex(ctx, next)
         _savedCanvases.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     suspend fun saveCoverFromCandidate(
@@ -496,6 +502,7 @@ object SavedMediaLibrary {
         val next = listOf(item) + readCoverIndex(ctx).filter { File(it.localImagePath).exists() }
         writeCoverIndex(ctx, next)
         _savedCovers.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
         item
     }
 
@@ -521,6 +528,7 @@ object SavedMediaLibrary {
         val next = readCoverIndex(ctx).map { if (it.id == id) it.copy(name = clean) else it }
         writeCoverIndex(ctx, next)
         _savedCovers.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     fun updateCoverMetadata(
@@ -550,6 +558,7 @@ object SavedMediaLibrary {
         }
         writeCoverIndex(ctx, next)
         _savedCovers.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     fun deleteCover(context: Context, id: String) {
@@ -561,6 +570,7 @@ object SavedMediaLibrary {
         val next = current.filterNot { it.id == id }
         writeCoverIndex(ctx, next)
         _savedCovers.value = next
+        EchoSnapBackupManager.scheduleAutoBackupIfEnabled(ctx)
     }
 
     fun loadBitmap(path: String?, maxDimension: Int = 1440): Bitmap? {

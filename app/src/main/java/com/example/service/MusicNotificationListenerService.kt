@@ -8,12 +8,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.media.MediaMetadata
+import android.media.Rating
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -76,6 +78,9 @@ class MusicNotificationListenerService : NotificationListenerService() {
         super.onNotificationPosted(sbn)
         if (sbn == null) return
         if (isMediaNotification(sbn)) {
+            val label = resolveAppLabel(this, sbn.packageName)
+            MediaNotificationRepository.recordDetectedMediaApp(sbn.packageName, label)
+            if (shouldIgnoreMediaPackage(sbn.packageName)) return
             processNotification(this, sbn)
         }
     }
@@ -106,10 +111,16 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val registeredCallbacks = ConcurrentHashMap<MediaSession.Token, Pair<MediaController, MediaController.Callback>>()
         private val appLabelCache = ConcurrentHashMap<String, String>()
+        private val uriArtMemoryCache = android.util.LruCache<String, Bitmap>(12)
         private var sessionsListenerRegistered = false
         private var sessionManagerRef: MediaSessionManager? = null
+        private var localUriLoadJob: kotlinx.coroutines.Job? = null
+        private var remoteUriLoadJob: kotlinx.coroutines.Job? = null
+        private var queuePrewarmJob: kotlinx.coroutines.Job? = null
         @Volatile
         private var lastUriLookupTrackKey: String? = null
+        @Volatile
+        private var lastQueuePrewarmSignature: String? = null
 
         private val activeSessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
             val appCtx = activeInstance?.applicationContext ?: cachedAppContext ?: return@OnActiveSessionsChangedListener
@@ -120,6 +131,14 @@ class MusicNotificationListenerService : NotificationListenerService() {
         }
 
         fun hasActiveListenerBinding(): Boolean = activeInstance != null
+
+        fun shouldIgnoreMediaPackage(
+            packageName: String?,
+            ignoredPackages: Set<String> = MediaNotificationRepository.styleConfig.value.ignoredMediaPackages
+        ): Boolean {
+            val pkg = packageName?.trim().orEmpty()
+            return pkg.isNotEmpty() && pkg in ignoredPackages
+        }
 
         fun isNotificationAccessGranted(context: Context): Boolean {
             val packageName = context.packageName
@@ -179,6 +198,108 @@ class MusicNotificationListenerService : NotificationListenerService() {
             return foundTrack
         }
 
+        private fun resolveTargetMediaController(context: Context): MediaController? {
+            val active = MediaNotificationRepository.currentTrack.value
+            val targetPkg = active.packageName.takeIf { !active.isSample && it.isNotBlank() }
+
+            val sessionControllers = if (isNotificationAccessGranted(context)) {
+                try {
+                    val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                    val component = ComponentName(context, MusicNotificationListenerService::class.java)
+                    manager?.getActiveSessions(component).orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+
+            val candidates = (sessionControllers + registeredCallbacks.values.map { it.first })
+                .distinctBy { it.sessionToken }
+                .filterNot { shouldIgnoreMediaPackage(it.packageName) }
+            if (candidates.isEmpty()) return null
+
+            if (targetPkg != null) {
+                candidates.firstOrNull {
+                    it.packageName == targetPkg && it.playbackState?.state == PlaybackState.STATE_PLAYING
+                }?.let { return it }
+                candidates.firstOrNull { it.packageName == targetPkg }?.let { return it }
+            }
+            return candidates.maxByOrNull { controller ->
+                when (controller.playbackState?.state) {
+                    PlaybackState.STATE_PLAYING -> 3
+                    PlaybackState.STATE_BUFFERING -> 2
+                    PlaybackState.STATE_PAUSED -> 1
+                    else -> 0
+                }
+            }
+        }
+
+        fun togglePlayPause(context: Context): Boolean {
+            val controller = resolveTargetMediaController(context) ?: return false
+            return try {
+                val state = controller.playbackState?.state
+                if (state == PlaybackState.STATE_PLAYING || state == PlaybackState.STATE_BUFFERING) {
+                    controller.transportControls.pause()
+                } else {
+                    controller.transportControls.play()
+                }
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to toggle play/pause", e)
+                false
+            }
+        }
+
+        fun skipToNext(context: Context): Boolean {
+            val controller = resolveTargetMediaController(context) ?: return false
+            return try {
+                controller.transportControls.skipToNext()
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to skip to next", e)
+                false
+            }
+        }
+
+        fun skipToPrevious(context: Context): Boolean {
+            val controller = resolveTargetMediaController(context) ?: return false
+            return try {
+                controller.transportControls.skipToPrevious()
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to skip to previous", e)
+                false
+            }
+        }
+
+        fun seekTo(context: Context, positionMs: Long): Boolean {
+            val controller = resolveTargetMediaController(context) ?: return false
+            return try {
+                controller.transportControls.seekTo(positionMs.coerceAtLeast(0L))
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to seek media", e)
+                false
+            }
+        }
+
+        fun sendHeartRatingIfSupported(context: Context, favorited: Boolean): Boolean {
+            val controller = resolveTargetMediaController(context) ?: return false
+            return try {
+                val rating = when (controller.ratingType) {
+                    Rating.RATING_HEART -> Rating.newHeartRating(favorited)
+                    Rating.RATING_THUMB_UP_DOWN -> Rating.newThumbRating(favorited)
+                    Rating.RATING_5_STARS -> Rating.newStarRating(Rating.RATING_5_STARS, if (favorited) 5f else 0f)
+                    else -> null
+                } ?: return false
+                controller.transportControls.setRating(rating)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         private fun attachSessionListener(context: Context) {
             cachedAppContext = context.applicationContext
             if (sessionsListenerRegistered || !isNotificationAccessGranted(context)) return
@@ -232,8 +353,32 @@ class MusicNotificationListenerService : NotificationListenerService() {
                         extractFromController(appCtx, controller, notificationBitmapFallback = null)
                     }
 
+                    override fun onQueueChanged(queue: MutableList<MediaSession.QueueItem>?) {
+                        if (!shouldIgnoreMediaPackage(controller.packageName)) {
+                            prewarmUpcomingQueueArt(appCtx, controller, queue)
+                        }
+                    }
+
                     override fun onPlaybackStateChanged(state: PlaybackState?) {
                         val st = state?.state ?: return
+                        val duration = controller.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.coerceAtLeast(0L)
+                            ?: MediaNotificationRepository.playbackProgress.value.durationMs
+                        val pos = (state.position).coerceAtLeast(0L)
+                        val spd = state.playbackSpeed.let { if (it <= 0f) 1f else it }
+                        val upd = state.lastPositionUpdateTime.let { if (it > 0L) it else SystemClock.elapsedRealtime() }
+                        val playing = st == PlaybackState.STATE_PLAYING
+
+                        val current = MediaNotificationRepository.currentTrack.value
+                        if (!current.isSample && current.packageName == controller.packageName) {
+                            MediaNotificationRepository.updatePlaybackProgress(
+                                positionMs = pos,
+                                durationMs = duration,
+                                playbackSpeed = spd,
+                                lastUpdateElapsedMs = upd,
+                                isPlaying = playing
+                            )
+                        }
+
                         if (st == PlaybackState.STATE_PLAYING) {
                             extractFromController(appCtx, controller, notificationBitmapFallback = null)
                         } else if (st == PlaybackState.STATE_PAUSED ||
@@ -241,7 +386,6 @@ class MusicNotificationListenerService : NotificationListenerService() {
                             st == PlaybackState.STATE_NONE ||
                             st == PlaybackState.STATE_ERROR
                         ) {
-                            val current = MediaNotificationRepository.currentTrack.value
                             if (!current.isSample && current.packageName == controller.packageName) {
                                 extractFromController(appCtx, controller, notificationBitmapFallback = null)
                                 MediaNotificationRepository.markCurrentTrackStopped()
@@ -275,14 +419,21 @@ class MusicNotificationListenerService : NotificationListenerService() {
         private fun processControllersList(context: Context, controllers: List<MediaController>): Boolean {
             if (controllers.isEmpty()) return false
 
-            // Prefer actively playing session first
-            val sorted = controllers.sortedByDescending { controller ->
-                when (controller.playbackState?.state) {
-                    PlaybackState.STATE_PLAYING -> 2
-                    PlaybackState.STATE_BUFFERING -> 1
-                    else -> 0
-                }
+            controllers.forEach { ctrl ->
+                val label = resolveAppLabel(context, ctrl.packageName)
+                MediaNotificationRepository.recordDetectedMediaApp(ctrl.packageName, label)
             }
+
+            // Prefer actively playing non-ignored session first
+            val sorted = controllers
+                .filterNot { shouldIgnoreMediaPackage(it.packageName) }
+                .sortedByDescending { controller ->
+                    when (controller.playbackState?.state) {
+                        PlaybackState.STATE_PLAYING -> 2
+                        PlaybackState.STATE_BUFFERING -> 1
+                        else -> 0
+                    }
+                }
 
             for (controller in sorted) {
                 val handled = extractFromController(context, controller, notificationBitmapFallback = null)
@@ -296,6 +447,9 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 val activeNotifs = service.activeNotifications ?: return false
                 for (sbn in activeNotifs) {
                     if (isMediaNotification(sbn)) {
+                        val label = resolveAppLabel(service, sbn.packageName)
+                        MediaNotificationRepository.recordDetectedMediaApp(sbn.packageName, label)
+                        if (shouldIgnoreMediaPackage(sbn.packageName)) continue
                         if (processNotification(service, sbn)) {
                             return true
                         }
@@ -309,6 +463,7 @@ class MusicNotificationListenerService : NotificationListenerService() {
         }
 
         private fun processNotification(context: Context, sbn: StatusBarNotification): Boolean {
+            if (shouldIgnoreMediaPackage(sbn.packageName)) return false
             val notification = sbn.notification ?: return false
             val extras = notification.extras ?: return false
             val notifFallbackArt = extractNotificationArtwork(context, notification)
@@ -383,17 +538,30 @@ class MusicNotificationListenerService : NotificationListenerService() {
             controller: MediaController,
             notificationBitmapFallback: Bitmap?
         ): Boolean {
+            val appName = resolveAppLabel(context, controller.packageName)
+            MediaNotificationRepository.recordDetectedMediaApp(controller.packageName, appName)
+            if (shouldIgnoreMediaPackage(controller.packageName)) return false
+
             val metadata = controller.metadata ?: return false
             val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
             if (title.isNullOrBlank()) return false
+
+            prewarmUpcomingQueueArt(context, controller)
 
             val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_AUTHOR)
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_WRITER)
             val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
-            val isPlaying = controller.playbackState?.state == PlaybackState.STATE_PLAYING
+            val playbackState = controller.playbackState
+            val isPlaying = playbackState?.state == PlaybackState.STATE_PLAYING
+            val durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).coerceAtLeast(0L)
+            val positionMs = (playbackState?.position ?: 0L).coerceAtLeast(0L)
+            val playbackSpeed = (playbackState?.playbackSpeed ?: 1f).let { if (it <= 0f) 1f else it }
+            val updateElapsedMs = (playbackState?.lastPositionUpdateTime ?: 0L).let {
+                if (it > 0L) it else SystemClock.elapsedRealtime()
+            }
 
             val candidateBitmaps = mutableListOf<Pair<Bitmap, Int>>()
             metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)?.let {
@@ -416,7 +584,6 @@ class MusicNotificationListenerService : NotificationListenerService() {
             }
 
             val bestRawArt = pickBestScoredCoverBitmap(candidateBitmaps)
-            val appName = resolveAppLabel(context, controller.packageName)
             val resolvedArtist = artist?.takeIf { it.isNotBlank() } ?: appName
             val rawMediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
                 ?: metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
@@ -443,6 +610,13 @@ class MusicNotificationListenerService : NotificationListenerService() {
             val lookupKey = "${controller.packageName}|$title|$resolvedArtist"
             val canShortCircuitLowResUriLookup = (repoIsSquare && repoMaxDim >= 900) || lastUriLookupTrackKey == lookupKey
             if (isSameRepoTrack && repoPixels > 0L && (repoPixels >= rawPixels || (repoIsSquare && !rawIsSquare)) && canShortCircuitLowResUriLookup) {
+                MediaNotificationRepository.updatePlaybackProgress(
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    playbackSpeed = playbackSpeed,
+                    lastUpdateElapsedMs = updateElapsedMs,
+                    isPlaying = isPlaying
+                )
                 if (repoTrack.isPlaying == isPlaying) {
                     return true
                 }
@@ -470,7 +644,16 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 albumArt = safeArt,
                 isPlaying = isPlaying,
                 isSample = false,
+                durationMs = durationMs,
+                positionMs = positionMs,
                 spotifyTrackId = spotifyTrackId
+            )
+            MediaNotificationRepository.updatePlaybackProgress(
+                positionMs = positionMs,
+                durationMs = durationMs,
+                playbackSpeed = playbackSpeed,
+                lastUpdateElapsedMs = updateElapsedMs,
+                isPlaying = isPlaying
             )
 
             val bestMaxDim = maxOf(safeArt?.width ?: 0, safeArt?.height ?: 0)
@@ -492,12 +675,23 @@ class MusicNotificationListenerService : NotificationListenerService() {
 
             val needsArtUpgrade = safeArt == null || bestMaxDim < 900 || !bestIsSquare
             if (needsArtUpgrade && localUris.isNotEmpty() && !isSameRepoTrack) {
+                val cachedLocalBmp = localUris.firstNotNullOfOrNull { uriStr ->
+                    synchronized(uriArtMemoryCache) { uriArtMemoryCache.get(uriStr) }?.takeIf { !it.isRecycled }
+                }
+                if (cachedLocalBmp != null) {
+                    localUriLoadJob?.cancel()
+                    lastUriLookupTrackKey = lookupKey
+                    MediaNotificationRepository.updateTrack(trackInfo.copy(albumArt = cachedLocalBmp))
+                    return true
+                }
+
                 // Fast local content:// / file:// cover decode (~3-8ms off-main) BEFORE publishing,
                 // preventing any choppy/pixelated square flash on next-song transitions.
                 lastUriLookupTrackKey = lookupKey
                 val appCtxCopy = context.applicationContext
                 val pkgCopy = controller.packageName
-                serviceScope.launch(Dispatchers.IO) {
+                localUriLoadJob?.cancel()
+                localUriLoadJob = serviceScope.launch(Dispatchers.IO) {
                     var bestLocalBmp: Bitmap? = null
                     var bestLocalPixels = 0L
                     for (localUri in localUris) {
@@ -509,15 +703,11 @@ class MusicNotificationListenerService : NotificationListenerService() {
                                 t
                             } else null
                             if (trimmed != null && !trimmed.isRecycled) {
+                                synchronized(uriArtMemoryCache) { uriArtMemoryCache.put(localUri, trimmed) }
                                 val px = trimmed.width.toLong() * trimmed.height.toLong()
                                 if (px > bestLocalPixels) {
-                                    if (bestLocalBmp != null && bestLocalBmp !== trimmed && !bestLocalBmp.isRecycled) {
-                                        bestLocalBmp.recycle()
-                                    }
                                     bestLocalBmp = trimmed
                                     bestLocalPixels = px
-                                } else if (trimmed !== bestLocalBmp) {
-                                    trimmed.recycle()
                                 }
                                 if (maxOf(trimmed.width, trimmed.height) >= 900 && isNearSquareBitmap(trimmed)) {
                                     break
@@ -529,9 +719,6 @@ class MusicNotificationListenerService : NotificationListenerService() {
                     }
 
                     val chosenArt = bestLocalBmp ?: safeArt
-                    if (bestLocalBmp != null && safeArt != null && safeArt !== bestLocalBmp && !safeArt.isRecycled) {
-                        safeArt.recycle()
-                    }
                     withContext(Dispatchers.Main) {
                         MediaNotificationRepository.updateTrack(
                             trackInfo.copy(albumArt = chosenArt)
@@ -580,6 +767,91 @@ class MusicNotificationListenerService : NotificationListenerService() {
             return true
         }
 
+        private fun prewarmUpcomingQueueArt(
+            context: Context,
+            controller: MediaController,
+            queueOverride: List<MediaSession.QueueItem>? = null
+        ) {
+            val queue = try {
+                queueOverride ?: controller.queue
+            } catch (_: Exception) {
+                null
+            } ?: return
+            if (queue.isEmpty()) return
+
+            val activeQueueId = controller.playbackState?.activeQueueItemId ?: MediaSession.QueueItem.UNKNOWN_ID.toLong()
+            val currentTitle = controller.metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
+            val upcoming = queue.asSequence()
+                .dropWhile { item ->
+                    (activeQueueId != MediaSession.QueueItem.UNKNOWN_ID.toLong() && item.queueId != activeQueueId)
+                }
+                .filter { item ->
+                    val qTitle = item.description?.title?.toString()?.trim().orEmpty()
+                    (activeQueueId == MediaSession.QueueItem.UNKNOWN_ID.toLong() || item.queueId != activeQueueId) &&
+                        (currentTitle.isBlank() || !qTitle.equals(currentTitle, ignoreCase = true))
+                }
+                .ifEmpty {
+                    queue.asSequence().filter { item ->
+                        val qTitle = item.description?.title?.toString()?.trim().orEmpty()
+                        qTitle.isNotEmpty() && !qTitle.equals(currentTitle, ignoreCase = true)
+                    }
+                }
+                .take(2)
+                .toList()
+            if (upcoming.isEmpty()) return
+
+            val signature = upcoming.joinToString("|") {
+                "${it.queueId}:${it.description?.title}:${it.description?.iconUri}"
+            }
+            if (signature == lastQueuePrewarmSignature) return
+            lastQueuePrewarmSignature = signature
+
+            val appCtx = context.applicationContext
+            val prepMinDim = if (com.example.util.DevicePerformanceTier.get(appCtx).isLowRam) 768 else 1024
+            val prepMaxDim = if (com.example.util.DevicePerformanceTier.get(appCtx).isLowRam) 1280 else 1600
+
+            queuePrewarmJob?.cancel()
+            queuePrewarmJob = serviceScope.launch(Dispatchers.IO) {
+                for (item in upcoming) {
+                    val desc = item.description ?: continue
+                    val nextTitle = desc.title?.toString()?.trim().orEmpty()
+                    val nextSubtitle = desc.subtitle?.toString()?.trim().orEmpty()
+                    if (nextTitle.isNotEmpty()) {
+                        MediaNotificationRepository.prewarmQueueTrackArtwork(
+                            title = nextTitle,
+                            artist = nextSubtitle
+                        )
+                    }
+
+                    val uriStr = desc.iconUri?.toString()?.trim().orEmpty()
+                    if (uriStr.isNotEmpty()) {
+                        val existing = synchronized(uriArtMemoryCache) { uriArtMemoryCache.get(uriStr) }
+                            ?.takeIf { !it.isRecycled }
+                        val bmp = existing ?: runCatching {
+                            val raw = fetchBitmapFromUriString(appCtx, uriStr)
+                            if (raw != null && !raw.isRecycled) {
+                                val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(raw)
+                                if (trimmed !== raw && !raw.isRecycled) raw.recycle()
+                                if (!trimmed.isRecycled) {
+                                    synchronized(uriArtMemoryCache) { uriArtMemoryCache.put(uriStr, trimmed) }
+                                }
+                                trimmed
+                            } else {
+                                null
+                            }
+                        }.getOrNull()
+                        if (bmp != null && !bmp.isRecycled) {
+                            BitmapBlurUtils.prepareCrispArtwork(bmp, minTargetDim = prepMinDim, maxDimension = prepMaxDim)
+                        }
+                    } else {
+                        desc.iconBitmap?.takeIf { !it.isRecycled }?.let { rawBmp ->
+                            BitmapBlurUtils.prepareCrispArtwork(rawBmp, minTargetDim = prepMinDim, maxDimension = prepMaxDim)
+                        }
+                    }
+                }
+            }
+        }
+
         private fun findNotificationArtworkForPackage(context: Context, packageName: String): Bitmap? {
             val service = activeInstance ?: return null
             return try {
@@ -603,32 +875,35 @@ class MusicNotificationListenerService : NotificationListenerService() {
             title: String,
             artist: String
         ) {
-            serviceScope.launch(Dispatchers.IO) {
+            remoteUriLoadJob?.cancel()
+            remoteUriLoadJob = serviceScope.launch(Dispatchers.IO) {
                 var bestUriBitmap: Bitmap? = null
                 var bestPixels = 0L
 
                 for (uriString in uriStrings) {
                     try {
-                        val rawDecoded = fetchBitmapFromUriString(context, uriString)
-                        val decoded = if (rawDecoded != null) {
-                            val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(rawDecoded)
-                            if (trimmed !== rawDecoded && !rawDecoded.isRecycled) {
-                                rawDecoded.recycle()
+                        val cached = synchronized(uriArtMemoryCache) { uriArtMemoryCache.get(uriString) }
+                            ?.takeIf { !it.isRecycled }
+                        val decoded = cached ?: run {
+                            val rawDecoded = fetchBitmapFromUriString(context, uriString)
+                            if (rawDecoded != null) {
+                                val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(rawDecoded)
+                                if (trimmed !== rawDecoded && !rawDecoded.isRecycled) {
+                                    rawDecoded.recycle()
+                                }
+                                if (!trimmed.isRecycled) {
+                                    synchronized(uriArtMemoryCache) { uriArtMemoryCache.put(uriString, trimmed) }
+                                }
+                                trimmed
+                            } else {
+                                null
                             }
-                            trimmed
-                        } else {
-                            null
                         }
                         if (decoded != null && !decoded.isRecycled) {
                             val pixels = decoded.width.toLong() * decoded.height.toLong()
                             if (pixels > bestPixels) {
-                                if (bestUriBitmap != null && bestUriBitmap !== decoded && !bestUriBitmap.isRecycled) {
-                                    bestUriBitmap.recycle()
-                                }
                                 bestUriBitmap = decoded
                                 bestPixels = pixels
-                            } else if (decoded !== bestUriBitmap) {
-                                decoded.recycle()
                             }
                             if (maxOf(decoded.width, decoded.height) >= 900) {
                                 break
@@ -640,12 +915,14 @@ class MusicNotificationListenerService : NotificationListenerService() {
                 }
 
                 if (bestUriBitmap != null) {
-                    MediaNotificationRepository.updateTrackArtworkIfMatching(
-                        packageName = packageName,
-                        title = title,
-                        artist = artist,
-                        albumArt = bestUriBitmap
-                    )
+                    withContext(Dispatchers.Main) {
+                        MediaNotificationRepository.updateTrackArtworkIfMatching(
+                            packageName = packageName,
+                            title = title,
+                            artist = artist,
+                            albumArt = bestUriBitmap
+                        )
+                    }
                 }
             }
         }

@@ -2087,27 +2087,65 @@ class ExampleRobolectricTest {
 
   @Test
   @GraphicsMode(GraphicsMode.Mode.NATIVE)
-  fun `upscaleLowResArtworkSmoothly smooths small offline thumbnails without modifying HD covers`() {
+  fun `upscaleLowResArtworkSmoothly and prepareCrispArtwork deliver cached crisp graphics for offline and online covers`() {
     val context = ApplicationProvider.getApplicationContext<Context>()
     val tier = com.example.util.DevicePerformanceTier.get(context)
     assertTrue("Expected cardArtMaxDim >= 960 (got ${tier.cardArtMaxDim})", tier.cardArtMaxDim >= 960)
     assertTrue("Expected bgSourceMaxDim >= 960 (got ${tier.bgSourceMaxDim})", tier.bgSourceMaxDim >= 960)
 
-    val smallOffline = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888)
-    val hdOffline = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
+    val smallOffline = Bitmap.createBitmap(128, 128, Bitmap.Config.ARGB_8888).apply {
+      val c = Canvas(this)
+      c.drawColor(AndroidColor.rgb(20, 30, 60))
+      val p = Paint().apply { color = AndroidColor.rgb(245, 90, 50) }
+      c.drawRect(32f, 32f, 96f, 96f, p)
+    }
+    val hdCover = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888).apply {
+      Canvas(this).drawColor(AndroidColor.rgb(40, 150, 220))
+    }
     try {
       val upscaled = com.example.util.BitmapBlurUtils.upscaleLowResArtworkSmoothly(smallOffline, minTargetDim = 768)
       assertNotNull(upscaled)
       assertEquals(768, upscaled!!.width)
       assertEquals(768, upscaled.height)
       assertFalse("Original source bitmap must stay intact", smallOffline.isRecycled)
-      if (upscaled !== smallOffline) upscaled.recycle()
+      // Verify center square color is rich orange-red and outer border stays deep navy (no washout)
+      val centerR = AndroidColor.red(upscaled.getPixel(384, 384))
+      val borderB = AndroidColor.blue(upscaled.getPixel(24, 24))
+      assertTrue("Expected crisp warm center (r=$centerR)", centerR > 210)
+      assertTrue("Expected crisp navy border (b=$borderB)", borderB > 45)
 
-      val untouched = com.example.util.BitmapBlurUtils.upscaleLowResArtworkSmoothly(hdOffline, minTargetDim = 768)
-      assertSame("HD 1024x1024 bitmap should not be reallocated", hdOffline, untouched)
+      val crispCached = com.example.util.BitmapBlurUtils.prepareCrispArtwork(
+        source = smallOffline,
+        minTargetDim = 1024,
+        maxDimension = 1440
+      )
+      assertNotNull(crispCached)
+      assertEquals(1024, crispCached!!.width)
+      assertEquals(1024, crispCached.height)
+      val readyFromCache = com.example.util.BitmapBlurUtils.getCachedCrispArtworkIfReady(
+        source = smallOffline,
+        minTargetDim = 1024,
+        maxDimension = 1440
+      )
+      assertSame("Expected 0ms cache hit after prepareCrispArtwork", crispCached, readyFromCache)
+
+      val hdPrepared = com.example.util.BitmapBlurUtils.prepareCrispArtwork(
+        source = hdCover,
+        minTargetDim = 1024,
+        maxDimension = 1440
+      )
+      assertNotNull(hdPrepared)
+      assertEquals(1024, hdPrepared!!.width)
+      assertEquals(1024, hdPrepared.height)
+      assertFalse("HD source bitmap must stay intact", hdCover.isRecycled)
+      assertSame(
+        "Expected cached crisp HD cover reuse",
+        hdPrepared,
+        com.example.util.BitmapBlurUtils.getCachedCrispArtworkIfReady(hdCover, minTargetDim = 1024, maxDimension = 1440)
+      )
     } finally {
       if (!smallOffline.isRecycled) smallOffline.recycle()
-      if (!hdOffline.isRecycled) hdOffline.recycle()
+      if (!hdCover.isRecycled) hdCover.recycle()
     }
   }
 
@@ -2247,5 +2285,233 @@ class ExampleRobolectricTest {
       backupParent.deleteRecursively()
     }
   }
-}
 
+  @Test
+  fun `wallpaper transition dimmer power-save ignored apps and auto-sync persist and roundtrip in backup`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val defaults = CardStyleConfig()
+    assertEquals(com.example.model.LiveWallpaperTransitionStyle.CROSSFADE, defaults.liveWallpaperArtTransition)
+    assertEquals(360, defaults.liveWallpaperArtTransitionDurationMs)
+    assertFalse(defaults.liveWallpaperDimEnabled)
+    assertEquals(0.28f, defaults.liveWallpaperDimAmount, 0.001f)
+    assertTrue(defaults.liveWallpaperPowerSavePauseCanvas)
+    assertTrue(defaults.ignoredMediaPackages.isEmpty())
+    assertFalse(defaults.backupAutoSyncEnabled)
+
+    val customized = defaults.copy(
+      liveWallpaperMode = com.example.model.LiveWallpaperMode.ARTWORK_ONLY,
+      liveWallpaperArtTransition = com.example.model.LiveWallpaperTransitionStyle.ZOOM_FADE,
+      liveWallpaperArtTransitionDurationMs = 999, // clamps to 800
+      liveWallpaperDimEnabled = true,
+      liveWallpaperDimAmount = 0.95f, // clamps to 0.70
+      liveWallpaperPowerSavePauseCanvas = false,
+      ignoredMediaPackages = setOf("com.google.android.youtube", "com.zhiliaoapp.musically"),
+      backupAutoSyncEnabled = true
+    )
+
+    CardStylePreferences.save(context, customized)
+    val reloaded = CardStylePreferences.load(context)
+    assertEquals(com.example.model.LiveWallpaperTransitionStyle.ZOOM_FADE, reloaded.liveWallpaperArtTransition)
+    assertEquals(800, reloaded.liveWallpaperArtTransitionDurationMs)
+    assertTrue(reloaded.liveWallpaperDimEnabled)
+    assertEquals(0.70f, reloaded.liveWallpaperDimAmount, 0.001f)
+    assertFalse(reloaded.liveWallpaperPowerSavePauseCanvas)
+    assertEquals(setOf("com.google.android.youtube", "com.zhiliaoapp.musically"), reloaded.ignoredMediaPackages)
+    assertTrue(reloaded.backupAutoSyncEnabled)
+
+    // Verify EchoSnapBackupManager style JSON roundtrips all 7 fields
+    val backupParent = File(context.cacheDir, "roundtrip_new_fields_${System.currentTimeMillis()}").apply { mkdirs() }
+    try {
+      com.example.util.EchoSnapBackupManager.exportBackupToDirectory(
+        parentOrEchoSnapDir = backupParent,
+        styleConfig = reloaded
+      ).getOrThrow()
+      val scanned = com.example.util.EchoSnapBackupManager.scanBackupFromDirectory(backupParent).getOrThrow()
+      val restored = scanned.includedStyle?.applyTo(CardStyleConfig())
+      assertNotNull(restored)
+      assertEquals(com.example.model.LiveWallpaperTransitionStyle.ZOOM_FADE, restored!!.liveWallpaperArtTransition)
+      assertEquals(800, restored.liveWallpaperArtTransitionDurationMs)
+      assertTrue(restored.liveWallpaperDimEnabled)
+      assertEquals(0.70f, restored.liveWallpaperDimAmount, 0.001f)
+      assertFalse(restored.liveWallpaperPowerSavePauseCanvas)
+      assertEquals(setOf("com.google.android.youtube", "com.zhiliaoapp.musically"), restored.ignoredMediaPackages)
+      assertTrue(restored.backupAutoSyncEnabled)
+    } finally {
+      backupParent.deleteRecursively()
+    }
+  }
+
+  @Test
+  fun `ignored media filter power-save canvas gating export notifications and tile service work properly`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+
+    // 1. Package ignore filtering
+    val blocked = setOf("com.google.android.youtube", "com.instagram.android")
+    assertTrue(
+      com.example.service.MusicNotificationListenerService.shouldIgnoreMediaPackage(
+        "com.google.android.youtube",
+        blocked
+      )
+    )
+    assertFalse(
+      com.example.service.MusicNotificationListenerService.shouldIgnoreMediaPackage(
+        "com.spotify.music",
+        blocked
+      )
+    )
+    assertFalse(
+      com.example.service.MusicNotificationListenerService.shouldIgnoreMediaPackage(
+        null,
+        blocked
+      )
+    )
+
+    // 2. Power-save gating respects PowerManager.isPowerSaveMode and setting toggle
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+    val shadowPower = org.robolectric.Shadows.shadowOf(powerManager)
+    shadowPower.setIsPowerSaveMode(false)
+    assertFalse(com.example.util.BatteryAndSystemHelper.shouldPauseCanvasForPowerSave(context, true))
+
+    shadowPower.setIsPowerSaveMode(true)
+    assertTrue(com.example.util.BatteryAndSystemHelper.shouldPauseCanvasForPowerSave(context, true))
+    assertFalse(com.example.util.BatteryAndSystemHelper.shouldPauseCanvasForPowerSave(context, false))
+    shadowPower.setIsPowerSaveMode(false)
+
+    // 3. ExportNotificationHelper channel creation & cancellation
+    com.example.util.ExportNotificationHelper.ensureChannel(context)
+    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+    assertNotNull(nm.getNotificationChannel(com.example.util.ExportNotificationHelper.CHANNEL_ID))
+    com.example.util.ExportNotificationHelper.cancelExportNotification(context)
+
+    // 4. Quick Settings TileService manifest registration
+    val tileComponent = android.content.ComponentName(
+      context,
+      com.example.service.EchoSnapTileService::class.java
+    )
+    val tileServiceInfo = context.packageManager.getServiceInfo(tileComponent, 0)
+    assertEquals(android.Manifest.permission.BIND_QUICK_SETTINGS_TILE, tileServiceInfo.permission)
+    assertTrue(tileServiceInfo.exported)
+  }
+
+  @Test
+  fun `app music card progress formatting transport controls favorites and locked card blur export work`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    com.example.repository.MediaNotificationRepository.ensureInitialized(context)
+    com.example.repository.MediaNotificationRepository.selectSampleTrack(
+      com.example.repository.MediaNotificationRepository.getSampleTracks().first()
+    )
+
+    // 1. Duration & remaining time formatting matching Apple Music Control Center style
+    assertEquals("0:29", com.example.util.MediaPlaybackControlHelper.formatDurationMs(29_000L))
+    assertEquals("-1:49", com.example.util.MediaPlaybackControlHelper.formatRemainingMs(29_000L, 138_000L))
+    assertEquals("-0:00", com.example.util.MediaPlaybackControlHelper.formatRemainingMs(138_000L, 138_000L))
+    assertEquals("1:02:03", com.example.util.MediaPlaybackControlHelper.formatDurationMs(3_723_000L))
+
+    // 2. PlaybackProgress advances only while playing
+    val playingProg = com.example.model.MediaPlaybackProgress(
+      positionMs = 10_000L,
+      durationMs = 100_000L,
+      playbackSpeed = 1f,
+      lastUpdateElapsedMs = 1_000L,
+      isPlaying = true
+    )
+    assertEquals(15_000L, playingProg.currentPositionAt(6_000L))
+    val pausedProg = playingProg.copy(isPlaying = false, playbackSpeed = 0f)
+    assertEquals(10_000L, pausedProg.currentPositionAt(6_000L))
+
+    // 3. Favorite persistence, Play/Pause, Next, Previous, Seek on active track
+    val initialTrack = com.example.repository.MediaNotificationRepository.currentTrack.value
+    val wasFav = com.example.repository.MediaNotificationRepository.isTrackFavorited(initialTrack)
+    val nowFav = com.example.repository.MediaNotificationRepository.toggleFavoriteCurrentTrack(context)
+    assertEquals(!wasFav, nowFav)
+    assertEquals(nowFav, com.example.repository.MediaNotificationRepository.isTrackFavorited(initialTrack))
+    // Restore favorite state
+    com.example.repository.MediaNotificationRepository.toggleFavoriteCurrentTrack(context)
+
+    val initialPlaying = com.example.repository.MediaNotificationRepository.currentTrack.value.isPlaying
+    com.example.repository.MediaNotificationRepository.togglePlayPauseCurrentTrack(context)
+    assertEquals(!initialPlaying, com.example.repository.MediaNotificationRepository.currentTrack.value.isPlaying)
+
+    com.example.repository.MediaNotificationRepository.seekCurrentTrackTo(context, 48_000L)
+    assertEquals(48_000L, com.example.repository.MediaNotificationRepository.playbackProgress.value.positionMs)
+
+    val titleBeforeNext = com.example.repository.MediaNotificationRepository.currentTrack.value.title
+    com.example.repository.MediaNotificationRepository.skipNextCurrentTrack(context)
+    val titleAfterNext = com.example.repository.MediaNotificationRepository.currentTrack.value.title
+    assertNotEquals(titleBeforeNext, titleAfterNext)
+    com.example.repository.MediaNotificationRepository.skipPreviousCurrentTrack(context)
+    assertEquals(titleBeforeNext, com.example.repository.MediaNotificationRepository.currentTrack.value.title)
+
+    // 4. App Music Card export keeps card blur locked while applying background blur and photo shadow
+    val art = Bitmap.createBitmap(180, 180, Bitmap.Config.ARGB_8888).apply {
+      val c = Canvas(this)
+      c.drawColor(AndroidColor.rgb(42, 65, 118))
+      val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.rgb(240, 190, 90) }
+      c.drawCircle(90f, 90f, 52f, p)
+    }
+    try {
+      val track = MediaTrackInfo(
+        title = "Cheerios",
+        artist = "Drake",
+        album = "Singles",
+        appName = "Apple Music",
+        packageName = "com.apple.android.music",
+        albumArt = art,
+        isPlaying = true,
+        isSample = false,
+        durationMs = 138_000L,
+        positionMs = 29_000L
+      )
+      val palette = CardPalette()
+      val (overlayBlur0, overlayBlur40, fullStory) = runBlocking {
+        val o0 = CardShareManager.generateTransparentCardOverlayBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = CardStyleConfig(
+            cardLayoutType = CardLayoutType.APP_MUSIC_CARD,
+            cardBlurRadius = 0f,
+            useTransparentBackground = true
+          ),
+          targetWidth = 360,
+          targetHeight = 640
+        )
+        val o40 = CardShareManager.generateTransparentCardOverlayBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = CardStyleConfig(
+            cardLayoutType = CardLayoutType.APP_MUSIC_CARD,
+            cardBlurRadius = 40f,
+            useTransparentBackground = true
+          ),
+          targetWidth = 360,
+          targetHeight = 640
+        )
+        val full = CardShareManager.generateStoryBitmap(
+          context = context,
+          track = track,
+          palette = palette,
+          styleConfig = CardStyleConfig(
+            cardLayoutType = CardLayoutType.APP_MUSIC_CARD,
+            backgroundBlurRadius = 24f,
+            glowIntensity = 0.85f,
+            cardShadowInverse = true,
+            cardShadowColorMode = com.example.model.CardShadowColorMode.RED
+          ),
+          targetWidth = 540,
+          targetHeight = 960
+        )
+        Triple(o0, o40, full)
+      }
+      assertTrue("App Music Card glass blur must remain locked regardless of cardBlurRadius", overlayBlur0.sameAs(overlayBlur40))
+      assertEquals(540, fullStory.width)
+      assertEquals(960, fullStory.height)
+      overlayBlur0.recycle()
+      overlayBlur40.recycle()
+      fullStory.recycle()
+    } finally {
+      if (!art.isRecycled) art.recycle()
+    }
+  }
+}

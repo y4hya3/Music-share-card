@@ -2725,7 +2725,11 @@ fun EditCardBottomSheet(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Card & Square Shadow Depth",
+                            text = when (styleConfig.cardLayoutType) {
+                                CardLayoutType.APP_MUSIC_CARD -> "Photo Shadow Depth"
+                                CardLayoutType.FLOATING_ARTWORK -> "Square Shadow Depth"
+                                else -> "Card & Square Shadow Depth"
+                            },
                             fontSize = 15.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Color.White.copy(alpha = 0.92f)
@@ -2806,7 +2810,7 @@ fun EditCardBottomSheet(
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    text = "Inverts shadow upward & carves soft depth inside card and Floating Square edges",
+                                    text = "Inverts shadow upward & carves soft depth inside photo, card, and Floating Square edges",
                                     color = Color.White.copy(alpha = 0.65f),
                                     fontSize = 11.sp
                                 )

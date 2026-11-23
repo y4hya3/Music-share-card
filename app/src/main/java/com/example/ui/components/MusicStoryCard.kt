@@ -7,6 +7,7 @@ import android.graphics.Path as AndroidPath
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.os.Build
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -89,6 +90,65 @@ import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
+@Composable
+private fun rememberPreparedCrispBitmap(
+    source: Bitmap?,
+    minTargetDim: Int,
+    maxDimension: Int,
+    sharpenStrength: Float = -1f
+): Bitmap? {
+    val initialSync = remember(source, minTargetDim, maxDimension, sharpenStrength) {
+        if (source == null || source.isRecycled) {
+            null
+        } else {
+            BitmapBlurUtils.getCachedCrispArtworkIfReady(
+                source = source,
+                minTargetDim = minTargetDim,
+                maxDimension = maxDimension,
+                sharpenStrength = sharpenStrength
+            ) ?: if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.O || source.config != Bitmap.Config.HARDWARE) &&
+                source.config == Bitmap.Config.ARGB_8888 &&
+                maxOf(source.width, source.height) <= 2048
+            ) {
+                source
+            } else {
+                null
+            }
+        }
+    }
+
+    val prepared by produceState(
+        initialValue = initialSync,
+        key1 = source,
+        key2 = minTargetDim,
+        key3 = maxDimension
+    ) {
+        if (source == null || source.isRecycled) {
+            value = null
+            return@produceState
+        }
+        val cached = BitmapBlurUtils.getCachedCrispArtworkIfReady(
+            source = source,
+            minTargetDim = minTargetDim,
+            maxDimension = maxDimension,
+            sharpenStrength = sharpenStrength
+        )
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+        value = withContext(Dispatchers.Default) {
+            BitmapBlurUtils.prepareCrispArtwork(
+                source = source,
+                minTargetDim = minTargetDim,
+                maxDimension = maxDimension,
+                sharpenStrength = sharpenStrength
+            ) ?: initialSync
+        }
+    }
+    return prepared?.takeIf { !it.isRecycled }
+}
+
 /**
  * Full-screen blurred song cover / animated canvas / transparent preview background.
  * - Transparent mode: displays a clean dark editor checkerboard on-screen; exports as pure ARGB_8888 PNG.
@@ -111,24 +171,22 @@ fun BlurredAlbumBackground(
     val tier = DevicePerformanceTier.rememberDeviceTier()
     val crispFilter = FilterQuality.High
     val isUltraLowBlur = blurRadius <= 1f
+    val isUnblurred = blurRadius <= 0.35f
 
-    val sharpOrGpuBgBitmap = remember(albumArt, tier.bgSourceMaxDim, isUltraLowBlur) {
-        albumArt?.let { src ->
-            val minTarget = if (isUltraLowBlur) 768 else 0
-            val prepared = if (minTarget > 0) {
-                BitmapBlurUtils.upscaleLowResArtworkSmoothly(src, minTargetDim = minTarget)
-            } else {
-                BitmapBlurUtils.toSafeSoftwareBitmap(src, maxDimension = tier.bgSourceMaxDim)
-            }
-            if (prepared != null && maxOf(prepared.width, prepared.height) > tier.bgSourceMaxDim) {
-                val capped = BitmapBlurUtils.toSafeSoftwareBitmap(prepared, maxDimension = tier.bgSourceMaxDim)
-                if (prepared !== src && capped !== prepared && !prepared.isRecycled) prepared.recycle()
-                capped
-            } else {
-                prepared
-            }
-        }
+    val bgMinTarget = if (isUltraLowBlur) {
+        if (tier.isLowRam) 768 else 1024
+    } else {
+        0
     }
+    val bgMaxDim = if (isUnblurred) tier.cardArtMaxDim else tier.bgSourceMaxDim
+    val bgSharpen = if (isUnblurred) -1f else 0f
+
+    val sharpOrGpuBgBitmap = rememberPreparedCrispBitmap(
+        source = albumArt,
+        minTargetDim = bgMinTarget,
+        maxDimension = bgMaxDim,
+        sharpenStrength = bgSharpen
+    )
 
     var isCanvasOpaque by remember(activeCanvasVideoUrl) { mutableStateOf(false) }
 
@@ -147,28 +205,35 @@ fun BlurredAlbumBackground(
                     .background(Color(0xFF0A0A0E))
             )
         } else if (styleConfig.useBlurredAlbumBackground && sharpOrGpuBgBitmap != null) {
+            val bgImageBitmap = remember(sharpOrGpuBgBitmap) {
+                sharpOrGpuBgBitmap.asImageBitmap()
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val bgImageBitmap = remember(sharpOrGpuBgBitmap) {
-                    sharpOrGpuBgBitmap.asImageBitmap()
+                Crossfade(
+                    targetState = bgImageBitmap,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    label = "bg_artwork_crossfade",
+                    modifier = Modifier.fillMaxSize()
+                ) { targetBgImg ->
+                    Image(
+                        bitmap = targetBgImg,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        filterQuality = crispFilter,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(
+                                if (blurRadius > 0.35f) {
+                                    Modifier.blur(
+                                        radius = (blurRadius * 0.92f * stageWidthRatio).dp,
+                                        edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                    )
+                                } else {
+                                    Modifier
+                                }
+                            )
+                    )
                 }
-                Image(
-                    bitmap = bgImageBitmap,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    filterQuality = crispFilter,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .then(
-                            if (blurRadius > 0.35f) {
-                                Modifier.blur(
-                                    radius = (blurRadius * 0.92f * stageWidthRatio).dp,
-                                    edgeTreatment = BlurredEdgeTreatment.Rectangle
-                                )
-                            } else {
-                                Modifier
-                            }
-                        )
-                )
             } else {
                 // Zero-lag shared mip-pyramid crossfade for API 24-30 with zero occluded overdraw
                 val mipPyramid by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
@@ -191,14 +256,20 @@ fun BlurredAlbumBackground(
 
                 val pyramid = mipPyramid
                 if (pyramid == null || blurRadius < 12f) {
-                    val baseImg = remember(sharpOrGpuBgBitmap) { sharpOrGpuBgBitmap.asImageBitmap() }
-                    Image(
-                        bitmap = baseImg,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        filterQuality = crispFilter,
+                    Crossfade(
+                        targetState = bgImageBitmap,
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        label = "legacy_bg_artwork_crossfade",
                         modifier = Modifier.fillMaxSize()
-                    )
+                    ) { targetBgImg ->
+                        Image(
+                            bitmap = targetBgImg,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            filterQuality = crispFilter,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
 
                 if (pyramid != null && blurRadius > 0.2f) {
@@ -333,18 +404,14 @@ fun MusicStoryCard(
     val cardShape = remember(scaledCornerDp) {
         RoundedCornerShape(scaledCornerDp.dp)
     }
-    val crispArtImageBitmap = remember(track.albumArt, tier.cardArtMaxDim) {
-        track.albumArt?.let { src ->
-            val smooth = BitmapBlurUtils.upscaleLowResArtworkSmoothly(src, minTargetDim = 768)
-            val finalBmp = if (smooth != null && maxOf(smooth.width, smooth.height) > tier.cardArtMaxDim) {
-                val capped = BitmapBlurUtils.toSafeSoftwareBitmap(smooth, maxDimension = tier.cardArtMaxDim)
-                if (smooth !== src && capped !== smooth && !smooth.isRecycled) smooth.recycle()
-                capped
-            } else {
-                smooth
-            }
-            finalBmp?.asImageBitmap()
-        }
+    val cardArtMinTarget = if (tier.isLowRam) 768 else 1024
+    val preparedCardBmp = rememberPreparedCrispBitmap(
+        source = track.albumArt,
+        minTargetDim = cardArtMinTarget,
+        maxDimension = tier.cardArtMaxDim
+    )
+    val crispArtImageBitmap = remember(preparedCardBmp) {
+        preparedCardBmp?.asImageBitmap()
     }
 
     when (styleConfig.cardLayoutType) {
@@ -401,6 +468,19 @@ fun MusicStoryCard(
                 styleConfig = styleConfig,
                 cardShape = cardShape,
                 maxCardWidth = scaledMaxCardWidth,
+                scale = scale,
+                glassOpacity = glassOpacity,
+                modifier = modifier
+            )
+        }
+        CardLayoutType.APP_MUSIC_CARD -> {
+            AppMusicPlayerCard(
+                track = track,
+                crispArtImageBitmap = crispArtImageBitmap,
+                palette = palette,
+                styleConfig = styleConfig,
+                maxCardWidth = scaledMaxCardWidth,
+                maxArtSize = scaledMaxArtSize,
                 scale = scale,
                 glassOpacity = glassOpacity,
                 modifier = modifier
@@ -674,27 +754,34 @@ private fun FloatingGlassShareCard(
                     .background(Color(0xFF18181E)),
                 contentAlignment = Alignment.Center
             ) {
-                if (crispArtImageBitmap != null) {
-                    Image(
-                        bitmap = crispArtImageBitmap,
-                        contentDescription = "Album art for ${track.title}",
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.High,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(palette.vibrantColor.copy(alpha = 0.4f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_music_note),
-                            contentDescription = null,
-                            tint = Color.White.copy(alpha = 0.65f),
-                            modifier = Modifier.size(64.dp)
+                Crossfade(
+                    targetState = crispArtImageBitmap,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    label = "floating_card_art_crossfade",
+                    modifier = Modifier.fillMaxSize()
+                ) { targetImg ->
+                    if (targetImg != null) {
+                        Image(
+                            bitmap = targetImg,
+                            contentDescription = "Album art for ${track.title}",
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.High,
+                            modifier = Modifier.fillMaxSize()
                         )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(palette.vibrantColor.copy(alpha = 0.4f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_music_note),
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.65f),
+                                modifier = Modifier.size(64.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1050,21 +1137,33 @@ private fun FloatingGlowArtwork(
                 .background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
-            if (crispArtImageBitmap != null) {
-                Image(
-                    bitmap = crispArtImageBitmap,
-                    contentDescription = "Album art for ${track.title}",
-                    contentScale = ContentScale.Crop,
-                    filterQuality = FilterQuality.High,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Icon(
-                    painter = painterResource(R.drawable.ic_music_note),
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(56.dp)
-                )
+            Crossfade(
+                targetState = crispArtImageBitmap,
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                label = "floating_glow_art_crossfade",
+                modifier = Modifier.fillMaxSize()
+            ) { targetImg ->
+                if (targetImg != null) {
+                    Image(
+                        bitmap = targetImg,
+                        contentDescription = "Album art for ${track.title}",
+                        contentScale = ContentScale.Crop,
+                        filterQuality = FilterQuality.High,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_music_note),
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(56.dp)
+                        )
+                    }
+                }
             }
 
             if (isInverseShadow && glowIntensity > 0.01f) {
@@ -1243,21 +1342,33 @@ private fun MinimalCleanStoryCard(
                     .background(Color.Black),
                 contentAlignment = Alignment.Center
             ) {
-                if (crispArtImageBitmap != null) {
-                    Image(
-                        bitmap = crispArtImageBitmap,
-                        contentDescription = "Album art for ${track.title}",
-                        contentScale = ContentScale.Crop,
-                        filterQuality = FilterQuality.High,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_music_note),
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(48.dp)
-                    )
+                Crossfade(
+                    targetState = crispArtImageBitmap,
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                    label = "minimal_card_art_crossfade",
+                    modifier = Modifier.fillMaxSize()
+                ) { targetImg ->
+                    if (targetImg != null) {
+                        Image(
+                            bitmap = targetImg,
+                            contentDescription = "Album art for ${track.title}",
+                            contentScale = ContentScale.Crop,
+                            filterQuality = FilterQuality.High,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_music_note),
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(48.dp)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1461,21 +1572,33 @@ private fun SpotifyLyricsShareCard(
                         .background(Color.Black.copy(alpha = 0.25f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (crispArtImageBitmap != null) {
-                        Image(
-                            bitmap = crispArtImageBitmap,
-                            contentDescription = "Album art for ${track.title}",
-                            contentScale = ContentScale.Crop,
-                            filterQuality = FilterQuality.High,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_music_note),
-                            contentDescription = null,
-                            tint = inkColor.copy(alpha = 0.7f),
-                            modifier = Modifier.size((22 * scale).dp)
-                        )
+                    Crossfade(
+                        targetState = crispArtImageBitmap,
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        label = "lyrics_thumb_art_crossfade",
+                        modifier = Modifier.fillMaxSize()
+                    ) { targetImg ->
+                        if (targetImg != null) {
+                            Image(
+                                bitmap = targetImg,
+                                contentDescription = "Album art for ${track.title}",
+                                contentScale = ContentScale.Crop,
+                                filterQuality = FilterQuality.High,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_music_note),
+                                    contentDescription = null,
+                                    tint = inkColor.copy(alpha = 0.7f),
+                                    modifier = Modifier.size((22 * scale).dp)
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -1541,7 +1664,7 @@ private fun SpotifyLyricsShareCard(
 }
 
 @Composable
-private fun BlurredCardCoverLayer(
+internal fun BlurredCardCoverLayer(
     albumArt: Bitmap?,
     blurRadius: Float,
     modifier: Modifier = Modifier,
@@ -1748,7 +1871,7 @@ fun resolveGradientColors(
 }
 
 @Composable
-private fun InnerInverseShadowOverlay(
+internal fun InnerInverseShadowOverlay(
     shadowColor: Color,
     strength: Float,
     cornerDp: Dp,
