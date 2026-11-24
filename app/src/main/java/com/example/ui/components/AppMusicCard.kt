@@ -9,12 +9,7 @@ import android.widget.Toast
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -59,7 +54,9 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -101,16 +98,21 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
 import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.repository.MediaNotificationRepository
+import com.example.util.AudioBeatMonitor
 import com.example.util.AudioOutputRouteItem
 import com.example.util.MediaPlaybackControlHelper
 import kotlinx.coroutines.delay
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -422,7 +424,7 @@ fun AppMusicPlayerCard(
                 }
                 Spacer(modifier = Modifier.width((10 * scale).dp))
                 AppMusicMiniWaveform(
-                    isPlaying = track.isPlaying,
+                    track = track,
                     scale = scale,
                     modifier = Modifier.testTag("app_music_card_waveform")
                 )
@@ -639,7 +641,7 @@ fun AppMusicPlayerCard(
                     ) {
                         AirPlayGlyph(
                             tint = Color.White,
-                            modifier = Modifier.size((14 * scale).dp)
+                            modifier = Modifier.size((16 * scale).dp)
                         )
                         Spacer(modifier = Modifier.width((6 * scale).dp))
                         Text(
@@ -807,41 +809,134 @@ private fun AppMusicPillDragTrack(
 
 @Composable
 private fun AppMusicMiniWaveform(
-    isPlaying: Boolean,
+    track: MediaTrackInfo,
     scale: Float,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "app_music_wave")
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2f * PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1250, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "app_music_wave_phase"
-    )
-    val baseProfile = remember { floatArrayOf(0.32f, 0.72f, 0.44f, 0.96f, 0.56f, 0.30f) }
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isLifecycleActive by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> isLifecycleActive = true
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> isLifecycleActive = false
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val sampler = remember { AudioBeatMonitor.LiveSessionSampler() }
+    val barLevels = remember { FloatArray(6) { 0.24f } }
+    var frameCounter by remember { mutableLongStateOf(0L) }
+
+    val latestTitle by rememberUpdatedState(track.title)
+    val latestArtist by rememberUpdatedState(track.artist)
+    val latestPlaying by rememberUpdatedState(track.isPlaying)
+    val latestActive by rememberUpdatedState(isLifecycleActive)
+
+    val hasMicPerm = AudioBeatMonitor.hasRecordAudioPermission(context)
+    DisposableEffect(isLifecycleActive, track.isPlaying, hasMicPerm) {
+        if (isLifecycleActive && track.isPlaying && hasMicPerm) {
+            sampler.startIfPermitted(context)
+        } else {
+            sampler.stop()
+        }
+        onDispose {
+            sampler.stop()
+        }
+    }
+
+    LaunchedEffect(isLifecycleActive) {
+        if (!isLifecycleActive) return@LaunchedEffect
+        var lastFrameNanos = 0L
+        var lastEnsureNanos = 0L
+        var phaseTimeSec = 0.0
+
+        while (true) {
+            val frameNanos = withFrameNanos { it }
+            if (!latestActive) {
+                lastFrameNanos = frameNanos
+                continue
+            }
+            val dtSec = if (lastFrameNanos == 0L) {
+                0f
+            } else {
+                ((frameNanos - lastFrameNanos).coerceIn(0L, 66_000_000L)) / 1_000_000_000f
+            }
+            lastFrameNanos = frameNanos
+
+            if (latestPlaying) {
+                phaseTimeSec += dtSec.toDouble()
+                if (frameNanos - lastEnsureNanos >= 500_000_000L) {
+                    lastEnsureNanos = frameNanos
+                    if (AudioBeatMonitor.hasRecordAudioPermission(context)) {
+                        sampler.ensureActive(context)
+                    }
+                }
+            }
+
+            val live6 = if (latestPlaying) sampler.currentBands6() else null
+            val liveFeed = live6 != null && sampler.hasLiveFeed()
+
+            val targetLevels = AudioBeatMonitor.computeBarLevels6(
+                trackTitle = latestTitle,
+                trackArtist = latestArtist,
+                isPlaying = latestPlaying,
+                timeSec = phaseTimeSec.toFloat(),
+                liveAudioBands6 = live6,
+                hasLiveSignal = liveFeed,
+                animateWhenPaused = false
+            )
+
+            // 0ms rising attack: bars snap UP on exact vsync frame when a beat hits; crisp decay down
+            val fallAlpha = (1f - exp(-15.5f * dtSec)).coerceIn(0.06f, 1f)
+            var anyChanged = false
+            for (i in 0..5) {
+                val cur = barLevels[i]
+                val tgt = targetLevels[i]
+                val next = if (tgt >= cur) {
+                    tgt
+                } else {
+                    cur + (tgt - cur) * fallAlpha
+                }
+                if (kotlin.math.abs(next - cur) > 0.001f) {
+                    anyChanged = true
+                }
+                barLevels[i] = next
+            }
+            if (anyChanged || latestPlaying || liveFeed) {
+                frameCounter++
+            }
+        }
+    }
 
     Canvas(
         modifier = modifier.size(width = (22 * scale).dp, height = (15 * scale).dp)
     ) {
-        val count = baseProfile.size
-        val barW = (size.width * 0.088f).coerceAtLeast(1.8f)
+        // Read frameCounter so Canvas redraws smoothly at 0ms display vsync
+        @Suppress("UNUSED_VARIABLE")
+        val tick = frameCounter
+        val count = 6
+        val barW = (size.width * 0.095f).coerceAtLeast(1.8f)
         val gap = (size.width - barW * count) / (count - 1).coerceAtLeast(1)
         val corner = CornerRadius(barW / 2f, barW / 2f)
         for (i in 0 until count) {
-            val animMod = if (isPlaying) {
-                0.78f + 0.28f * sin(phase + i * 1.15f)
-            } else {
-                1f
-            }
-            val frac = (baseProfile[i] * animMod).coerceIn(0.22f, 1f)
-            val h = (size.height * frac).coerceAtLeast(barW * 1.2f)
+            val frac = barLevels[i].coerceIn(0.16f, 1f)
+            val h = (size.height * frac).coerceAtLeast(barW * 1.15f)
             val x = i * (barW + gap)
             val top = (size.height - h) / 2f
+            val barAlpha = if (track.isPlaying) {
+                (0.48f + 0.44f * frac).coerceIn(0.48f, 0.92f)
+            } else {
+                0.44f
+            }
             drawRoundRect(
-                color = Color.White.copy(alpha = 0.52f),
+                color = Color.White.copy(alpha = barAlpha),
                 topLeft = Offset(x, top),
                 size = Size(barW, h),
                 cornerRadius = corner
@@ -1042,24 +1137,30 @@ private fun AirPlayGlyph(
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
-        val cx = w / 2f
-        val cy = h * 0.52f
-        val stroke = Stroke(width = w * 0.11f, cap = StrokeCap.Round)
-        listOf(w * 0.42f, w * 0.27f, w * 0.13f).forEach { r ->
+        val s = minOf(w, h)
+        val cx = w * 0.5f
+        val cy = h * 0.45f
+        val stroke = Stroke(width = (s * 0.085f).coerceAtLeast(1.1f), cap = StrokeCap.Round)
+        listOf(s * 0.43f, s * 0.265f).forEach { r ->
             drawArc(
                 color = tint,
-                startAngle = 148f,
-                sweepAngle = 244f,
+                startAngle = 136f,
+                sweepAngle = 268f,
                 useCenter = false,
                 topLeft = Offset(cx - r, cy - r),
                 size = Size(r * 2f, r * 2f),
                 style = stroke
             )
         }
+        drawCircle(
+            color = tint,
+            radius = (s * 0.072f).coerceAtLeast(1.0f),
+            center = Offset(cx, cy)
+        )
         val triPath = Path().apply {
-            moveTo(cx, h * 0.64f)
-            lineTo(cx + w * 0.20f, h * 0.92f)
-            lineTo(cx - w * 0.20f, h * 0.92f)
+            moveTo(cx, cy + s * 0.14f)
+            lineTo(cx + s * 0.22f, h * 0.90f)
+            lineTo(cx - s * 0.22f, h * 0.90f)
             close()
         }
         drawPath(path = triPath, color = tint, style = Fill)

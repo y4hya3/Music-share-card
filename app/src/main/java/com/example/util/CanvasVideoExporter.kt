@@ -37,6 +37,7 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -302,30 +303,148 @@ object CanvasVideoExporter {
         }
     }
 
+    private const val CANVAS_CACHE_DIR_NAME = "canvas_video_cache"
+    private const val PREFS_TRACK_CANVAS_INDEX = "echosnap_canvas_disk_index"
+    private const val KEY_TRACK_INDEX_JSON = "track_index_entries"
+    private const val MAX_TRACK_INDEX_ENTRIES = 64
+
+    private fun getDurableCacheDir(context: Context): File =
+        File(context.applicationContext.filesDir, CANVAS_CACHE_DIR_NAME).apply { mkdirs() }
+
+    private fun getLegacyCacheDir(context: Context): File =
+        File(context.applicationContext.cacheDir, CANVAS_CACHE_DIR_NAME)
+
+    fun normalizeTrackCacheKey(title: String, artist: String): String {
+        val normTitle = com.example.service.AnimatedCanvasSearchService.normalizeQueryText(title)
+            .ifBlank { title.trim() }
+            .lowercase()
+        val normArtist = com.example.service.AnimatedCanvasSearchService.normalizeArtistText(artist)
+            .lowercase()
+        return "$normTitle|$normArtist"
+    }
+
     fun getCachedVideoFileIfReady(context: Context, videoUrl: String): File? {
         if (videoUrl.startsWith("file://")) {
             val path = Uri.parse(videoUrl).path ?: return null
             val f = File(path)
             return if (isLikelyValidVideoFile(f)) f else null
         }
-        val cacheDir = File(context.cacheDir, "canvas_video_cache")
-        val cacheKey = cacheKeyForUrl(videoUrl)
-        val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        return if (isLikelyValidVideoFile(cached)) {
-            cached
+        val shaKey = cacheKeyForUrl(videoUrl)
+        val legacyKey = legacyCacheKeyForUrl(videoUrl)
+        val durableDir = getDurableCacheDir(context)
+        val legacyDir = getLegacyCacheDir(context)
+
+        val candidates = listOf(
+            File(durableDir, "canvas_$shaKey.mp4"),
+            File(durableDir, "canvas_$legacyKey.mp4"),
+            File(legacyDir, "canvas_$shaKey.mp4"),
+            File(legacyDir, "canvas_$legacyKey.mp4")
+        )
+        for (candidate in candidates) {
+            if (isLikelyValidVideoFile(candidate)) {
+                candidate.setLastModified(System.currentTimeMillis())
+                return candidate
+            }
+            if (candidate.exists()) runCatching { candidate.delete() }
+        }
+        return null
+    }
+
+    fun getCachedVideoFileForTrack(context: Context, title: String, artist: String): Pair<File, String>? {
+        val trackKey = normalizeTrackCacheKey(title, artist)
+        if (trackKey == "|") return null
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_TRACK_CANVAS_INDEX, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_TRACK_INDEX_JSON, null) ?: return null
+        val json = runCatching { org.json.JSONObject(raw) }.getOrNull() ?: return null
+        val entry = json.optJSONObject(trackKey) ?: return null
+        val filePath = entry.optString("path").trim()
+        val sourceLabel = entry.optString("source").ifBlank { "Cached" }
+        if (filePath.isEmpty()) return null
+        val file = File(filePath)
+        return if (isLikelyValidVideoFile(file)) {
+            file.setLastModified(System.currentTimeMillis())
+            entry.put("lastUsedMs", System.currentTimeMillis())
+            prefs.edit().putString(KEY_TRACK_INDEX_JSON, json.toString()).apply()
+            file to sourceLabel
         } else {
-            if (cached.exists()) runCatching { cached.delete() }
+            json.remove(trackKey)
+            prefs.edit().putString(KEY_TRACK_INDEX_JSON, json.toString()).apply()
             null
         }
     }
 
+    fun recordTrackCanvasCache(
+        context: Context,
+        title: String,
+        artist: String,
+        source: String,
+        cachedFile: File
+    ) {
+        if (!isLikelyValidVideoFile(cachedFile)) return
+        val trackKey = normalizeTrackCacheKey(title, artist)
+        if (trackKey == "|") return
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_TRACK_CANVAS_INDEX, Context.MODE_PRIVATE)
+        synchronized(cacheDownloadLocks) {
+            val json = runCatching {
+                prefs.getString(KEY_TRACK_INDEX_JSON, null)?.let { org.json.JSONObject(it) }
+            }.getOrNull() ?: org.json.JSONObject()
+
+            val entry = org.json.JSONObject().apply {
+                put("path", cachedFile.absolutePath)
+                put("source", source.ifBlank { "Cached" })
+                put("lastUsedMs", System.currentTimeMillis())
+            }
+            json.put(trackKey, entry)
+
+            // Prune missing files & keep index bounded to MAX_TRACK_INDEX_ENTRIES
+            val keys = json.keys().asSequence().toList()
+            val validEntries = keys.mapNotNull { k ->
+                val obj = json.optJSONObject(k) ?: return@mapNotNull null
+                val path = obj.optString("path")
+                if (path.isBlank() || !File(path).exists()) {
+                    json.remove(k)
+                    null
+                } else {
+                    k to obj.optLong("lastUsedMs", 0L)
+                }
+            }.sortedByDescending { it.second }
+            if (validEntries.size > MAX_TRACK_INDEX_ENTRIES) {
+                validEntries.drop(MAX_TRACK_INDEX_ENTRIES).forEach { (k, _) ->
+                    json.remove(k)
+                }
+            }
+            prefs.edit().putString(KEY_TRACK_INDEX_JSON, json.toString()).apply()
+        }
+    }
+
+    fun getCachedVideoCountAndSizeMb(context: Context): Pair<Int, Float> {
+        val dirs = listOf(getDurableCacheDir(context), getLegacyCacheDir(context))
+        var count = 0
+        var totalBytes = 0L
+        dirs.forEach { dir ->
+            dir.listFiles()?.filter { it.isFile && it.name.startsWith("canvas_") && it.name.endsWith(".mp4") }
+                ?.forEach {
+                    count++
+                    totalBytes += it.length()
+                }
+        }
+        return count to (totalBytes / (1024f * 1024f))
+    }
+
     fun invalidateCachedVideoFile(context: Context, videoUrl: String) {
         if (videoUrl.startsWith("file://") || videoUrl.startsWith("content://")) return
-        val cacheDir = File(context.cacheDir, "canvas_video_cache")
-        val cacheKey = cacheKeyForUrl(videoUrl)
-        val cached = File(cacheDir, "canvas_$cacheKey.mp4")
-        if (cached.exists()) {
-            runCatching { cached.delete() }
+        val shaKey = cacheKeyForUrl(videoUrl)
+        val legacyKey = legacyCacheKeyForUrl(videoUrl)
+        val dirs = listOf(getDurableCacheDir(context), getLegacyCacheDir(context))
+        dirs.forEach { dir ->
+            listOf(
+                File(dir, "canvas_$shaKey.mp4"),
+                File(dir, "canvas_$legacyKey.mp4")
+            ).forEach { file ->
+                if (file.exists()) {
+                    runCatching { file.delete() }
+                }
+            }
         }
     }
 
@@ -338,7 +457,23 @@ object CanvasVideoExporter {
         Uri.fromFile(file).toString()
     }
 
-    private fun cacheKeyForUrl(videoUrl: String): String =
+    private fun cacheKeyForUrl(videoUrl: String): String {
+        val normalized = normalizeDownloadUrl(videoUrl)
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256").digest(normalized.toByteArray(Charsets.UTF_8))
+            buildString(24) {
+                for (i in 0 until 12) {
+                    val v = digest[i].toInt() and 0xFF
+                    if (v < 16) append('0')
+                    append(v.toString(16))
+                }
+            }
+        } catch (_: Exception) {
+            legacyCacheKeyForUrl(normalized)
+        }
+    }
+
+    private fun legacyCacheKeyForUrl(videoUrl: String): String =
         normalizeDownloadUrl(videoUrl).hashCode().toUInt().toString(16)
 
     private fun normalizeDownloadUrl(rawUrl: String): String {
@@ -414,9 +549,10 @@ object CanvasVideoExporter {
     }
 
     private fun downloadVideoToCache(context: Context, videoUrl: String): File? {
-        val cacheDir = File(context.cacheDir, "canvas_video_cache").apply { mkdirs() }
+        getCachedVideoFileIfReady(context, videoUrl)?.let { return it }
+        val cacheDir = getDurableCacheDir(context)
         val normalizedUrl = normalizeDownloadUrl(videoUrl)
-        val cacheKey = normalizedUrl.hashCode().toUInt().toString(16)
+        val cacheKey = cacheKeyForUrl(normalizedUrl)
         val cached = File(cacheDir, "canvas_$cacheKey.mp4")
         val lock = cacheDownloadLocks.computeIfAbsent(cacheKey) { Any() }
 
@@ -498,12 +634,7 @@ object CanvasVideoExporter {
                             }
                             if (moved && isLikelyValidVideoFile(cached)) {
                                 cached.setLastModified(System.currentTimeMillis())
-                                // Keep cache bounded on low-storage devices like Redmi 9C
-                                cacheDir.listFiles()
-                                    ?.filter { it.name.startsWith("canvas_") && it.absolutePath != cached.absolutePath }
-                                    ?.sortedByDescending { it.lastModified() }
-                                    ?.drop(7)
-                                    ?.forEach { runCatching { it.delete() } }
+                                enforceDiskCacheBounds(context, protectedFile = cached)
                                 return cached
                             }
                         }
@@ -522,6 +653,32 @@ object CanvasVideoExporter {
                 if (tempFile.exists()) {
                     runCatching { tempFile.delete() }
                 }
+            }
+        }
+    }
+
+    private fun enforceDiskCacheBounds(context: Context, protectedFile: File?) {
+        val durableDir = getDurableCacheDir(context)
+        val lowSpace = durableDir.usableSpace in 1L..(500L * 1024L * 1024L)
+        val maxFiles = if (lowSpace) 18 else 45
+        val maxBytes = if (lowSpace) 72L * 1024L * 1024L else 180L * 1024L * 1024L
+
+        val files = durableDir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("canvas_") && it.name.endsWith(".mp4") }
+            ?.sortedByDescending { it.lastModified() }
+            ?: return
+
+        var keptCount = 0
+        var keptBytes = 0L
+        files.forEach { file ->
+            if (protectedFile != null && file.absolutePath == protectedFile.absolutePath) {
+                keptCount++
+                keptBytes += file.length()
+            } else if (keptCount < maxFiles && keptBytes + file.length() <= maxBytes) {
+                keptCount++
+                keptBytes += file.length()
+            } else {
+                runCatching { file.delete() }
             }
         }
     }

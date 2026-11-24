@@ -119,6 +119,7 @@ import com.example.service.AnimatedCanvasCandidate
 import com.example.service.OnlineCoverCandidate
 import com.example.service.SpotifyAuthManager
 import com.example.ui.SpotifyLoginActivity
+import com.example.util.AudioBeatMonitor
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -2107,6 +2108,78 @@ fun EditCardBottomSheet(
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if (styleConfig.cardLayoutType == CardLayoutType.APP_MUSIC_CARD) {
+                        val hasAppMusicMicPerm = remember(styleConfig.waveformBeatSync) {
+                            AudioBeatMonitor.hasRecordAudioPermission(context)
+                        }
+                        Column(modifier = Modifier.graphicsLayer { alpha = chromeAlphaState.value }) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = GlassCardFill,
+                                border = BorderStroke(1.dp, GlassBorderColor),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                        Text(
+                                            text = "0ms Live Audio Waveform",
+                                            color = Color.White,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = if (hasAppMusicMicPerm) {
+                                                "Hardware 6-band FFT Visualizer active — zero-latency reaction"
+                                            } else {
+                                                "Grant microphone access to lock the 6 bars to live playing audio at 0ms"
+                                            },
+                                            color = if (hasAppMusicMicPerm) Color(0xFF9BE7B3) else Color.White.copy(alpha = 0.62f),
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                    if (hasAppMusicMicPerm) {
+                                        Surface(
+                                            shape = RoundedCornerShape(50),
+                                            color = Color(0x281DB954),
+                                            border = BorderStroke(1.dp, Color(0x881DB954)),
+                                            modifier = Modifier.testTag("app_music_live_waveform_active")
+                                        ) {
+                                            Text(
+                                                text = "0ms Active",
+                                                color = Color(0xFF9BE7B3),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                            )
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = { onRequestAudioBeatSync(true) },
+                                            shape = RoundedCornerShape(50),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = Color(0xFF1DB954),
+                                                contentColor = Color.Black
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                                            modifier = Modifier.testTag("app_music_live_waveform_enable_button")
+                                        ) {
+                                            Text(
+                                                text = "Enable",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
                                     }
                                 }

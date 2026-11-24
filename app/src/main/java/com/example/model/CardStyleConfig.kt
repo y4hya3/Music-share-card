@@ -32,7 +32,7 @@ enum class CardLayoutType(val label: String) {
     FLOATING_ARTWORK("Floating Glow Art"),
     MINIMAL_CLEAN("Minimal Story"),
     SPOTIFY_LYRICS_CARD("Lyrics Card"),
-    APP_MUSIC_CARD("App Music Card")
+    APP_MUSIC_CARD("Apple Music Card")
 }
 
 enum class LyricsCardBackgroundMode(val label: String) {
@@ -79,7 +79,7 @@ data class CardStyleConfig(
     val logoColorMode: LogoColorMode = LogoColorMode.RED,
     val customLogoColor: Color = Color(0xFFFF2B44),
     val gradientStyle: GradientStyle = GradientStyle.ADAPTIVE_HARMONY,
-    val cardLayoutType: CardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+    val cardLayoutType: CardLayoutType = CardLayoutType.APP_MUSIC_CARD,
     val lyricsCardBackgroundMode: LyricsCardBackgroundMode = LyricsCardBackgroundMode.PALETTE_COLOR,
     val useBlurredAlbumBackground: Boolean = true,
     val useTransparentBackground: Boolean = false,
@@ -115,6 +115,7 @@ data class CardStyleConfig(
     val liveWallpaperDimEnabled: Boolean = false, // Toggleable wallpaper brightness dimmer scrim
     val liveWallpaperDimAmount: Float = 0.28f, // 0.0f..0.70f darken factor for readability behind icons
     val liveWallpaperPowerSavePauseCanvas: Boolean = true, // Pauses video canvas during Power Saver / low battery
+    val liveWallpaperSmoothCanvasToCanvas: Boolean = true, // Keeps previous canvas blurred/dimmed and 300ms crossfades to next canvas without artwork flash
     val liveWallpaperShowCard: Boolean = true,
     val liveWallpaperIdleRevertEnabled: Boolean = false,
     val liveWallpaperIdleDelaySec: Int = 60, // 1..86400 seconds (up to 1 day) after song stops

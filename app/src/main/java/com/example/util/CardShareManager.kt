@@ -1275,11 +1275,17 @@ object CardShareManager {
         val waveH = 45f * scale
         val waveTop = cursorY + ((titleLayout.height + gapTitleArtist + artistLayout.height) - waveH) / 2f
         val waveLeft = metaRight - waveW
-        val waveProfile = floatArrayOf(0.32f, 0.72f, 0.44f, 0.96f, 0.56f, 0.30f)
-        val waveBarW = (waveW * 0.088f).coerceAtLeast(3.5f)
+        val waveProfile = AudioBeatMonitor.computeBarLevels6(
+            trackTitle = track.title,
+            trackArtist = track.artist,
+            isPlaying = track.isPlaying,
+            timeSec = (track.positionMs.coerceAtLeast(0L) / 1000f),
+            animateWhenPaused = true
+        )
+        val waveBarW = (waveW * 0.095f).coerceAtLeast(3.5f)
         val waveGap = (waveW - waveBarW * waveProfile.size) / (waveProfile.size - 1)
         val wavePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = withAlpha(AndroidColor.WHITE, 0.52f)
+            color = withAlpha(AndroidColor.WHITE, 0.62f)
         }
         for (i in waveProfile.indices) {
             val barH = max(waveBarW * 1.2f, waveH * waveProfile[i])
@@ -1519,7 +1525,7 @@ object CardShareManager {
             textSize = 37.5f * scale
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
         }
-        val iconSize = 42f * scale
+        val iconSize = 46f * scale
         val iconGap = 18f * scale
         val textW = pillTextPaint.measureText(pillLabel)
         val pillW = max(276f * scale, iconSize + iconGap + textW + 96f * scale)
@@ -1547,24 +1553,31 @@ object CardShareManager {
         val airArcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = AndroidColor.WHITE
             style = Paint.Style.STROKE
-            strokeWidth = 4.4f * scale
+            strokeWidth = iconSize * 0.085f
             strokeCap = Paint.Cap.ROUND
         }
         val airArcCx = contentLeft + iconSize / 2f
-        val airArcCy = pillCy + 1f * scale
-        listOf(0.42f * iconSize, 0.27f * iconSize).forEach { r ->
+        val airIconTop = pillCy - iconSize / 2f
+        val airArcCy = airIconTop + iconSize * 0.45f
+        listOf(0.43f * iconSize, 0.265f * iconSize).forEach { r ->
             canvas.drawArc(
                 RectF(airArcCx - r, airArcCy - r, airArcCx + r, airArcCy + r),
-                138f,
-                264f,
+                136f,
+                268f,
                 false,
                 airArcPaint
             )
         }
+        canvas.drawCircle(
+            airArcCx,
+            airArcCy,
+            iconSize * 0.072f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE }
+        )
         val airTri = Path().apply {
-            moveTo(airArcCx, airArcCy + iconSize * 0.08f)
-            lineTo(contentLeft + iconSize * 0.22f, pillCy + iconSize * 0.42f)
-            lineTo(contentLeft + iconSize * 0.78f, pillCy + iconSize * 0.42f)
+            moveTo(airArcCx, airArcCy + iconSize * 0.14f)
+            lineTo(airArcCx + iconSize * 0.22f, airIconTop + iconSize * 0.90f)
+            lineTo(airArcCx - iconSize * 0.22f, airIconTop + iconSize * 0.90f)
             close()
         }
         canvas.drawPath(airTri, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = AndroidColor.WHITE })

@@ -70,6 +70,7 @@ data class EchoSnapBackupStyle(
     val liveWallpaperDimEnabled: Boolean = false,
     val liveWallpaperDimAmount: Float = 0.28f,
     val liveWallpaperPowerSavePauseCanvas: Boolean = true,
+    val liveWallpaperSmoothCanvasToCanvas: Boolean = true,
     val ignoredMediaPackages: List<String> = emptyList(),
     val backupAutoSyncEnabled: Boolean = false,
     val cardShadowColorMode: String = CardShadowColorMode.ALBUM_DYNAMIC.name,
@@ -109,6 +110,7 @@ data class EchoSnapBackupStyle(
         liveWallpaperDimEnabled = liveWallpaperDimEnabled,
         liveWallpaperDimAmount = liveWallpaperDimAmount.coerceIn(0f, 0.70f),
         liveWallpaperPowerSavePauseCanvas = liveWallpaperPowerSavePauseCanvas,
+        liveWallpaperSmoothCanvasToCanvas = liveWallpaperSmoothCanvasToCanvas,
         ignoredMediaPackages = ignoredMediaPackages.map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
         backupAutoSyncEnabled = backupAutoSyncEnabled
     )
@@ -144,6 +146,7 @@ data class EchoSnapBackupStyle(
             liveWallpaperDimEnabled = cfg.liveWallpaperDimEnabled,
             liveWallpaperDimAmount = cfg.liveWallpaperDimAmount,
             liveWallpaperPowerSavePauseCanvas = cfg.liveWallpaperPowerSavePauseCanvas,
+            liveWallpaperSmoothCanvasToCanvas = cfg.liveWallpaperSmoothCanvasToCanvas,
             ignoredMediaPackages = cfg.ignoredMediaPackages.sorted(),
             backupAutoSyncEnabled = cfg.backupAutoSyncEnabled,
             cardShadowColorMode = cfg.cardShadowColorMode.name,
@@ -1218,6 +1221,7 @@ object EchoSnapBackupManager {
         put("liveWallpaperDimEnabled", s.liveWallpaperDimEnabled)
         put("liveWallpaperDimAmount", s.liveWallpaperDimAmount.toDouble())
         put("liveWallpaperPowerSavePauseCanvas", s.liveWallpaperPowerSavePauseCanvas)
+        put("liveWallpaperSmoothCanvasToCanvas", s.liveWallpaperSmoothCanvasToCanvas)
         put("ignoredMediaPackages", JSONArray(s.ignoredMediaPackages))
         put("backupAutoSyncEnabled", s.backupAutoSyncEnabled)
         put("cardShadowColorMode", s.cardShadowColorMode)
@@ -1259,6 +1263,10 @@ object EchoSnapBackupManager {
             liveWallpaperPowerSavePauseCanvas = o.optBoolean(
                 "liveWallpaperPowerSavePauseCanvas",
                 d.liveWallpaperPowerSavePauseCanvas
+            ),
+            liveWallpaperSmoothCanvasToCanvas = o.optBoolean(
+                "liveWallpaperSmoothCanvasToCanvas",
+                d.liveWallpaperSmoothCanvasToCanvas
             ),
             ignoredMediaPackages = parseSongsArray(o.optJSONArray("ignoredMediaPackages")),
             backupAutoSyncEnabled = o.optBoolean("backupAutoSyncEnabled", d.backupAutoSyncEnabled),

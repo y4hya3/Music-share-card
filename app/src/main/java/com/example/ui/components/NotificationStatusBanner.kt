@@ -45,7 +45,7 @@ fun NotificationStatusBanner(
     Surface(
         onClick = if (!isAccessGranted) onEnableClick else onRefreshClick,
         shape = RoundedCornerShape(16.dp),
-        color = if (isAccessGranted) Color.Black.copy(alpha = 0.36f) else Color(0xFF2E1C1A).copy(alpha = 0.90f),
+        color = if (isAccessGranted) Color(0xFF0F2B1A).copy(alpha = 0.86f) else Color(0xFF2E1C1A).copy(alpha = 0.90f),
         modifier = modifier
             .fillMaxWidth()
             .testTag("notification_status_banner")

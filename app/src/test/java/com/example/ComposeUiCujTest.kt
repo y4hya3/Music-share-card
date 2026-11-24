@@ -16,9 +16,13 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import android.provider.Settings
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.core.app.ApplicationProvider
 import com.example.model.CardLayoutType
 import com.example.model.CardPalette
@@ -404,7 +408,22 @@ class ComposeUiCujTest {
         // Next-Song Transition must NOT exist while Animated Canvas mode is active
         composeTestRule.onNodeWithTag("settings_lw_transition_section").assertDoesNotExist()
 
-        // Switch to Artwork Only -> Next-Song Transition appears
+        // Smooth Canvas-to-Canvas Fade switch & Disk Cache/Prewarm card MUST exist in Animated Canvas mode
+        composeTestRule.onNodeWithTag("settings_lw_canvas_smooth_section").performScrollTo().assertExists()
+        composeTestRule.onNodeWithTag("settings_lw_canvas_cache_card").performScrollTo().assertExists()
+        assertTrue(MediaNotificationRepository.styleConfig.value.liveWallpaperSmoothCanvasToCanvas)
+        composeTestRule.onNodeWithTag("settings_lw_smooth_canvas_switch").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertFalse(MediaNotificationRepository.styleConfig.value.liveWallpaperSmoothCanvasToCanvas)
+        composeTestRule.onNodeWithTag("settings_lw_smooth_canvas_switch").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(MediaNotificationRepository.styleConfig.value.liveWallpaperSmoothCanvasToCanvas)
+
+        // Apple Music Card label & default check
+        assertEquals("Apple Music Card", CardLayoutType.APP_MUSIC_CARD.label)
+        assertEquals(CardLayoutType.APP_MUSIC_CARD, CardStyleConfig().cardLayoutType)
+
+        // Switch to Artwork Only -> Next-Song Transition appears and Smooth Canvas Fade hides
         composeTestRule.onNodeWithTag("settings_live_wallpaper_mode_artwork").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         assertEquals(
@@ -412,6 +431,7 @@ class ComposeUiCujTest {
             MediaNotificationRepository.styleConfig.value.liveWallpaperMode
         )
         composeTestRule.onNodeWithTag("settings_lw_transition_section").assertExists()
+        composeTestRule.onNodeWithTag("settings_lw_smooth_canvas_switch").assertDoesNotExist()
 
         // Pick Slide Left & Slow (540ms)
         composeTestRule.onNodeWithTag("settings_lw_transition_SLIDE_LEFT").performScrollTo().performClick()
@@ -484,7 +504,8 @@ class ComposeUiCujTest {
         // Initially on Floating Glass Card: sheet_card_blur_slider exists
         composeTestRule.onNodeWithTag("sheet_card_blur_slider").assertExists()
 
-        // Select App Music Card
+        // Select Apple Music Card
+        composeTestRule.onNodeWithText("Apple Music Card").performScrollTo().assertExists()
         composeTestRule.onNodeWithTag("layout_type_APP_MUSIC_CARD").performScrollTo().performClick()
         composeTestRule.waitForIdle()
         assertEquals(CardLayoutType.APP_MUSIC_CARD, currentConfig.cardLayoutType)
@@ -568,5 +589,113 @@ class ComposeUiCujTest {
         composeTestRule.onNodeWithTag("app_music_card_prev_button").performClick()
         composeTestRule.waitForIdle()
         assertEquals(beforeNext, MediaNotificationRepository.currentTrack.value.title)
+    }
+
+    @Test
+    fun shareScreen_tripleTapTogglesHud_withoutBreakingCardControls() {
+        MediaNotificationRepository.selectSampleTrack(MediaNotificationRepository.getSampleTracks().first())
+        MediaNotificationRepository.updateStyleConfig(saveImmediately = true) {
+            CardStyleConfig(cardLayoutType = CardLayoutType.APP_MUSIC_CARD)
+        }
+
+        composeTestRule.setContent {
+            MyApplicationTheme(darkTheme = true) {
+                BitChordShareScreen(isAppEntered = true)
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        // HUD and Apple Music Card start visible
+        composeTestRule.onNodeWithTag("top_bar_settings_button").assertExists()
+        composeTestRule.onNodeWithTag("external_blur_control_container").assertExists()
+        composeTestRule.onNodeWithTag("bottom_share_actions_bar").assertExists()
+        composeTestRule.onNodeWithTag("center_story_card").assertExists()
+        composeTestRule.onNodeWithTag("app_music_card_airplay_button").assertExists()
+
+        // Triple tap unconsumed background area -> hides UI HUD
+        composeTestRule.onNodeWithTag("main_share_screen_root").performTouchInput {
+            val tapPos = Offset(18f, centerY)
+            click(tapPos)
+            advanceEventTime(90L)
+            click(tapPos)
+            advanceEventTime(90L)
+            click(tapPos)
+        }
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("top_bar_settings_button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("external_blur_control_container").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("bottom_share_actions_bar").assertDoesNotExist()
+        // Story card & AirPlay button remain visible
+        composeTestRule.onNodeWithTag("center_story_card").assertExists()
+        composeTestRule.onNodeWithTag("app_music_card_airplay_button").assertExists()
+
+        // Another triple tap -> restores UI HUD
+        composeTestRule.onNodeWithTag("main_share_screen_root").performTouchInput {
+            val tapPos = Offset(18f, centerY)
+            click(tapPos)
+            advanceEventTime(90L)
+            click(tapPos)
+            advanceEventTime(90L)
+            click(tapPos)
+        }
+        composeTestRule.mainClock.advanceTimeBy(350L)
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("top_bar_settings_button").assertExists()
+        composeTestRule.onNodeWithTag("external_blur_control_container").assertExists()
+        composeTestRule.onNodeWithTag("bottom_share_actions_bar").assertExists()
+    }
+
+    @Test
+    fun shareScreen_notificationAccessGrantedBanner_disappearsAfterFiveSeconds() {
+        val originalListeners = Settings.Secure.getString(
+            context.contentResolver,
+            "enabled_notification_listeners"
+        )
+        try {
+            Settings.Secure.putString(context.contentResolver, "enabled_notification_listeners", "")
+            MediaNotificationRepository.checkNotificationAccess(context)
+            assertFalse(MediaNotificationRepository.isNotificationAccessEnabled.value)
+
+            composeTestRule.setContent {
+                MyApplicationTheme(darkTheme = true) {
+                    BitChordShareScreen(isAppEntered = true)
+                }
+            }
+            composeTestRule.waitForIdle()
+
+            // Red "Notification Access Required" stays visible while denied
+            composeTestRule.onNodeWithTag("notification_status_banner").assertExists()
+            composeTestRule.onNodeWithText("Notification Access Required").assertExists()
+            composeTestRule.mainClock.advanceTimeBy(6_000L)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithText("Notification Access Required").assertExists()
+
+            // Grant notification access -> turns to green "Media Listener Active"
+            Settings.Secure.putString(
+                context.contentResolver,
+                "enabled_notification_listeners",
+                "${context.packageName}/com.example.service.MusicNotificationListenerService"
+            )
+            MediaNotificationRepository.checkNotificationAccess(context)
+            composeTestRule.mainClock.advanceTimeBy(400L)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithText("Media Listener Active").assertExists()
+
+            // After 5 seconds total -> green message disappears automatically
+            composeTestRule.mainClock.advanceTimeBy(5_200L)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithTag("notification_status_banner").assertDoesNotExist()
+            composeTestRule.onNodeWithText("Media Listener Active").assertDoesNotExist()
+        } finally {
+            Settings.Secure.putString(
+                context.contentResolver,
+                "enabled_notification_listeners",
+                originalListeners.orEmpty()
+            )
+            MediaNotificationRepository.checkNotificationAccess(context)
+        }
     }
 }

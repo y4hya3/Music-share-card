@@ -451,68 +451,106 @@ object BitmapBlurUtils {
         if (aspect in 0.85f..1.18f) return source
 
         return try {
-            fun isNearBlack(pixel: Int): Boolean {
+            fun pixelLuma(pixel: Int): Int {
                 val r = (pixel shr 16) and 0xFF
                 val g = (pixel shr 8) and 0xFF
                 val b = pixel and 0xFF
-                return r <= 12 && g <= 12 && b <= 12
+                return maxOf(r, g, b)
             }
 
-            fun hasVisibleNonBlackBorder(rowOrCol: IntArray, step: Int): Boolean {
+            fun hasVisibleNonBlackBorder(rowOrCol: IntArray, step: Int): Pair<Boolean, Int> {
                 var hits = 0
                 var samples = 0
+                var lumaSum = 0
                 var i = 2
                 while (i < rowOrCol.size - 2) {
                     samples++
-                    val px = rowOrCol[i]
-                    val maxCh = maxOf((px shr 16) and 0xFF, (px shr 8) and 0xFF, px and 0xFF)
-                    if (maxCh > 24) hits++
+                    val maxCh = pixelLuma(rowOrCol[i])
+                    lumaSum += maxCh
+                    if (maxCh > 30) hits++
                     i += step
                 }
-                return samples > 0 && hits * 4 >= samples
+                val avgLuma = if (samples > 0) lumaSum / samples else 0
+                return (samples > 0 && hits * 4 >= samples) to avgLuma
             }
 
             val rowBuffer = IntArray(w)
             val rowStep = max(1, w / 32)
-            fun isRowBlack(y: Int): Boolean {
+            fun measureUniformDarkRow(y: Int): Int {
                 source.getPixels(rowBuffer, 0, w, 0, y, w, 1)
+                var minCh = 255
+                var maxCh = 0
+                var sum = 0
+                var count = 0
                 var x = 2
                 while (x < w - 2) {
-                    if (!isNearBlack(rowBuffer[x])) return false
+                    val lum = pixelLuma(rowBuffer[x])
+                    if (lum > 15) return -1
+                    if (lum < minCh) minCh = lum
+                    if (lum > maxCh) maxCh = lum
+                    sum += lum
+                    count++
                     x += rowStep
                 }
-                return true
+                if (count == 0 || (maxCh - minCh) > 12) return -1
+                return sum / count
             }
 
             val colBuffer = IntArray(h)
             val colStep = max(1, h / 32)
-            fun isColBlack(x: Int): Boolean {
+            fun measureUniformDarkCol(x: Int): Int {
                 source.getPixels(colBuffer, 0, 1, x, 0, 1, h)
+                var minCh = 255
+                var maxCh = 0
+                var sum = 0
+                var count = 0
                 var y = 2
                 while (y < h - 2) {
-                    if (!isNearBlack(colBuffer[y])) return false
+                    val lum = pixelLuma(colBuffer[y])
+                    if (lum > 15) return -1
+                    if (lum < minCh) minCh = lum
+                    if (lum > maxCh) maxCh = lum
+                    sum += lum
+                    count++
                     y += colStep
                 }
-                return true
+                if (count == 0 || (maxCh - minCh) > 12) return -1
+                return sum / count
             }
 
             var topBar = 0
+            var topBarLumaSum = 0
             val maxVBar = (h * 0.28f).roundToInt()
-            while (topBar < maxVBar && isRowBlack(topBar)) {
+            while (topBar < maxVBar) {
+                val avg = measureUniformDarkRow(topBar)
+                if (avg < 0) break
+                topBarLumaSum += avg
                 topBar++
             }
             var bottomBar = 0
-            while (bottomBar < maxVBar && isRowBlack(h - 1 - bottomBar)) {
+            var bottomBarLumaSum = 0
+            while (bottomBar < maxVBar) {
+                val avg = measureUniformDarkRow(h - 1 - bottomBar)
+                if (avg < 0) break
+                bottomBarLumaSum += avg
                 bottomBar++
             }
 
             var leftBar = 0
+            var leftBarLumaSum = 0
             val maxHBar = (w * 0.30f).roundToInt()
-            while (leftBar < maxHBar && isColBlack(leftBar)) {
+            while (leftBar < maxHBar) {
+                val avg = measureUniformDarkCol(leftBar)
+                if (avg < 0) break
+                leftBarLumaSum += avg
                 leftBar++
             }
             var rightBar = 0
-            while (rightBar < maxHBar && isColBlack(w - 1 - rightBar)) {
+            var rightBarLumaSum = 0
+            while (rightBar < maxHBar) {
+                val avg = measureUniformDarkCol(w - 1 - rightBar)
+                if (avg < 0) break
+                rightBarLumaSum += avg
                 rightBar++
             }
 
@@ -525,13 +563,18 @@ object BitmapBlurUtils {
                     abs(topBar - bottomBar) <= max(6, (h * 0.05f).roundToInt())
 
             if (hasSymmetricVerticalBars) {
-                val innerTopY = (topBar + 4).coerceAtMost(h - 1)
-                val innerBotY = (h - 1 - bottomBar - 4).coerceAtLeast(0)
+                val innerTopY = (topBar + 3).coerceAtMost(h - 1)
+                val innerBotY = (h - 1 - bottomBar - 3).coerceAtLeast(0)
                 source.getPixels(rowBuffer, 0, w, 0, innerTopY, w, 1)
-                val topBright = hasVisibleNonBlackBorder(rowBuffer, rowStep)
+                val (topBright, topInnerAvg) = hasVisibleNonBlackBorder(rowBuffer, rowStep)
                 source.getPixels(rowBuffer, 0, w, 0, innerBotY, w, 1)
-                val botBright = hasVisibleNonBlackBorder(rowBuffer, rowStep)
-                if (!topBright || !botBright) {
+                val (botBright, botInnerAvg) = hasVisibleNonBlackBorder(rowBuffer, rowStep)
+                val topBarAvg = topBarLumaSum / topBar.coerceAtLeast(1)
+                val botBarAvg = bottomBarLumaSum / bottomBar.coerceAtLeast(1)
+                if (!topBright || !botBright ||
+                    (topInnerAvg - topBarAvg) < 20 ||
+                    (botInnerAvg - botBarAvg) < 20
+                ) {
                     hasSymmetricVerticalBars = false
                 }
             }
@@ -542,28 +585,36 @@ object BitmapBlurUtils {
                     abs(leftBar - rightBar) <= max(6, (w * 0.05f).roundToInt())
 
             if (hasSymmetricHorizontalBars) {
-                val innerLeftX = (leftBar + 4).coerceAtMost(w - 1)
-                val innerRightX = (w - 1 - rightBar - 4).coerceAtLeast(0)
+                val innerLeftX = (leftBar + 3).coerceAtMost(w - 1)
+                val innerRightX = (w - 1 - rightBar - 3).coerceAtLeast(0)
                 source.getPixels(colBuffer, 0, 1, innerLeftX, 0, 1, h)
-                val leftBright = hasVisibleNonBlackBorder(colBuffer, colStep)
+                val (leftBright, leftInnerAvg) = hasVisibleNonBlackBorder(colBuffer, colStep)
                 source.getPixels(colBuffer, 0, 1, innerRightX, 0, 1, h)
-                val rightBright = hasVisibleNonBlackBorder(colBuffer, colStep)
-                if (!leftBright || !rightBright) {
+                val (rightBright, rightInnerAvg) = hasVisibleNonBlackBorder(colBuffer, colStep)
+                val leftBarAvg = leftBarLumaSum / leftBar.coerceAtLeast(1)
+                val rightBarAvg = rightBarLumaSum / rightBar.coerceAtLeast(1)
+                if (!leftBright || !rightBright ||
+                    (leftInnerAvg - leftBarAvg) < 20 ||
+                    (rightInnerAvg - rightBarAvg) < 20
+                ) {
                     hasSymmetricHorizontalBars = false
                 }
             }
 
-            val cropTop = if (hasSymmetricVerticalBars) (topBar + 2).coerceAtMost(h / 3) else 0
-            val cropBottom = if (hasSymmetricVerticalBars) (h - bottomBar - 2).coerceAtLeast(cropTop + 32) else h
-            val cropLeft = if (hasSymmetricHorizontalBars) (leftBar + 2).coerceAtMost(w / 3) else 0
-            val cropRight = if (hasSymmetricHorizontalBars) (w - rightBar - 2).coerceAtLeast(cropLeft + 32) else w
+            val cropTop = if (hasSymmetricVerticalBars) topBar.coerceAtMost(h / 3) else 0
+            val cropBottom = if (hasSymmetricVerticalBars) (h - bottomBar).coerceAtLeast(cropTop + 32) else h
+            val cropLeft = if (hasSymmetricHorizontalBars) leftBar.coerceAtMost(w / 3) else 0
+            val cropRight = if (hasSymmetricHorizontalBars) (w - rightBar).coerceAtLeast(cropLeft + 32) else w
 
             val newW = cropRight - cropLeft
             val newH = cropBottom - cropTop
+            val newAspect = newW.toFloat() / newH.coerceAtLeast(1).toFloat()
+            val movesCloserToSquare = abs(newAspect - 1f) < abs(aspect - 1f)
 
             if ((cropTop > 0 || cropBottom < h || cropLeft > 0 || cropRight < w) &&
                 newW >= w * 0.42f &&
-                newH >= h * 0.42f
+                newH >= h * 0.42f &&
+                movesCloserToSquare
             ) {
                 Bitmap.createBitmap(source, cropLeft, cropTop, newW, newH)
             } else {

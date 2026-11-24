@@ -111,6 +111,7 @@ import com.example.ui.SpotifyLoginActivity
 import com.example.util.AudioBeatMonitor
 import com.example.util.BatteryAndSystemHelper
 import com.example.util.BitmapBlurUtils
+import com.example.util.CanvasVideoExporter
 import com.example.util.ExportNotificationHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -307,7 +308,7 @@ fun SettingsDialog(
                                 )
                                 Text(
                                     text = if (styleConfig.waveformBeatSync) {
-                                        "Reacts to your playing music beats"
+                                        "Reacts to your playing music beats at 0ms (also drives Apple Music Card)"
                                     } else {
                                         "Speed ${String.format(Locale.US, "%.1fx", localSpeed)} • Force ${String.format(Locale.US, "%.1fx", localForce)}"
                                     },
@@ -830,6 +831,84 @@ fun SettingsDialog(
                             fontSize = 10.sp,
                             modifier = Modifier.padding(top = 6.dp)
                         )
+
+                        AnimatedVisibility(visible = styleConfig.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS) {
+                            val prewarmStatus by MediaNotificationRepository.canvasPrewarmStatus.collectAsStateWithLifecycle()
+                            val cacheStats by produceState(
+                                initialValue = 0 to 0f,
+                                key1 = currentTrack.title,
+                                key2 = prewarmStatus
+                            ) {
+                                value = withContext(Dispatchers.IO) {
+                                    CanvasVideoExporter.getCachedVideoCountAndSizeMb(context)
+                                }
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 12.dp)
+                                    .testTag("settings_lw_canvas_smooth_section"),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                        Text(
+                                            text = "Smooth Canvas-to-Canvas Fade",
+                                            color = Color.White,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Text(
+                                            text = "Holds the previous Canvas subtly blurred & dimmed while the next loads, then crossfades in 300ms with no artwork flash",
+                                            color = Color.White.copy(alpha = 0.58f),
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                    Switch(
+                                        checked = styleConfig.liveWallpaperSmoothCanvasToCanvas,
+                                        onCheckedChange = { enabled ->
+                                            onStyleChange(styleConfig.copy(liveWallpaperSmoothCanvasToCanvas = enabled))
+                                            MediaNotificationRepository.flushStylePreferences()
+                                        },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.White,
+                                            checkedTrackColor = Color(0xFF1DB954)
+                                        ),
+                                        modifier = Modifier.testTag("settings_lw_smooth_canvas_switch")
+                                    )
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Color.White.copy(alpha = 0.06f),
+                                    border = BorderStroke(1.dp, SettingsGlassBorder),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("settings_lw_canvas_cache_card")
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Text(
+                                            text = "Canvas Disk Cache: ${cacheStats.first} saved (${String.format(Locale.US, "%.1f", cacheStats.second)} MB)",
+                                            color = Color(0xFF9BE7B3),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = prewarmStatus ?: "Next-Song Prediction reads your music player Queue & learned Play History transitions to pre-cache upcoming Canvases for instant switching.",
+                                            color = Color.White.copy(alpha = 0.62f),
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                         AnimatedVisibility(visible = styleConfig.liveWallpaperMode == LiveWallpaperMode.ARTWORK_ONLY) {
                             Column(
@@ -2277,7 +2356,8 @@ private fun LiveWallpaperMiniPreview(
             }
         }
     }
-    val animT = transitionAnim.value
+    val rawT = transitionAnim.value.coerceIn(0f, 1f)
+    val animT = rawT * rawT * rawT * (rawT * (rawT * 6f - 15f) + 10f)
 
     // Precompute compact preview mipmaps once per track artwork so scrubbing BOTH sliders runs at 60fps
     val mipImages by produceState<Triple<ImageBitmap, ImageBitmap, ImageBitmap>?>(
@@ -2332,7 +2412,7 @@ private fun LiveWallpaperMiniPreview(
             ) {
                 // 1. Center Wallpaper Layer (uniform center blur 0..40px + Artwork transition demo)
                 val previewExtraBlur = if (artTransitionStyle == LiveWallpaperTransitionStyle.BLUR_DISSOLVE && animT < 0.99f) {
-                    (1f - animT) * 14f
+                    (1f - animT) * 18f
                 } else {
                     0f
                 }
@@ -2343,9 +2423,14 @@ private fun LiveWallpaperMiniPreview(
                             if (animT < 0.999f) {
                                 when (artTransitionStyle) {
                                     LiveWallpaperTransitionStyle.CROSSFADE -> alpha = animT
-                                    LiveWallpaperTransitionStyle.SLIDE_LEFT -> translationX = (1f - animT) * size.width
+                                    LiveWallpaperTransitionStyle.SLIDE_LEFT -> {
+                                        translationX = (1f - animT) * size.width
+                                        val s = 1f + (1f - animT) * 0.04f
+                                        scaleX = s
+                                        scaleY = s
+                                    }
                                     LiveWallpaperTransitionStyle.ZOOM_FADE -> {
-                                        val s = 1f + (1f - animT) * 0.16f
+                                        val s = 1f + (1f - animT) * 0.14f
                                         scaleX = s
                                         scaleY = s
                                         alpha = animT
@@ -2545,6 +2630,11 @@ private fun LiveWallpaperMiniPreview(
                         val depth = shadowDepth.coerceIn(0f, 1f)
                         val isBlackShadow = shadowColor.red < 0.08f && shadowColor.green < 0.08f && shadowColor.blue < 0.08f
                         val outerColor = if (shadowInverse && isBlackShadow) Color.White.copy(alpha = 0.7f) else shadowColor
+                        val sqExtraBlur = if (artTransitionStyle == LiveWallpaperTransitionStyle.BLUR_DISSOLVE && animT < 0.99f) {
+                            (1f - animT) * 8f
+                        } else {
+                            0f
+                        }
                         Box(
                             modifier = Modifier
                                 .size(50.dp)
@@ -2553,20 +2643,38 @@ private fun LiveWallpaperMiniPreview(
                                         when (artTransitionStyle) {
                                             LiveWallpaperTransitionStyle.CROSSFADE -> alpha = animT
                                             LiveWallpaperTransitionStyle.SLIDE_LEFT -> {
-                                                translationX = (1f - animT) * 28.dp.toPx()
-                                                alpha = animT
-                                            }
-                                            LiveWallpaperTransitionStyle.ZOOM_FADE -> {
-                                                val s = 0.88f + animT * 0.12f
+                                                translationX = (1f - animT) * 30.dp.toPx()
+                                                val s = 0.96f + animT * 0.04f
                                                 scaleX = s
                                                 scaleY = s
                                                 alpha = animT
                                             }
-                                            LiveWallpaperTransitionStyle.BLUR_DISSOLVE -> alpha = animT
+                                            LiveWallpaperTransitionStyle.ZOOM_FADE -> {
+                                                val s = 0.84f + animT * 0.16f
+                                                scaleX = s
+                                                scaleY = s
+                                                alpha = animT
+                                            }
+                                            LiveWallpaperTransitionStyle.BLUR_DISSOLVE -> {
+                                                val s = 0.95f + animT * 0.05f
+                                                scaleX = s
+                                                scaleY = s
+                                                alpha = animT
+                                            }
                                             LiveWallpaperTransitionStyle.NONE -> Unit
                                         }
                                     }
                                 }
+                                .then(
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && sqExtraBlur > 0.25f) {
+                                        Modifier.blur(
+                                            radius = sqExtraBlur.dp,
+                                            edgeTreatment = BlurredEdgeTreatment.Rectangle
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
                                 .drawBehind {
                                     if (depth > 0.01f) {
                                         drawIntoCanvas { canvas ->

@@ -10,6 +10,7 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -18,6 +19,10 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -137,6 +142,7 @@ import androidx.compose.ui.graphics.Brush
 import com.example.util.CardShareManager
 import com.example.util.DevicePerformanceTier
 import com.example.util.EchoSnapBackupManager
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -181,6 +187,7 @@ fun BitChordShareScreen(
     var showSettingsDialog by remember { mutableStateOf(false) }
     var showPreviewDialog by remember { mutableStateOf(false) }
     var showInitialFolderDialog by remember { mutableStateOf(false) }
+    var isHudHidden by remember { mutableStateOf(false) }
     var isProcessingAction by remember { mutableStateOf(false) }
     var actionStatusText by remember { mutableStateOf("") }
 
@@ -489,16 +496,87 @@ fun BitChordShareScreen(
         }
     }
 
+    var showGrantedBanner by remember { mutableStateOf(isAccessGranted) }
     LaunchedEffect(isAccessGranted) {
         if (isAccessGranted) {
+            showGrantedBanner = true
             MediaNotificationRepository.refreshFromActiveMedia(context)
+            delay(5_000L)
+            showGrantedBanner = false
+        } else {
+            showGrantedBanner = false
         }
     }
+    val showNotificationBanner = !isAccessGranted || showGrantedBanner
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF0A0A0E))
+            .pointerInput(Unit) {
+                val touchSlopPx = viewConfiguration.touchSlop
+                val maxTapDurationMs = 280L
+                val maxTapGapMs = 450L
+                var consecutiveTaps = 0
+                var lastTapUpTimeMs = 0L
+                var lastTapPos = Offset.Zero
+
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
+                    if (down.isConsumed) {
+                        consecutiveTaps = 0
+                        return@awaitEachGesture
+                    }
+                    val downTime = down.uptimeMillis
+                    val downPos = down.position
+                    var movedTooFar = false
+                    var multiTouchOrConsumed = false
+                    var upChange: androidx.compose.ui.input.pointer.PointerInputChange? = null
+
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Final)
+                        if (event.changes.size > 1) {
+                            multiTouchOrConsumed = true
+                            break
+                        }
+                        val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (ch.isConsumed) {
+                            multiTouchOrConsumed = true
+                        }
+                        if ((ch.position - downPos).getDistance() > touchSlopPx) {
+                            movedTooFar = true
+                        }
+                        if (!ch.pressed) {
+                            upChange = ch
+                            break
+                        }
+                    }
+
+                    val up = upChange
+                    if (up == null || multiTouchOrConsumed || movedTooFar ||
+                        (up.uptimeMillis - downTime) > maxTapDurationMs
+                    ) {
+                        consecutiveTaps = 0
+                        return@awaitEachGesture
+                    }
+
+                    val nowMs = up.uptimeMillis
+                    val withinWindow = consecutiveTaps == 0 ||
+                        ((nowMs - lastTapUpTimeMs) in 0L..maxTapGapMs &&
+                            (up.position - lastTapPos).getDistance() <= touchSlopPx * 4f)
+                    consecutiveTaps = if (withinWindow) consecutiveTaps + 1 else 1
+                    lastTapUpTimeMs = nowMs
+                    lastTapPos = up.position
+
+                    if (consecutiveTaps >= 3) {
+                        consecutiveTaps = 0
+                        if (!showEditSheet && !showSettingsDialog && !showPreviewDialog && !showInitialFolderDialog) {
+                            isHudHidden = !isHudHidden
+                        }
+                    }
+                }
+            }
+            .testTag("main_share_screen_root")
     ) {
         val screenWidth = maxWidth
         val screenHeight = maxHeight
@@ -549,7 +627,16 @@ fun BitChordShareScreen(
             val fitCardZoom = (fitWidth / canonicalRefWidth).coerceAtLeast(0.32f)
             val cardZoom = androidx.compose.ui.util.lerp(fullCardZoom, fitCardZoom, fitProgress)
             val fullCenterY = ((topChromeReserve - bottomChromeReserve) * if (isAppMusic) 0.42f else 0.30f)
-            val cardOffsetY = lerp(fullCenterY, 0.dp, fitProgress)
+            val hudHiddenCenterProgress by animateFloatAsState(
+                targetValue = if (isHudHidden) 1f else 0f,
+                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                label = "hud_hidden_center_progress"
+            )
+            val cardOffsetY = lerp(
+                lerp(fullCenterY, 0.dp, hudHiddenCenterProgress),
+                0.dp,
+                fitProgress
+            )
 
             Box(
                 modifier = Modifier
@@ -732,42 +819,53 @@ fun BitChordShareScreen(
                             }
                         }
 
-                        Column(
-                            modifier = Modifier
-                                .widthIn(min = 310.dp, max = 420.dp)
-                                .fillMaxHeight()
-                                .verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.SpaceBetween,
-                            horizontalAlignment = Alignment.CenterHorizontally
+                        AnimatedVisibility(
+                            visible = !isHudHidden,
+                            enter = fadeIn(tween(220, easing = EaseInOut)),
+                            exit = fadeOut(tween(220, easing = EaseInOut))
                         ) {
-                            ShareScreenTopBar(
-                                isFitToScreen = effectiveStyleConfig.isFitToScreenPreview,
-                                onTogglePreviewScale = { togglePreviewScale() },
-                                onOpenSettings = { showSettingsDialog = true },
-                                onClose = { findActivity(context)?.finish() },
-                                onEdit = { showEditSheet = true },
-                                onRefresh = { handleRefreshClick() },
-                                compactTitle = true,
-                                modifier = Modifier.graphicsLayer {
-                                    val cEnt = chromeEntrance.value
-                                    alpha = chromeAlphaState.value * cEnt
-                                    translationY = -(1f - cEnt) * 14.dp.toPx()
-                                }
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .widthIn(min = 310.dp, max = 420.dp)
+                                    .fillMaxHeight()
+                                    .verticalScroll(rememberScrollState()),
+                                verticalArrangement = Arrangement.SpaceBetween,
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                ShareScreenTopBar(
+                                    isFitToScreen = effectiveStyleConfig.isFitToScreenPreview,
+                                    onTogglePreviewScale = { togglePreviewScale() },
+                                    onOpenSettings = { showSettingsDialog = true },
+                                    onClose = { findActivity(context)?.finish() },
+                                    onEdit = { showEditSheet = true },
+                                    onRefresh = { handleRefreshClick() },
+                                    compactTitle = true,
+                                    modifier = Modifier.graphicsLayer {
+                                        val cEnt = chromeEntrance.value
+                                        alpha = chromeAlphaState.value * cEnt
+                                        translationY = -(1f - cEnt) * 14.dp.toPx()
+                                    }
+                                )
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                                Spacer(modifier = Modifier.height(10.dp))
 
-                            NotificationStatusBanner(
-                                isAccessGranted = isAccessGranted,
-                                onEnableClick = {
-                                    MusicNotificationListenerService.openNotificationAccessSettings(context)
-                                },
-                                onRefreshClick = { handleRefreshClick() },
-                                modifier = Modifier.graphicsLayer {
-                                    val cEnt = chromeEntrance.value
-                                    alpha = chromeAlphaState.value * cEnt
+                                AnimatedVisibility(
+                                    visible = showNotificationBanner,
+                                    enter = fadeIn(tween(240)) + expandVertically(tween(260)),
+                                    exit = fadeOut(tween(320)) + shrinkVertically(tween(320))
+                                ) {
+                                    NotificationStatusBanner(
+                                        isAccessGranted = isAccessGranted,
+                                        onEnableClick = {
+                                            MusicNotificationListenerService.openNotificationAccessSettings(context)
+                                        },
+                                        onRefreshClick = { handleRefreshClick() },
+                                        modifier = Modifier.graphicsLayer {
+                                            val cEnt = chromeEntrance.value
+                                            alpha = chromeAlphaState.value * cEnt
+                                        }
+                                    )
                                 }
-                            )
 
                             Spacer(modifier = Modifier.height(12.dp))
 
@@ -923,6 +1021,7 @@ fun BitChordShareScreen(
                                     .graphicsLayer { alpha = chromeAlphaState.value }
                                     .testTag("bottom_share_actions_bar")
                             )
+                            }
                         }
                     }
                 } else {
@@ -931,37 +1030,54 @@ fun BitChordShareScreen(
                         modifier = Modifier.fillMaxSize(),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        ShareScreenTopBar(
-                            isFitToScreen = effectiveStyleConfig.isFitToScreenPreview,
-                            onTogglePreviewScale = { togglePreviewScale() },
-                            onOpenSettings = { showSettingsDialog = true },
-                            onClose = { findActivity(context)?.finish() },
-                            onEdit = { showEditSheet = true },
-                            onRefresh = { handleRefreshClick() },
-                            modifier = Modifier
-                                .widthIn(max = if (isPortraitTablet) 640.dp else 600.dp)
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                                .graphicsLayer {
-                                    val cEnt = chromeEntrance.value
-                                    alpha = chromeAlphaState.value * cEnt
-                                    translationY = -(1f - cEnt) * 14.dp.toPx()
-                                }
-                        )
+                        AnimatedVisibility(
+                            visible = !isHudHidden,
+                            enter = fadeIn(tween(220, easing = EaseInOut)),
+                            exit = fadeOut(tween(220, easing = EaseInOut))
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                ShareScreenTopBar(
+                                    isFitToScreen = effectiveStyleConfig.isFitToScreenPreview,
+                                    onTogglePreviewScale = { togglePreviewScale() },
+                                    onOpenSettings = { showSettingsDialog = true },
+                                    onClose = { findActivity(context)?.finish() },
+                                    onEdit = { showEditSheet = true },
+                                    onRefresh = { handleRefreshClick() },
+                                    modifier = Modifier
+                                        .widthIn(max = if (isPortraitTablet) 640.dp else 600.dp)
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        .graphicsLayer {
+                                            val cEnt = chromeEntrance.value
+                                            alpha = chromeAlphaState.value * cEnt
+                                            translationY = -(1f - cEnt) * 14.dp.toPx()
+                                        }
+                                )
 
-                        NotificationStatusBanner(
-                            isAccessGranted = isAccessGranted,
-                            onEnableClick = {
-                                MusicNotificationListenerService.openNotificationAccessSettings(context)
-                            },
-                            onRefreshClick = { handleRefreshClick() },
-                            modifier = Modifier
-                                .widthIn(max = if (isPortraitTablet) 560.dp else 600.dp)
-                                .padding(horizontal = 20.dp, vertical = 4.dp)
-                                .graphicsLayer {
-                                    alpha = chromeAlphaState.value * chromeEntrance.value
+                                AnimatedVisibility(
+                                    visible = showNotificationBanner,
+                                    enter = fadeIn(tween(240)) + expandVertically(tween(260)),
+                                    exit = fadeOut(tween(320)) + shrinkVertically(tween(320))
+                                ) {
+                                    NotificationStatusBanner(
+                                        isAccessGranted = isAccessGranted,
+                                        onEnableClick = {
+                                            MusicNotificationListenerService.openNotificationAccessSettings(context)
+                                        },
+                                        onRefreshClick = { handleRefreshClick() },
+                                        modifier = Modifier
+                                            .widthIn(max = if (isPortraitTablet) 560.dp else 600.dp)
+                                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                                            .graphicsLayer {
+                                                alpha = chromeAlphaState.value * chromeEntrance.value
+                                            }
+                                    )
                                 }
-                        )
+                            }
+                        }
 
                         Box(
                             modifier = Modifier
@@ -974,9 +1090,18 @@ fun BitChordShareScreen(
                             }
                         }
 
-                        // ANCHORED BOTTOM QUICK SLIDER PILL (BG Blur / Glass Blur / Size / Glass Opacity)
-                        // All tabs use Live Scrubbing Preview: surrounding chrome fades smoothly (200ms) while active slider stays locked in place
-                        QuickControlSliderPill(
+                        AnimatedVisibility(
+                            visible = !isHudHidden,
+                            enter = fadeIn(tween(220, easing = EaseInOut)),
+                            exit = fadeOut(tween(220, easing = EaseInOut))
+                        ) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                // ANCHORED BOTTOM QUICK SLIDER PILL (BG Blur / Glass Blur / Size / Glass Opacity)
+                                // All tabs use Live Scrubbing Preview: surrounding chrome fades smoothly (200ms) while active slider stays locked in place
+                                QuickControlSliderPill(
                             visibleTabs = visibleQuickTabs,
                             activeTab = quickControlTab,
                             onTabSelect = { quickControlTab = it },
@@ -1137,6 +1262,8 @@ fun BitChordShareScreen(
                                 }
                                 .testTag("bottom_share_actions_bar")
                         )
+                            }
+                        }
                     }
                 }
             }

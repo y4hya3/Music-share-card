@@ -61,11 +61,14 @@ object MediaNotificationRepository {
     private var paletteJob: Job? = null
     private var prefsSaveJob: Job? = null
     private var proactiveSessionRefreshJob: Job? = null
+    private var upcomingCanvasPrewarmJob: Job? = null
     @Volatile
     private var lastMediaRefreshMs: Long = 0L
     private var lastAutoSearchedTrackKey: String? = null
     private var lastAutoUpgradedLowResTrackKey: String? = null
     private var lastAutoCanvasTrackKey: String? = null
+    @Volatile
+    private var lastUpcomingCanvasSignature: String? = null
     private var userManuallySelectedCoverTrackKey: String? = null
     private var userManuallySelectedCanvasTrackKey: String? = null
     private var autoAppliedSavedCanvasTrackKey: String? = null
@@ -73,6 +76,25 @@ object MediaNotificationRepository {
 
     private const val PREFS_FAVORITES = "echosnap_favorites"
     private const val KEY_FAVORITE_KEYS = "favorite_track_keys"
+    private const val PREFS_SEQUENCE_PREDICTOR = "echosnap_next_track_predictor"
+    private const val KEY_SEQUENCE_MAP = "track_transitions_json"
+    private const val MAX_SEQUENCE_ENTRIES = 80
+
+    data class UpcomingTrackHint(
+        val title: String,
+        val artist: String,
+        val album: String = "",
+        val spotifyTrackId: String = "",
+        val packageName: String = "",
+        val sourceReason: String = "Queue"
+    )
+
+    private data class PrewarmedCanvasEntry(
+        val candidate: AnimatedCanvasCandidate,
+        val localUri: String,
+        val candidates: List<AnimatedCanvasCandidate>,
+        val statusMessage: String
+    )
 
     private val _currentTrack = MutableStateFlow(
         MediaTrackInfo(
@@ -158,6 +180,9 @@ object MediaNotificationRepository {
     private val _detectedMediaApps = MutableStateFlow<Map<String, String>>(emptyMap())
     val detectedMediaApps: StateFlow<Map<String, String>> = _detectedMediaApps.asStateFlow()
 
+    private val _canvasPrewarmStatus = MutableStateFlow<String?>(null)
+    val canvasPrewarmStatus: StateFlow<String?> = _canvasPrewarmStatus.asStateFlow()
+
     private val recentTrackHdArtCache = object : LinkedHashMap<String, Bitmap>(24, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 20
     }
@@ -168,6 +193,15 @@ object MediaNotificationRepository {
 
     private val savedCanvasThumbCache = object : LinkedHashMap<String, Bitmap>(12, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>?): Boolean = size > 8
+    }
+
+    private val prewarmedTrackCanvases = object : LinkedHashMap<String, PrewarmedCanvasEntry>(12, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PrewarmedCanvasEntry>?): Boolean = size > 10
+    }
+
+    private val sequencePredictorMap = object : LinkedHashMap<String, UpcomingTrackHint>(MAX_SEQUENCE_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, UpcomingTrackHint>?): Boolean =
+            size > MAX_SEQUENCE_ENTRIES
     }
 
     private var prewarmJob: Job? = null
@@ -193,6 +227,7 @@ object MediaNotificationRepository {
             .orEmpty()
             .toSet()
         SavedMediaLibrary.initialize(ctx)
+        loadSequencePredictorFromDisk(ctx)
         prewarmSavedMediaArtworkCache(ctx)
         checkNotificationAccess(ctx)
         if (_lastPlaybackStoppedElapsedMs.value == 0L && _currentTrack.value.isSample) {
@@ -326,6 +361,9 @@ object MediaNotificationRepository {
         }
 
         if (!isSameTrack) {
+            if (!current.isSample && !trackInfo.isSample) {
+                recordTrackTransition(current, trackInfo)
+            }
             canvasSearchJob?.cancel()
             applyCanvasJob?.cancel()
             onlineSearchJob?.cancel()
@@ -354,19 +392,68 @@ object MediaNotificationRepository {
             lastAutoCanvasTrackKey = null
             coverLoadJob?.cancel()
 
-            if (savedCanvasMatch != null) {
-                autoAppliedSavedCanvasTrackKey = newKey
-                _activeCanvasId.value = "saved_canvas_${savedCanvasMatch.id}"
-                _activeCanvasUrl.value = savedCanvasMatch.fileUri
-                _canvasSearchStatus.value = if (savedCanvasMatch.linkedAlbumName.isNotBlank()) {
-                    "Offline album canvas: ${savedCanvasMatch.linkedAlbumName}"
-                } else {
-                    "Saved offline canvas: ${savedCanvasMatch.name}"
+            val cfgNow = _styleConfig.value
+            val wantsAutoCanvas = !trackInfo.isSample && (
+                cfgNow.autoSearchAnimatedCanvas ||
+                    (cfgNow.liveWallpaperEnabled && cfgNow.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS)
+                )
+            val normKey = normalizedArtCacheKey(trackInfo.title, trackInfo.artist)
+            val prewarmed = if (wantsAutoCanvas) {
+                synchronized(prewarmedTrackCanvases) { prewarmedTrackCanvases[normKey] }?.takeIf { entry ->
+                    val path = Uri.parse(entry.localUri).path
+                    path != null && java.io.File(path).exists()
                 }
             } else {
-                autoAppliedSavedCanvasTrackKey = null
-                _activeCanvasId.value = "none"
-                _activeCanvasUrl.value = null
+                null
+            }
+            val diskCached = if (savedCanvasMatch == null && prewarmed == null && wantsAutoCanvas) {
+                appContext?.let { ctx ->
+                    CanvasVideoExporter.getCachedVideoFileForTrack(ctx, trackInfo.title, trackInfo.artist)
+                }
+            } else {
+                null
+            }
+
+            when {
+                savedCanvasMatch != null -> {
+                    autoAppliedSavedCanvasTrackKey = newKey
+                    _isSearchingCanvas.value = false
+                    _activeCanvasId.value = "saved_canvas_${savedCanvasMatch.id}"
+                    _activeCanvasUrl.value = savedCanvasMatch.fileUri
+                    _canvasSearchStatus.value = if (savedCanvasMatch.linkedAlbumName.isNotBlank()) {
+                        "Offline album canvas: ${savedCanvasMatch.linkedAlbumName}"
+                    } else {
+                        "Saved offline canvas: ${savedCanvasMatch.name}"
+                    }
+                }
+                prewarmed != null -> {
+                    autoAppliedSavedCanvasTrackKey = null
+                    lastAutoCanvasTrackKey = newKey
+                    _isSearchingCanvas.value = false
+                    _animatedCanvasCandidates.value = prewarmed.candidates
+                    _activeCanvasId.value = prewarmed.candidate.id
+                    _activeCanvasUrl.value = prewarmed.localUri
+                    _canvasSearchStatus.value = prewarmed.statusMessage
+                }
+                diskCached != null -> {
+                    val (cachedFile, sourceLabel) = diskCached
+                    autoAppliedSavedCanvasTrackKey = null
+                    lastAutoCanvasTrackKey = newKey
+                    _isSearchingCanvas.value = false
+                    _activeCanvasId.value = "disk_cache_${cachedFile.nameWithoutExtension}"
+                    _activeCanvasUrl.value = Uri.fromFile(cachedFile).toString()
+                    _canvasSearchStatus.value = "Instant disk cache ($sourceLabel)"
+                }
+                else -> {
+                    autoAppliedSavedCanvasTrackKey = null
+                    _activeCanvasId.value = "none"
+                    _activeCanvasUrl.value = null
+                    if (wantsAutoCanvas) {
+                        // Mark search active synchronously on frame 0 so Smooth Canvas-to-Canvas holds
+                        // the previous Canvas frame without a 1-frame artwork flash while searching.
+                        _isSearchingCanvas.value = true
+                    }
+                }
             }
         } else if (trackInfo.albumArt != null && !trackInfo.albumArt.isRecycled) {
             val prevOrig = _originalPlayerArt.value
@@ -503,6 +590,11 @@ object MediaNotificationRepository {
         ) {
             lastAutoCanvasTrackKey = newKey
             searchAnimatedCanvases(autoApplyBest = true)
+        }
+        if (!isSameTrack && !finalTrack.isSample && (cfgSnapshot.autoSearchAnimatedCanvas || needsWallpaperCanvas)) {
+            predictNextTrackFromHistory(finalTrack)?.let { predicted ->
+                prewarmUpcomingCanvases(listOf(predicted), fromPlayerQueue = false)
+            }
         }
     }
 
@@ -768,15 +860,57 @@ object MediaNotificationRepository {
         lastAutoCanvasTrackKey = null
 
         val key = trackKey(track)
+        val normKey = normalizedArtCacheKey(track.title, track.artist)
+        val cfg = _styleConfig.value
+        val needsWallpaperCanvas = cfg.liveWallpaperEnabled &&
+            cfg.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS
+        val wantsAutoCanvas = cfg.autoSearchAnimatedCanvas || needsWallpaperCanvas
         val savedMatch = SavedMediaLibrary.findMatchingSavedCanvasForTrack(
             title = track.title,
             album = track.album,
             artist = track.artist
         )
-        if (savedMatch != null) {
-            autoAppliedSavedCanvasTrackKey = key
-            _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
-            _activeCanvasUrl.value = savedMatch.fileUri
+        val prewarmed = if (savedMatch == null && wantsAutoCanvas) {
+            synchronized(prewarmedTrackCanvases) { prewarmedTrackCanvases[normKey] }?.takeIf { entry ->
+                val path = Uri.parse(entry.localUri).path
+                path != null && java.io.File(path).exists()
+            }
+        } else {
+            null
+        }
+        val diskCached = if (savedMatch == null && prewarmed == null && wantsAutoCanvas) {
+            appContext?.let { ctx ->
+                CanvasVideoExporter.getCachedVideoFileForTrack(ctx, track.title, track.artist)
+            }
+        } else {
+            null
+        }
+        when {
+            savedMatch != null -> {
+                autoAppliedSavedCanvasTrackKey = key
+                _isSearchingCanvas.value = false
+                _activeCanvasId.value = "saved_canvas_${savedMatch.id}"
+                _activeCanvasUrl.value = savedMatch.fileUri
+            }
+            prewarmed != null -> {
+                lastAutoCanvasTrackKey = key
+                _isSearchingCanvas.value = false
+                _animatedCanvasCandidates.value = prewarmed.candidates
+                _activeCanvasId.value = prewarmed.candidate.id
+                _activeCanvasUrl.value = prewarmed.localUri
+                _canvasSearchStatus.value = prewarmed.statusMessage
+            }
+            diskCached != null -> {
+                val (cachedFile, sourceLabel) = diskCached
+                lastAutoCanvasTrackKey = key
+                _isSearchingCanvas.value = false
+                _activeCanvasId.value = "disk_cache_${cachedFile.nameWithoutExtension}"
+                _activeCanvasUrl.value = Uri.fromFile(cachedFile).toString()
+                _canvasSearchStatus.value = "Instant disk cache ($sourceLabel)"
+            }
+            wantsAutoCanvas -> {
+                _isSearchingCanvas.value = true
+            }
         }
 
         _currentTrack.value = track
@@ -799,14 +933,17 @@ object MediaNotificationRepository {
             applySavedCoverForTrackAsync(track, savedCoverMatch, isAutoApply = true)
         }
 
-        val cfg = _styleConfig.value
-        val needsWallpaperCanvas = cfg.liveWallpaperEnabled &&
-            cfg.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS
-        if ((cfg.autoSearchAnimatedCanvas || needsWallpaperCanvas) &&
-            autoAppliedSavedCanvasTrackKey != key
+        if (wantsAutoCanvas &&
+            autoAppliedSavedCanvasTrackKey != key &&
+            lastAutoCanvasTrackKey != key
         ) {
             lastAutoCanvasTrackKey = key
             searchAnimatedCanvases(autoApplyBest = true)
+        }
+        if (wantsAutoCanvas) {
+            predictNextTrackFromHistory(track)?.let { predicted ->
+                prewarmUpcomingCanvases(listOf(predicted), fromPlayerQueue = false)
+            }
         }
     }
 
@@ -1083,6 +1220,243 @@ object MediaNotificationRepository {
                 }
             }
         }
+    }
+
+    fun predictNextTrackFromHistory(current: MediaTrackInfo = _currentTrack.value): UpcomingTrackHint? {
+        if (current.isSample) {
+            val list = sampleTracksList
+            if (list.size > 1) {
+                val idx = list.indexOfFirst { it.title == current.title && it.artist == current.artist }
+                if (idx >= 0) {
+                    val nextSample = list[(idx + 1) % list.size]
+                    return UpcomingTrackHint(
+                        title = nextSample.title,
+                        artist = nextSample.artist,
+                        album = nextSample.album,
+                        packageName = nextSample.packageName,
+                        sourceReason = "Sample Queue"
+                    )
+                }
+            }
+            return null
+        }
+        val key = normalizedArtCacheKey(current.title, current.artist)
+        if (key == "|") return null
+        return synchronized(sequencePredictorMap) { sequencePredictorMap[key] }
+    }
+
+    fun prewarmUpcomingCanvases(
+        hints: List<UpcomingTrackHint>,
+        fromPlayerQueue: Boolean = true
+    ) {
+        val ctx = appContext ?: return
+        val cfg = _styleConfig.value
+        val wantsAutoCanvas = cfg.autoSearchAnimatedCanvas ||
+            (cfg.liveWallpaperEnabled && cfg.liveWallpaperMode == LiveWallpaperMode.ANIMATED_CANVAS)
+        if (!wantsAutoCanvas) return
+
+        val cleaned = hints.mapNotNull { hint ->
+            val t = hint.title.trim()
+            if (t.isEmpty()) null else hint.copy(title = t, artist = hint.artist.trim())
+        }.take(2)
+        if (cleaned.isEmpty()) return
+
+        val sig = cleaned.joinToString("|") {
+            "${normalizedArtCacheKey(it.title, it.artist)}:${it.spotifyTrackId}"
+        }
+        if (sig == lastUpcomingCanvasSignature) return
+        if (!fromPlayerQueue && upcomingCanvasPrewarmJob?.isActive == true) {
+            // Do not interrupt an active player-queue prewarm with history fallback
+            return
+        }
+        lastUpcomingCanvasSignature = sig
+
+        upcomingCanvasPrewarmJob?.cancel()
+        upcomingCanvasPrewarmJob = repositoryScope.launch(Dispatchers.IO) {
+            for (hint in cleaned) {
+                val normKey = normalizedArtCacheKey(hint.title, hint.artist)
+                if (normKey == "|") continue
+
+                if (SavedMediaLibrary.findMatchingSavedCanvasForTrack(
+                        title = hint.title,
+                        album = hint.album,
+                        artist = hint.artist
+                    ) != null
+                ) {
+                    _canvasPrewarmStatus.value = "Next: ${hint.title} (Saved offline)"
+                    continue
+                }
+
+                val existingPrewarm = synchronized(prewarmedTrackCanvases) { prewarmedTrackCanvases[normKey] }
+                if (existingPrewarm != null) {
+                    val path = Uri.parse(existingPrewarm.localUri).path
+                    if (path != null && java.io.File(path).exists()) {
+                        _canvasPrewarmStatus.value = "Next ready: ${hint.title}"
+                        continue
+                    }
+                }
+
+                val diskExisting = CanvasVideoExporter.getCachedVideoFileForTrack(ctx, hint.title, hint.artist)
+                if (diskExisting != null) {
+                    val (cachedFile, sourceLabel) = diskExisting
+                    val synthetic = AnimatedCanvasCandidate(
+                        id = "disk_cache_${cachedFile.nameWithoutExtension}",
+                        title = hint.title,
+                        artist = hint.artist,
+                        videoUrl = Uri.fromFile(cachedFile).toString(),
+                        hdPosterUrl = null,
+                        source = sourceLabel,
+                        resolutionLabel = "Cached MP4",
+                        matchScore = 100,
+                        isLoopingVideo = true
+                    )
+                    synchronized(prewarmedTrackCanvases) {
+                        prewarmedTrackCanvases[normKey] = PrewarmedCanvasEntry(
+                            candidate = synthetic,
+                            localUri = Uri.fromFile(cachedFile).toString(),
+                            candidates = listOf(synthetic),
+                            statusMessage = "Pre-cached from disk ($sourceLabel)"
+                        )
+                    }
+                    _canvasPrewarmStatus.value = "Next ready: ${hint.title} (Disk Cache)"
+                    continue
+                }
+
+                val query = buildString {
+                    val cleanT = AnimatedCanvasSearchService.normalizeQueryText(hint.title)
+                        .ifBlank { hint.title }
+                    val cleanA = AnimatedCanvasSearchService.normalizeArtistText(hint.artist)
+                    append(cleanT)
+                    if (cleanA.isNotEmpty()) {
+                        append(' ').append(cleanA)
+                    }
+                }.trim()
+                if (query.isEmpty()) continue
+
+                val latestCfg = _styleConfig.value
+                val result = runCatching {
+                    AnimatedCanvasSearchService.searchCanvases(
+                        rawQuery = query,
+                        spotifyToken = latestCfg.spotifyAccessToken,
+                        spotifySpDcCookie = latestCfg.spotifySpDcCookie,
+                        spotifyTokenExpiryMs = latestCfg.spotifyTokenExpiryMs,
+                        spotifyTokenLastRefreshedMs = latestCfg.spotifyTokenLastRefreshedMs,
+                        spotifyRefreshToken = latestCfg.spotifyRefreshToken,
+                        spotifyClientId = latestCfg.spotifyClientId,
+                        targetTitle = hint.title,
+                        targetArtist = hint.artist,
+                        playerAppName = "",
+                        spotifyTrackId = hint.spotifyTrackId,
+                        maxResults = 4
+                    )
+                }.getOrNull() ?: continue
+
+                val loopingCandidates = result.candidates.filter {
+                    it.isLoopingVideo && !it.videoUrl.isNullOrBlank()
+                }.ifEmpty { result.candidates }
+
+                var cachedFile: java.io.File? = null
+                var chosenCandidate: AnimatedCanvasCandidate? = null
+                for (cand in loopingCandidates.take(2)) {
+                    val videoUrl = cand.videoUrl?.trim().orEmpty()
+                    if (videoUrl.isEmpty()) continue
+                    val file = CanvasVideoExporter.prefetchVideoToCache(ctx, videoUrl)
+                    if (file != null) {
+                        cachedFile = file
+                        chosenCandidate = cand
+                        break
+                    }
+                }
+                if (cachedFile != null && chosenCandidate != null) {
+                    CanvasVideoExporter.recordTrackCanvasCache(
+                        context = ctx,
+                        title = hint.title,
+                        artist = hint.artist,
+                        source = chosenCandidate.source,
+                        cachedFile = cachedFile
+                    )
+                    val localUri = Uri.fromFile(cachedFile).toString()
+                    synchronized(prewarmedTrackCanvases) {
+                        prewarmedTrackCanvases[normKey] = PrewarmedCanvasEntry(
+                            candidate = chosenCandidate,
+                            localUri = localUri,
+                            candidates = result.candidates,
+                            statusMessage = "Pre-cached ${chosenCandidate.source} canvas (${hint.sourceReason})"
+                        )
+                    }
+                    _canvasPrewarmStatus.value = "Next ready: ${hint.title} (${hint.sourceReason})"
+                }
+            }
+        }
+    }
+
+    private fun recordTrackTransition(prevTrack: MediaTrackInfo, nextTrack: MediaTrackInfo) {
+        val prevKey = normalizedArtCacheKey(prevTrack.title, prevTrack.artist)
+        val nextKey = normalizedArtCacheKey(nextTrack.title, nextTrack.artist)
+        if (prevKey == "|" || nextKey == "|" || prevKey == nextKey) return
+        val hint = UpcomingTrackHint(
+            title = nextTrack.title.trim(),
+            artist = nextTrack.artist.trim(),
+            album = nextTrack.album.trim(),
+            spotifyTrackId = nextTrack.spotifyTrackId,
+            packageName = nextTrack.packageName,
+            sourceReason = "Play History"
+        )
+        synchronized(sequencePredictorMap) {
+            sequencePredictorMap[prevKey] = hint
+        }
+        val ctx = appContext ?: return
+        repositoryScope.launch(Dispatchers.IO) {
+            saveSequencePredictorToDisk(ctx)
+        }
+    }
+
+    private fun loadSequencePredictorFromDisk(context: Context) {
+        val raw = context.applicationContext
+            .getSharedPreferences(PREFS_SEQUENCE_PREDICTOR, Context.MODE_PRIVATE)
+            .getString(KEY_SEQUENCE_MAP, null)
+            ?: return
+        val obj = runCatching { org.json.JSONObject(raw) }.getOrNull() ?: return
+        synchronized(sequencePredictorMap) {
+            sequencePredictorMap.clear()
+            obj.keys().forEach { k ->
+                val item = obj.optJSONObject(k) ?: return@forEach
+                val title = item.optString("title").trim()
+                if (title.isNotEmpty()) {
+                    sequencePredictorMap[k] = UpcomingTrackHint(
+                        title = title,
+                        artist = item.optString("artist").trim(),
+                        album = item.optString("album").trim(),
+                        spotifyTrackId = item.optString("spotifyTrackId").trim(),
+                        packageName = item.optString("packageName").trim(),
+                        sourceReason = "Play History"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun saveSequencePredictorToDisk(context: Context) {
+        val json = org.json.JSONObject()
+        synchronized(sequencePredictorMap) {
+            sequencePredictorMap.forEach { (k, v) ->
+                json.put(
+                    k,
+                    org.json.JSONObject().apply {
+                        put("title", v.title)
+                        put("artist", v.artist)
+                        put("album", v.album)
+                        put("spotifyTrackId", v.spotifyTrackId)
+                        put("packageName", v.packageName)
+                    }
+                )
+            }
+        }
+        context.applicationContext
+            .getSharedPreferences(PREFS_SEQUENCE_PREDICTOR, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_SEQUENCE_MAP, json.toString())
+            .apply()
     }
 
     fun triggerAutoCanvasForCurrentTrackIfNeeded(customQuery: String? = null) {
@@ -1534,6 +1908,17 @@ object MediaNotificationRepository {
             }
         } else if (cachedReadyUri != null || rawUrl.startsWith("file://") || rawUrl.startsWith("content://")) {
             val immediateUri = cachedReadyUri ?: rawUrl
+            if (ctx != null && immediateUri.startsWith("file://")) {
+                Uri.parse(immediateUri).path?.let { filePath ->
+                    CanvasVideoExporter.recordTrackCanvasCache(
+                        context = ctx,
+                        title = current.title,
+                        artist = current.artist,
+                        source = candidate.source,
+                        cachedFile = java.io.File(filePath)
+                    )
+                }
+            }
             if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
                 _activeCanvasUrl.value = immediateUri
                 _canvasSearchStatus.value = "Playing ${candidate.source} canvas"
@@ -1544,10 +1929,20 @@ object MediaNotificationRepository {
                 _activeCanvasUrl.value = rawUrl
                 _canvasSearchStatus.value = "Applying ${candidate.source} canvas..."
             }
-            val cachedUri = if (ctx != null) {
-                CanvasVideoExporter.resolveOrCacheVideoUri(ctx, rawUrl)
+            val cachedFile = if (ctx != null) {
+                CanvasVideoExporter.prefetchVideoToCache(ctx, rawUrl)
             } else {
                 null
+            }
+            val cachedUri = cachedFile?.let { Uri.fromFile(it).toString() }
+            if (ctx != null && cachedFile != null) {
+                CanvasVideoExporter.recordTrackCanvasCache(
+                    context = ctx,
+                    title = current.title,
+                    artist = current.artist,
+                    source = candidate.source,
+                    cachedFile = cachedFile
+                )
             }
             if (trackKey(_currentTrack.value) == applyTrackKey && _activeCanvasId.value == candidate.id) {
                 if (cachedUri != null) {

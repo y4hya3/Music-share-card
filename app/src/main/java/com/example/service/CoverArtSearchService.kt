@@ -294,7 +294,14 @@ object CoverArtSearchService {
                 }
                 if (code in 200..299) {
                     return conn.inputStream.use {
-                        BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = maxDimension)
+                        val raw = BitmapBlurUtils.decodeSampledFromStream(it, maxDimension = maxDimension)
+                        if (raw != null && !raw.isRecycled) {
+                            val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(raw)
+                            if (trimmed !== raw && !raw.isRecycled) raw.recycle()
+                            trimmed
+                        } else {
+                            null
+                        }
                     }
                 }
                 return null

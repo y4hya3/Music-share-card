@@ -64,6 +64,7 @@ object CardStylePreferences {
     private const val KEY_LIVE_WALLPAPER_DIM_ENABLED = "live_wallpaper_dim_enabled"
     private const val KEY_LIVE_WALLPAPER_DIM_AMOUNT = "live_wallpaper_dim_amount"
     private const val KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE = "live_wallpaper_power_save_pause_canvas"
+    private const val KEY_LIVE_WALLPAPER_SMOOTH_CANVAS = "live_wallpaper_smooth_canvas_to_canvas"
     private const val KEY_LIVE_WALLPAPER_SHOW_CARD = "live_wallpaper_show_card"
     private const val KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED = "live_wallpaper_idle_revert_enabled"
     private const val KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC = "live_wallpaper_idle_delay_sec"
@@ -179,6 +180,10 @@ object CardStylePreferences {
                 KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE,
                 defaults.liveWallpaperPowerSavePauseCanvas
             ),
+            liveWallpaperSmoothCanvasToCanvas = prefs.getBoolean(
+                KEY_LIVE_WALLPAPER_SMOOTH_CANVAS,
+                defaults.liveWallpaperSmoothCanvasToCanvas
+            ),
             liveWallpaperShowCard = prefs.getBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, defaults.liveWallpaperShowCard),
             liveWallpaperIdleRevertEnabled = prefs.getBoolean(
                 KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED,
@@ -256,6 +261,7 @@ object CardStylePreferences {
             .putBoolean(KEY_LIVE_WALLPAPER_DIM_ENABLED, config.liveWallpaperDimEnabled)
             .putFloat(KEY_LIVE_WALLPAPER_DIM_AMOUNT, config.liveWallpaperDimAmount.coerceIn(0f, 0.70f))
             .putBoolean(KEY_LIVE_WALLPAPER_POWER_SAVE_PAUSE, config.liveWallpaperPowerSavePauseCanvas)
+            .putBoolean(KEY_LIVE_WALLPAPER_SMOOTH_CANVAS, config.liveWallpaperSmoothCanvasToCanvas)
             .putBoolean(KEY_LIVE_WALLPAPER_SHOW_CARD, config.liveWallpaperShowCard)
             .putBoolean(KEY_LIVE_WALLPAPER_IDLE_REVERT_ENABLED, config.liveWallpaperIdleRevertEnabled)
             .putInt(KEY_LIVE_WALLPAPER_IDLE_DELAY_SEC, config.liveWallpaperIdleDelaySec.coerceIn(1, 86_400))

@@ -14,7 +14,9 @@ import com.example.model.CardPalette
 import com.example.model.CardStyleConfig
 import com.example.model.MediaTrackInfo
 import com.example.palette.PaletteColorExtractor
+import com.example.model.LiveWallpaperMode
 import com.example.repository.CardStylePreferences
+import com.example.repository.MediaNotificationRepository
 import com.example.repository.SavedMediaLibrary
 import com.example.service.AnimatedCanvasCandidate
 import com.example.service.AnimatedCanvasSearchService
@@ -24,7 +26,9 @@ import com.example.service.LyricsSearchService
 import com.example.util.AnimatedGifExporter
 import com.example.util.AudioBeatMonitor
 import com.example.util.BitmapBlurUtils
+import com.example.util.CanvasVideoExporter
 import com.example.util.CardShareManager
+import com.example.util.EchoSnapBackupStyle
 import com.example.util.WaveformExportSpec
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -388,7 +392,11 @@ class ExampleRobolectricTest {
         context,
         track,
         CardPalette.Default,
-        CardStyleConfig(useTransparentBackground = true, cardOpacity = 1.0f)
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = true,
+          cardOpacity = 1.0f
+        )
       )
     }
     val halfBmp = runBlocking {
@@ -396,7 +404,11 @@ class ExampleRobolectricTest {
         context,
         track,
         CardPalette.Default,
-        CardStyleConfig(useTransparentBackground = true, cardOpacity = 0.5f)
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = true,
+          cardOpacity = 0.5f
+        )
       )
     }
     val zeroBmp = runBlocking {
@@ -404,7 +416,11 @@ class ExampleRobolectricTest {
         context,
         track,
         CardPalette.Default,
-        CardStyleConfig(useTransparentBackground = true, cardOpacity = 0.0f)
+        CardStyleConfig(
+          cardLayoutType = CardLayoutType.SPOTIFY_INNER_CARD,
+          useTransparentBackground = true,
+          cardOpacity = 0.0f
+        )
       )
     }
 
@@ -2513,5 +2529,280 @@ class ExampleRobolectricTest {
     } finally {
       if (!art.isRecycled) art.recycle()
     }
+  }
+
+  private fun writeDummyValidMp4(file: File) {
+    file.parentFile?.mkdirs()
+    val bytes = ByteArray(8192)
+    bytes[4] = 'f'.code.toByte()
+    bytes[5] = 't'.code.toByte()
+    bytes[6] = 'y'.code.toByte()
+    bytes[7] = 'p'.code.toByte()
+    file.writeBytes(bytes)
+  }
+
+  @Test
+  fun `durable canvas disk cache indexes more than 8 tracks and resolves normalized replays`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val cacheDir = File(context.filesDir, "canvas_video_cache").apply {
+      deleteRecursively()
+      mkdirs()
+    }
+    context.getSharedPreferences("echosnap_canvas_disk_index", Context.MODE_PRIVATE)
+      .edit()
+      .clear()
+      .commit()
+
+    val createdFiles = mutableListOf<File>()
+    try {
+      for (i in 1..10) {
+        val f = File(cacheDir, "canvas_test_track_$i.mp4")
+        writeDummyValidMp4(f)
+        createdFiles.add(f)
+        CanvasVideoExporter.recordTrackCanvasCache(
+          context = context,
+          title = "Track $i",
+          artist = "Artist $i",
+          source = "Spotify",
+          cachedFile = f
+        )
+      }
+
+      val (count, sizeMb) = CanvasVideoExporter.getCachedVideoCountAndSizeMb(context)
+      assertTrue("Expected >= 10 durable cached canvas videos, was $count", count >= 10)
+      assertTrue("Expected positive cache size MB, was $sizeMb", sizeMb > 0f)
+
+      val lookup = CanvasVideoExporter.getCachedVideoFileForTrack(
+        context = context,
+        title = "01 - Track 9 (Official Audio).mp3",
+        artist = "Artist 9 - Topic"
+      )
+      assertNotNull("Expected normalized track title/artist to hit disk cache", lookup)
+      assertEquals(createdFiles[8].absolutePath, lookup!!.first.absolutePath)
+      assertEquals("Spotify", lookup.second)
+    } finally {
+      createdFiles.forEach { it.delete() }
+    }
+  }
+
+  @Test
+  fun `next song predictor learns track transitions and disk cache resolves instantly without searching`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    MediaNotificationRepository.ensureInitialized(context)
+    MediaNotificationRepository.updateStyleConfig(saveImmediately = true) {
+      CardStyleConfig(
+        liveWallpaperEnabled = true,
+        liveWallpaperMode = LiveWallpaperMode.ANIMATED_CANVAS,
+        liveWallpaperSmoothCanvasToCanvas = true,
+        autoSearchAnimatedCanvas = false,
+        autoSearchOnlineArt = false
+      )
+    }
+
+    val cacheDir = File(context.filesDir, "canvas_video_cache").apply { mkdirs() }
+    val song2Canvas = File(cacheDir, "canvas_song2_instant.mp4")
+    writeDummyValidMp4(song2Canvas)
+
+    try {
+      val song1 = MediaTrackInfo(
+        title = "Predictor Alpha",
+        artist = "Nova",
+        album = "One",
+        appName = "Spotify",
+        packageName = "com.spotify.music",
+        albumArt = null,
+        isPlaying = true,
+        isSample = false
+      )
+      val song2 = MediaTrackInfo(
+        title = "Predictor Beta",
+        artist = "Luna",
+        album = "Two",
+        appName = "Spotify",
+        packageName = "com.spotify.music",
+        albumArt = null,
+        isPlaying = true,
+        isSample = false
+      )
+      val song3 = MediaTrackInfo(
+        title = "Predictor Uncached Gamma",
+        artist = "Orion",
+        album = "Three",
+        appName = "Spotify",
+        packageName = "com.spotify.music",
+        albumArt = null,
+        isPlaying = true,
+        isSample = false
+      )
+
+      CanvasVideoExporter.recordTrackCanvasCache(
+        context = context,
+        title = song2.title,
+        artist = song2.artist,
+        source = "Spotify",
+        cachedFile = song2Canvas
+      )
+
+      // Play Song 1 -> Song 2 to train sequence predictor
+      MediaNotificationRepository.updateTrack(song1)
+      MediaNotificationRepository.updateTrack(song2)
+
+      // Return to Song 1 -> predictor predicts Song 2
+      MediaNotificationRepository.updateTrack(song1)
+      val predicted = MediaNotificationRepository.predictNextTrackFromHistory(song1)
+      assertNotNull("Expected sequence predictor to predict Song 2 after Song 1", predicted)
+      assertEquals("Predictor Beta", predicted!!.title)
+      assertEquals("Luna", predicted.artist)
+
+      // Switch to cached Song 2 -> resolves disk cache immediately without entering searching state
+      MediaNotificationRepository.updateTrack(song2)
+      assertEquals(
+        android.net.Uri.fromFile(song2Canvas).toString(),
+        MediaNotificationRepository.activeCanvasUrl.value
+      )
+      assertFalse(MediaNotificationRepository.isSearchingCanvas.value)
+
+      // Switch to uncached Song 3 -> marks searching synchronously on frame 0 so Smooth Canvas holds previous frame
+      MediaNotificationRepository.updateTrack(song3)
+      assertTrue(
+        "Uncached track in ANIMATED_CANVAS mode must mark isSearchingCanvas true synchronously",
+        MediaNotificationRepository.isSearchingCanvas.value
+      )
+      assertNull(MediaNotificationRepository.activeCanvasUrl.value)
+    } finally {
+      song2Canvas.delete()
+    }
+  }
+
+  @Test
+  fun `apple music card is default and smooth canvas setting persists and roundtrips in backup`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val defaultCfg = CardStyleConfig()
+    assertEquals("Apple Music Card", CardLayoutType.APP_MUSIC_CARD.label)
+    assertEquals(CardLayoutType.APP_MUSIC_CARD, defaultCfg.cardLayoutType)
+    assertTrue(defaultCfg.liveWallpaperSmoothCanvasToCanvas)
+
+    val modified = defaultCfg.copy(liveWallpaperSmoothCanvasToCanvas = false)
+    CardStylePreferences.save(context, modified)
+    val reloaded = CardStylePreferences.load(context)
+    assertFalse(reloaded.liveWallpaperSmoothCanvasToCanvas)
+
+    val backup = EchoSnapBackupStyle.fromConfig(modified)
+    assertFalse(backup.liveWallpaperSmoothCanvasToCanvas)
+    val applied = backup.applyTo(CardStyleConfig(liveWallpaperSmoothCanvasToCanvas = true))
+    assertFalse(applied.liveWallpaperSmoothCanvasToCanvas)
+
+    // Restore clean preference default
+    CardStylePreferences.save(context, defaultCfg)
+  }
+
+  @Test
+  @GraphicsMode(GraphicsMode.Mode.NATIVE)
+  fun `trimLetterboxBarsIfPresent preserves full dark cover without chopping edges`() {
+    val darkCover = Bitmap.createBitmap(240, 180, Bitmap.Config.ARGB_8888)
+    val c = Canvas(darkCover)
+    c.drawColor(AndroidColor.rgb(18, 18, 22))
+    val p = Paint().apply { color = AndroidColor.rgb(42, 34, 48) }
+    c.drawRect(30f, 20f, 210f, 160f, p)
+
+    val trimmed = BitmapBlurUtils.trimLetterboxBarsIfPresent(darkCover)
+    try {
+      assertSame("Genuine dark atmospheric cover must not be chopped", darkCover, trimmed)
+    } finally {
+      if (trimmed !== darkCover && !trimmed.isRecycled) trimmed.recycle()
+      if (!darkCover.isRecycled) darkCover.recycle()
+    }
+  }
+
+  @Test
+  fun `apple music 6-band fft and pcm analyzers separate sub-bass and high-frequency transients accurately`() {
+    val fftBass = ByteArray(256)
+    // Bin 1 (~94Hz at 48kHz/256) sub-bass kick
+    fftBass[2] = 120
+    fftBass[3] = 30
+    val bandsBass = AudioBeatMonitor.computeBands6FromFft(fftBass, samplingRateMilliHz = 48_000_000)
+    assertEquals(6, bandsBass.size)
+    assertTrue(
+      "Expected sub-bass bar 0 (${bandsBass[0]}) to exceed treble bar 5 (${bandsBass[5]})",
+      bandsBass[0] > bandsBass[5] * 3f && bandsBass[0] > 0.8f
+    )
+
+    val fftTreble = ByteArray(256)
+    // Bin 60 (~11.2kHz at 48kHz/256) hi-hat / snare sizzle
+    fftTreble[120] = 95
+    fftTreble[121] = 35
+    val bandsTreble = AudioBeatMonitor.computeBands6FromFft(fftTreble, samplingRateMilliHz = 48_000_000)
+    assertTrue(
+      "Expected treble bar 5 (${bandsTreble[5]}) to exceed sub-bass bar 0 (${bandsTreble[0]})",
+      bandsTreble[5] > bandsTreble[0] * 3f && bandsTreble[5] > 0.8f
+    )
+
+    // Smooth sustained low-frequency PCM sine wave vs high-frequency sharp transient PCM
+    val smoothLowPcm = ByteArray(256) { idx ->
+      val sample = (128.0 + 100.0 * kotlin.math.sin(2.0 * kotlin.math.PI * idx / 128.0))
+        .toInt()
+        .coerceIn(0, 255)
+      sample.toByte()
+    }
+    val (lowSmooth, hiSmooth) = AudioBeatMonitor.computePcmLowAndTransientEnergy(smoothLowPcm)
+    assertTrue("Expected smooth bass sine lowEnergy ($lowSmooth) > hiEnergy ($hiSmooth)", lowSmooth > hiSmooth * 2f)
+
+    val sharpTransientPcm = ByteArray(256) { idx ->
+      if (idx % 2 == 0) 245.toByte() else 12.toByte()
+    }
+    val (_, hiSharp) = AudioBeatMonitor.computePcmLowAndTransientEnergy(sharpTransientPcm)
+    assertTrue("Expected alternating sharp PCM transient hiEnergy ($hiSharp) > smooth hiEnergy ($hiSmooth)", hiSharp > hiSmooth * 4f)
+  }
+
+  @Test
+  fun `6-band beat envelope tracker snaps at 0ms on rising beats and computeBarLevels6 behaves accurately`() {
+    val tracker = AudioBeatMonitor.BeatEnvelopeTracker()
+    val t0 = 2_000_000_000L
+    val fftKick = ByteArray(256).apply {
+      this[2] = 118
+      this[3] = 28
+    }
+    tracker.ingestFft(fftKick, samplingRateMilliHz = 48_000_000, nowNanos = t0)
+    val snap0 = tracker.snapshot6At(t0)
+    assertNotNull(snap0)
+    assertEquals(6, snap0!!.size)
+    assertTrue("Expected 0ms snap on 6-band bar 0 (${snap0[0]})", snap0[0] >= 0.72f)
+    assertTrue("Expected 6-band bar 0 (${snap0[0]}) > bar 4 (${snap0[4]})", snap0[0] > snap0[4])
+
+    // Decays smoothly after 110ms with no new audio input
+    val snapDecay = tracker.snapshot6At(t0 + 110_000_000L)
+    assertNotNull(snapDecay)
+    assertTrue("Expected 6-band decay after 110ms (${snapDecay!![0]} < ${snap0[0]})", snapDecay[0] < snap0[0])
+
+    // PCM snare transient pushes upper bands (bars 4 & 5) instantaneously
+    val pcmSnare = ByteArray(256) { idx -> if (idx % 2 == 0) 240.toByte() else 16.toByte() }
+    tracker.ingestWaveform(pcmSnare, nowNanos = t0 + 130_000_000L)
+    val afterSnare = tracker.snapshot6At(t0 + 130_000_000L)!!
+    assertTrue("Expected crisp snare hit on bar 4 (${afterSnare[4]})", afterSnare[4] >= 0.75f)
+
+    // Passthrough when live 6-band signal is active
+    val liveCustom = floatArrayOf(0.91f, 0.77f, 0.54f, 0.68f, 0.42f, 0.85f)
+    val passthrough = AudioBeatMonitor.computeBarLevels6(
+      trackTitle = "Cheerios",
+      trackArtist = "Drake",
+      isPlaying = true,
+      timeSec = 1.0f,
+      liveAudioBands6 = liveCustom,
+      hasLiveSignal = true
+    )
+    assertEquals(6, passthrough.size)
+    assertEquals(0.91f, passthrough[0], 0.001f)
+    assertEquals(0.85f, passthrough[5], 0.001f)
+
+    // Paused deterministic profile
+    val paused = AudioBeatMonitor.computeBarLevels6("Cheerios", "Drake", isPlaying = false, timeSec = 0.0f)
+    assertEquals(floatArrayOf(0.24f, 0.40f, 0.30f, 0.46f, 0.32f, 0.22f).toList(), paused.toList())
+
+    // Playing track-groove fallback bounded in [0.16f .. 1.0f] and animates over time
+    val grooveA = AudioBeatMonitor.computeBarLevels6("Cheerios", "Drake", isPlaying = true, timeSec = 0.25f)
+    val grooveB = AudioBeatMonitor.computeBarLevels6("Cheerios", "Drake", isPlaying = true, timeSec = 0.70f)
+    assertTrue(grooveA.all { it in 0.16f..1.0f })
+    assertTrue(grooveB.all { it in 0.16f..1.0f })
+    assertFalse(grooveA.contentEquals(grooveB))
   }
 }

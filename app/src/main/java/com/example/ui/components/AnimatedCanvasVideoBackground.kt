@@ -131,7 +131,7 @@ fun AnimatedCanvasVideoBackground(
     }
     val fadeAlphaState = animateFloatAsState(
         targetValue = if (isVideoReady) 1f else 0f,
-        animationSpec = tween(durationMillis = 200),
+        animationSpec = tween(durationMillis = 300),
         label = "canvas_video_fade"
     )
     val isFullyOpaque = isVideoReady && fadeAlphaState.value >= 0.98f

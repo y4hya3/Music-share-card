@@ -1054,6 +1054,11 @@ private fun FloatingGlowArtwork(
         }
     }
 
+    val artAspect = remember(crispArtImageBitmap) {
+        crispArtImageBitmap?.let { it.width.toFloat() / it.height.coerceAtLeast(1).toFloat() } ?: 1f
+    }
+    val frameAspect = if (artAspect in 0.90f..1.12f) 1f else artAspect.coerceIn(0.72f, 1.48f)
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
@@ -1064,7 +1069,7 @@ private fun FloatingGlowArtwork(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f)
+                .aspectRatio(frameAspect)
                 .drawBehind {
                     if (glowIntensity > 0.01f) {
                         val cornerPx = artCornerDp.toPx()
